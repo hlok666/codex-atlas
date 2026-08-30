@@ -387,6 +387,23 @@ struct MobileSessionMessage {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct MobileSessionEventBatch {
+    session_id: String,
+    messages: Vec<MobileSessionMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileSyncResponse {
+    /// Wall-clock cursor used by clients to request only newer rollout events.
+    cursor_ms: i64,
+    snapshot: Option<MobileStatusSnapshot>,
+    sessions: Vec<SessionRecord>,
+    events: Vec<MobileSessionEventBatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexInfo {
     pub installed: bool,
     pub version: String,
@@ -1544,6 +1561,35 @@ fn bridge_json_response<T: Serialize>(
     response
 }
 
+fn query_parameter(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    url::form_urlencoded::parse(query.as_bytes())
+        .find_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
+}
+
+fn mobile_sync_response(since_ms: i64) -> MobileSyncResponse {
+    let sessions = list_sessions_sync().unwrap_or_default();
+    let mut events = Vec::new();
+    for session in &sessions {
+        let messages = mobile_session_messages(session)
+            .into_iter()
+            .filter(|message| message.timestamp_ms > since_ms)
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            events.push(MobileSessionEventBatch {
+                session_id: session.id.clone(),
+                messages,
+            });
+        }
+    }
+    MobileSyncResponse {
+        cursor_ms: now_ms(),
+        snapshot: mobile_status_snapshot(),
+        sessions,
+        events,
+    }
+}
+
 fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
     let config = mobile_bridge_config();
     let auth = request
@@ -1560,8 +1606,16 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         return;
     }
     let url = request.url().to_string();
+    let path = url.split_once('?').map(|(path, _)| path).unwrap_or(&url);
     let method = request.method().clone();
-    if method == Method::Get && url == "/v1/status" {
+    if method == Method::Get && path == "/v1/sync" {
+        let since_ms = query_parameter(&url, "since")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let _ = request.respond(bridge_json_response(&mobile_sync_response(since_ms), 200));
+        return;
+    }
+    if method == Method::Get && path == "/v1/status" {
         match mobile_status_snapshot() {
             Some(snapshot) => {
                 let _ = request.respond(bridge_json_response(&snapshot, 200));

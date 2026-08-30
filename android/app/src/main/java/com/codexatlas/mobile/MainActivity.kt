@@ -135,6 +135,12 @@ class MainActivity : ComponentActivity() {
 
 data class PairingDetails(val lanUrl: String, val tunnelUrl: String, val token: String, val preferTunnel: Boolean)
 
+private fun mergeAtlasMessages(current: List<AtlasMessage>, incoming: List<AtlasMessage>): List<AtlasMessage> =
+    (current + incoming)
+        .filter { it.id.isNotBlank() || it.text.isNotBlank() }
+        .distinctBy { it.id.ifBlank { "${it.timestampMs}:${it.role}:${it.text}" } }
+        .sortedBy { it.timestampMs }
+
 private sealed interface ConnectionState {
     data object Idle : ConnectionState
     data object Testing : ConnectionState
@@ -152,6 +158,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var snapshot by remember { mutableStateOf<AtlasSnapshot?>(null) }
     var sessions by remember { mutableStateOf<List<AtlasSession>>(emptyList()) }
     var selectedSessionId by remember(initialSessionId) { mutableStateOf(initialSessionId) }
+    var syncCursorMs by remember { mutableStateOf(0L) }
     var messages by remember { mutableStateOf<List<AtlasMessage>>(emptyList()) }
     var message by remember { mutableStateOf("") }
     var sessionQuery by remember { mutableStateOf("") }
@@ -235,6 +242,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             return
         }
         state = ConnectionState.Testing
+        syncCursorMs = 0L
         scope.launch {
             BridgePreferences.savePairing(context, details.lanUrl, details.tunnelUrl, details.token, details.preferTunnel)
             val result = withContext(Dispatchers.IO) {
@@ -250,9 +258,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             result.onSuccess { (freshSnapshot, available, preferredId) ->
                 snapshot = freshSnapshot
                 sessions = available
-                    val requestedId = initialSessionId.takeIf { requested -> available.any { it.id == requested } }
-                    selectedSessionId = requestedId ?: preferredId.ifBlank { available.firstOrNull()?.id.orEmpty() }
-                    val target = selectedSessionId
+                val requestedId = initialSessionId.takeIf { requested -> available.any { it.id == requested } }
+                selectedSessionId = requestedId ?: preferredId.ifBlank { available.firstOrNull()?.id.orEmpty() }
+                val target = selectedSessionId
                 messages = if (target.isBlank()) freshSnapshot.messages else withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).messagesAny(target, if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }.getOrDefault(freshSnapshot.messages) }
                 state = ConnectionState.Connected(freshSnapshot.title)
                 AtlasWidgetReceiver.requestRefresh(context)
@@ -279,23 +287,26 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 runCatching {
                     val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
                     val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
-                    val client = AtlasBridgeClient(primary, details.token)
-                    val latest = client.snapshotAny(fallback)
-                    val available = client.listSessionsAny(fallback)
-                    Pair(latest, available)
+                    AtlasBridgeClient(primary, details.token).syncAny(syncCursorMs, fallback)
                 }.getOrNull()
             }
             if (fresh != null) {
-                snapshot = fresh.first
-                sessions = fresh.second
-                val target = selectedSessionId.ifBlank { fresh.first.sessionId }
-                if (target.isNotBlank() && fresh.second.any { it.id == target }) {
-                    messages = withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).messagesAny(target, if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }.getOrDefault(fresh.first.messages) }
-                } else {
-                    selectedSessionId = fresh.second.firstOrNull()?.id.orEmpty()
-                    messages = fresh.first.messages
+                val previousCursor = syncCursorMs
+                snapshot = fresh.snapshot ?: snapshot
+                sessions = fresh.sessions
+                val target = selectedSessionId
+                    .takeIf { id -> id.isNotBlank() && fresh.sessions.any { it.id == id } }
+                    ?: fresh.snapshot?.sessionId?.takeIf { id -> fresh.sessions.any { it.id == id } }
+                    ?: fresh.sessions.firstOrNull()?.id.orEmpty()
+                if (target.isNotBlank() && selectedSessionId != target) selectedSessionId = target
+                val incoming = fresh.events.firstOrNull { it.sessionId == target }?.messages.orEmpty()
+                if (incoming.isNotEmpty()) {
+                    messages = mergeAtlasMessages(messages, incoming)
+                } else if (previousCursor == 0L && fresh.snapshot?.sessionId == target) {
+                    messages = mergeAtlasMessages(messages, fresh.snapshot.messages)
                 }
-                state = ConnectionState.Connected(fresh.first.title)
+                syncCursorMs = maxOf(syncCursorMs, fresh.cursorMs)
+                state = ConnectionState.Connected(fresh.snapshot?.title ?: snapshot?.title.orEmpty())
                 AtlasWidgetReceiver.requestRefresh(context)
             }
         }

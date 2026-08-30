@@ -34,6 +34,27 @@ class AtlasBridgeClient(
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
+    fun syncAny(sinceMs: Long, fallbackUrl: String = ""): AtlasSyncResponse {
+        val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(candidate + "/v1/sync?since=" + sinceMs)
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
+                    return json.decodeFromString(response.body?.string().orEmpty())
+                }
+            } catch (error: Throwable) {
+                failure = error
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
     fun listSessionsAny(fallbackUrl: String = ""): List<AtlasSession> {
         val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
         var failure: Throwable? = null

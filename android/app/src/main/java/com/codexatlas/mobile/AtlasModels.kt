@@ -51,3 +51,17 @@ data class AtlasSession(
     val statusSource: String = "",
     val lastEventAtMs: Long = 0,
 )
+
+@Serializable
+data class AtlasSyncEventBatch(
+    val sessionId: String = "",
+    val messages: List<AtlasMessage> = emptyList(),
+)
+
+@Serializable
+data class AtlasSyncResponse(
+    val cursorMs: Long = 0,
+    val snapshot: AtlasSnapshot? = null,
+    val sessions: List<AtlasSession> = emptyList(),
+    val events: List<AtlasSyncEventBatch> = emptyList(),
+)
