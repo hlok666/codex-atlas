@@ -181,9 +181,11 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var pendingVoiceMode by remember { mutableStateOf(false) }
     var voiceSnapshot by remember { mutableStateOf(VoiceInputSnapshot()) }
     var pendingVoiceSend by remember { mutableStateOf<List<String>>(emptyList()) }
+    var readRepliesAloud by remember { mutableStateOf(BridgePreferences.readRepliesAloud(context)) }
     val voiceController = remember(context, zh) {
         VoiceInputController(context, zh) { next -> voiceSnapshot = next }
     }
+    val speechOutput = remember(context, zh) { SpeechOutputController(context, zh) }
     DisposableEffect(voiceController) {
         voiceController.setContinuousTranscriptListener { text ->
             pendingVoiceSend = pendingVoiceSend + text
@@ -191,6 +193,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         onDispose {
             voiceController.setContinuousTranscriptListener(null)
             voiceController.destroy()
+            speechOutput.destroy()
         }
     }
     val audioPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -277,17 +280,17 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         }
     }
 
-    LaunchedEffect(state, pairing, selectedSessionId, voiceSnapshot.active) {
+    LaunchedEffect(state, pairing, selectedSessionId, voiceSnapshot.active, readRepliesAloud) {
         val details = MainActivity.parsePairing(pairing) ?: return@LaunchedEffect
         while (state is ConnectionState.Connected) {
-            // Paseo keeps the conversation stream live; poll faster while the
-            // hands-free voice mode is active and stay lighter when idle.
-            delay(if (voiceSnapshot.active) 1500 else 3000)
             val fresh = withContext(Dispatchers.IO) {
                 runCatching {
                     val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
                     val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
-                    AtlasBridgeClient(primary, details.token).syncAny(syncCursorMs, fallback)
+                    // The bridge holds this request until a new event arrives
+                    // (or the server-side timeout expires), so the UI updates
+                    // immediately without a fixed three-second polling tick.
+                    AtlasBridgeClient(primary, details.token).syncAny(syncCursorMs, fallback, 20_000)
                 }.getOrNull()
             }
             if (fresh != null) {
@@ -302,12 +305,20 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 val incoming = fresh.events.firstOrNull { it.sessionId == target }?.messages.orEmpty()
                 if (incoming.isNotEmpty()) {
                     messages = mergeAtlasMessages(messages, incoming)
+                    if (readRepliesAloud) {
+                        incoming.lastOrNull { it.role == "assistant" && it.text.isNotBlank() }
+                            ?.let { speechOutput.speak(it.text) }
+                    }
                 } else if (previousCursor == 0L && fresh.snapshot?.sessionId == target) {
                     messages = mergeAtlasMessages(messages, fresh.snapshot.messages)
                 }
                 syncCursorMs = maxOf(syncCursorMs, fresh.cursorMs)
                 state = ConnectionState.Connected(fresh.snapshot?.title ?: snapshot?.title.orEmpty())
                 AtlasWidgetReceiver.requestRefresh(context)
+            } else {
+                // Back off briefly on a disconnected LAN/tunnel before trying
+                // the next candidate. A healthy bridge uses long-polling above.
+                delay(1_500)
             }
         }
     }
@@ -599,6 +610,13 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                     audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 }
                             }, enabled = voiceController.isAvailable() && !messageBusy && !voiceSnapshot.active) { Text(if (zh) "连续语音" else "Voice mode") }
+                            TextButton(onClick = {
+                                readRepliesAloud = !readRepliesAloud
+                                BridgePreferences.saveReadRepliesAloud(context, readRepliesAloud)
+                                if (!readRepliesAloud) speechOutput.stop()
+                            }) {
+                                Text(if (readRepliesAloud) { if (zh) "朗读中" else "Read on" } else { if (zh) "朗读" else "Read" })
+                            }
                             OutlinedButton(onClick = { createVisible = !createVisible }) { Text(if (zh) "新建会话" else "New session") }
                         }
                         OutlinedButton(onClick = {

@@ -16,16 +16,16 @@ Android 与 Windows 不能各自猜测状态，也不能只靠独立页面缓存
 | 执行权威 | daemon 管理 agent 生命周期、PTY、工作区和语音服务 | Windows Tauri 负责 Codex 进程和 Bridge | P0 |
 | 工作区模型 | project -> workspace -> 多个 agent/terminal/browser | 目前按 Codex session 平铺 | P0 |
 | 多会话 | 同一工作区可并行多个 agent，支持创建、恢复、导入、取消、归档 | 已能扫描/创建/恢复/导入，缺工作区聚合和归档操作 | P0 |
-| 实时同步 | WebSocket `agent_update`、`agent_stream`、timeline 增量和重连恢复 | Android 每 1.5~3 秒 HTTP 轮询 | P0 |
+| 实时同步 | WebSocket `agent_update`、`agent_stream`、timeline 增量和重连恢复 | Android 使用带游标的 HTTP 长轮询，变化立即返回；仍缺 WebSocket/事件确认重放 | P0 |
 | 消息时间线 | 用户消息、assistant markdown、代码块、工具调用、计划、权限卡片、时间和复制 | Android 已支持角色、工具、代码围栏、标题、列表、时间和自动滚动 | P0 |
 | 工具输出 | 工具调用有独立状态、可展开详情、运行中动画、失败信息 | Bridge 已分类 `tool`，缺结构化参数和折叠详情 | P1 |
-| 权限审批 | `agent_permission_request/response`，显示完整命令、计划和 Allow/Deny 选项 | 目前只能看到文本并发送“继续” | P0 |
+| 权限审批 | `agent_permission_request/response`，显示完整命令、计划和 Allow/Deny 选项 | Android/Windows 已解析编号选项并支持 Allow/Deny/Continue/Cancel/Other 输入；仍缺独立结构化审批事件契约 | P0 |
 | 终端 | 创建/订阅/恢复 PTY，输入、resize、滚动、捕获、结束 | Windows 有匹配终端和输入注入，Android 没有终端页 | P1 |
 | 语音输入 | dictation 流式 PCM、partial/final、ACK、重连、取消、重试、插入/发送 | Android 已有状态机、partial、音量、重试、插入/发送和连续 voice mode；仍是系统 STT | P0 |
-| 语音模式 | 持续监听，VAD，STT + 隐藏 agent + TTS，语音打断和思考提示音 | 缺 daemon 语音服务和 TTS，当前连续模式可自动发送文本 | P1 |
+| 语音模式 | 持续监听，VAD，STT + 隐藏 agent + TTS，语音打断和思考提示音 | 连续模式可自动发送文本，Android 新增可选系统 TTS 朗读回复；仍缺 daemon 级 VAD/打断/思考提示音 | P1 |
 | 本地语音 | daemon 可下载并运行 Parakeet STT、Kokoro TTS ONNX 模型 | 未实现 | P1 |
 | 供应商语音 | STT/TTS 可分别使用 OpenAI endpoint，凭据留在执行环境 | 未实现 | P2 |
-| 断线与恢复 | transport 重连后重放未确认音频/事件，客户端保留游标 | HTTP 请求有 LAN/tunnel fallback，缺事件游标 | P0 |
+| 断线与恢复 | transport 重连后重放未确认音频/事件，客户端保留游标 | HTTP 长轮询有 LAN/tunnel fallback，客户端保留消息游标并退避重试；仍缺确认/重放窗口 | P0 |
 | 配对与安全 | relay 或直连，二维码包含密钥，端到端加密，密码和 Host allowlist | Bridge Bearer token + LAN/JD/Cloudflare 通道 | P0 |
 | 供应商/模型 | provider catalog、model/mode/thinking/feature 设置和快照 | Codex 默认模型/权限在桌面管理，Android 只读当前模型 | P1 |
 | Skills | 全局/项目 skills，详情、启停、更新、批量操作 | Windows 已有详情、更新、启停、删除 | P1 |
@@ -62,4 +62,3 @@ Android 与 Windows 不能各自猜测状态，也不能只靠独立页面缓存
 - 不复制 Paseo 的 UI、字体、颜色或品牌；Atlas 保持白色、简洁、圆润的视觉契约。
 - 不把 Android 做成只读面板；所有会话操作必须经过 Windows daemon/Bridge 授权。
 - 不把语音密钥放到 Android；语音 provider 和 Codex 凭据应留在执行端。
-

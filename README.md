@@ -22,6 +22,7 @@ Windows-first Codex session control plane built as a native Tauri desktop app.
 - Cross-platform window controls: minimize the main window and show/hide an always-on-top Atlas Mini window through the Tauri shell.
 - Native process-tree discovery for Codex sessions started outside Atlas, including `PowerShell -> node.exe -> codex.exe` chains.
 - Runtime state fusion from the Codex process, thread writer lock, rollout events, and optional official Codex hooks.
+- Android companion voice controls include continuous dictation and optional system TTS playback for new assistant replies.
 - White CRT mini-computer icon source at `public/codex-atlas-icon.svg`, shared by the browser, Windows `.ico`, and macOS `.icns` packaging.
 
 ## Real tool contracts verified from public source
@@ -90,12 +91,15 @@ bridge exposes `GET /v1/status`, `GET /v1/sessions`,
 `GET /v1/sessions/{id}/messages`, `POST /v1/sessions`,
 `POST /v1/sessions/{id}/message`, `POST /v1/sessions/{id}/activate`,
 `POST /v1/sessions/{id}/input`, and `POST /v1/paseo/import-all`. For live
-clients, `GET /v1/sync?since=<cursorMs>` returns the current snapshot, session
-records, and only rollout messages newer than the supplied cursor. Messages
-are read from the same Codex rollout JSONL used by the desktop monitor, so
-desktop and Android clients share the same conversation history without
-reloading the complete timeline on every poll. Keep the token private and
-allow port `15730` through the Windows firewall only on a trusted network.
+clients, `GET /v1/sync?since=<cursorMs>&wait=<milliseconds>` returns the current
+snapshot, session records, and only rollout messages newer than the supplied
+cursor. A positive `wait` value enables server-side long polling (capped at 25
+seconds), so Android receives a state or message change immediately instead of
+using a fixed polling tick. Messages are read from the same Codex rollout JSONL
+used by the desktop monitor, so desktop and Android clients share the same
+conversation history without reloading the complete timeline on every request.
+Keep the token private and allow port `15730` through the Windows firewall only
+on a trusted network.
 
 ## 项目与更新
 

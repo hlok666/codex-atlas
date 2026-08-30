@@ -9,6 +9,7 @@ object BridgePreferences {
     fun sessionId(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("sessionId", "") ?: ""
     fun tunnelUrl(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("tunnelUrl", "") ?: ""
     fun preferTunnel(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("preferTunnel", false)
+    fun readRepliesAloud(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("readRepliesAloud", false)
     fun save(context: Context, url: String, token: String, sessionId: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("url", url.trim())
@@ -16,6 +17,10 @@ object BridgePreferences {
             .putString("sessionId", sessionId.trim())
             .apply()
         AtlasWidgetReceiver.requestRefresh(context)
+    }
+
+    fun saveReadRepliesAloud(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("readRepliesAloud", enabled).apply()
     }
     fun savePairing(context: Context, lanUrl: String, tunnelUrl: String, token: String, preferTunnel: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()

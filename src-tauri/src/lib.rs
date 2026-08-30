@@ -6,7 +6,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::Client;
@@ -1590,6 +1590,32 @@ fn mobile_sync_response(since_ms: i64) -> MobileSyncResponse {
     }
 }
 
+fn mobile_sync_has_changes(since_ms: i64) -> bool {
+    let Ok(sessions) = list_sessions_sync() else {
+        return false;
+    };
+    sessions.iter().any(|session| {
+        session.updated_at_ms > since_ms
+            || session.last_event_at_ms > since_ms
+            || mobile_session_messages(session)
+                .iter()
+                .any(|message| message.timestamp_ms > since_ms)
+    })
+}
+
+fn wait_for_mobile_sync(since_ms: i64, wait_ms: u64) {
+    if since_ms <= 0 || wait_ms == 0 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(wait_ms.min(25_000));
+    while Instant::now() < deadline {
+        if mobile_sync_has_changes(since_ms) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
     let config = mobile_bridge_config();
     let auth = request
@@ -1612,6 +1638,10 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         let since_ms = query_parameter(&url, "since")
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(0);
+        let wait_ms = query_parameter(&url, "wait")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        wait_for_mobile_sync(since_ms, wait_ms);
         let _ = request.respond(bridge_json_response(&mobile_sync_response(since_ms), 200));
         return;
     }
@@ -1759,7 +1789,10 @@ fn spawn_mobile_bridge() {
             return;
         };
         for request in server.incoming_requests() {
-            handle_mobile_bridge_request(request);
+            // Long-poll requests can wait for several seconds. Handle each
+            // request independently so a waiting mobile client cannot block
+            // status, command, or pairing requests from other clients.
+            thread::spawn(move || handle_mobile_bridge_request(request));
         }
     });
 }

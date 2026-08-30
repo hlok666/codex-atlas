@@ -5,12 +5,18 @@ import kotlinx.serialization.encodeToString
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
 
 class AtlasBridgeClient(
     private val baseUrl: String,
     private val token: String,
 ) {
-    private val http = OkHttpClient()
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
     private val json = Json { ignoreUnknownKeys = true }
 
     fun snapshot(): AtlasSnapshot {
@@ -34,13 +40,13 @@ class AtlasBridgeClient(
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
-    fun syncAny(sinceMs: Long, fallbackUrl: String = ""): AtlasSyncResponse {
+    fun syncAny(sinceMs: Long, fallbackUrl: String = "", waitMs: Long = 0): AtlasSyncResponse {
         val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
                 val request = Request.Builder()
-                    .url(candidate + "/v1/sync?since=" + sinceMs)
+                    .url(candidate + "/v1/sync?since=" + sinceMs + if (waitMs > 0) "&wait=" + waitMs else "")
                     .header("Authorization", "Bearer $token")
                     .get()
                     .build()
