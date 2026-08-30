@@ -53,6 +53,7 @@ jobs:
     needs: [desktop, android]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -61,4 +62,3 @@ jobs:
           generate_release_notes: true
           body_path: RELEASE_NOTES.md
           files: release-assets/**/*
-
