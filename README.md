@@ -22,7 +22,7 @@ Windows-first Codex session control plane built as a native Tauri desktop app.
 - Cross-platform window controls: minimize the main window and show/hide an always-on-top Atlas Mini window through the Tauri shell.
 - Native process-tree discovery for Codex sessions started outside Atlas, including `PowerShell -> node.exe -> codex.exe` chains.
 - Runtime state fusion from the Codex process, thread writer lock, rollout events, and optional official Codex hooks.
-- Minimal line icon source at `public/codex-atlas-icon.svg` for browser favicon, Windows `.ico`, and macOS `.icns` packaging.
+- White CRT mini-computer icon source at `public/codex-atlas-icon.svg`, shared by the browser, Windows `.ico`, and macOS `.icns` packaging.
 
 ## Real tool contracts verified from public source
 
@@ -35,6 +35,17 @@ paseo import --provider codex <provider-session-id> --cwd <workspace>
 ```
 
 The Atlas UI uses `paseo_import_agent` and `paseo_import_all_codex_sessions` IPC names so the Tauri shell can call Paseo's daemon/client implementation without coupling the renderer to shell commands.
+
+### Paseo capability boundary
+
+Atlas currently reuses the parts of Paseo that are useful for a companion
+control plane: Codex session discovery/import, recent-session repair, a shared
+conversation timeline over the authenticated bridge, session creation, text and
+voice input, approval choices, and desktop/mobile actions. It does not claim to
+be a full Paseo replacement yet. Paseo's daemon-owned PTY execution,
+long-lived WebSocket reconnection, local speech/TTS/VAD pipeline, and rich
+structured tool-rendering still need dedicated implementation before feature
+parity can be claimed.
 
 ## Development
 

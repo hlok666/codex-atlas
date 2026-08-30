@@ -8,6 +8,15 @@ src-tauri/target/
 src-tauri/target-live/
 src-tauri/target-final/
 
+# Extra platform variants emitted by `tauri icon`; the packaged shell only
+# references the five assets listed in src-tauri/tauri.conf.json.
+src-tauri/icons/64x64.png
+src-tauri/icons/icon.png
+src-tauri/icons/StoreLogo.png
+src-tauri/icons/Square*Logo.png
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
 android/.gradle/
 android/app/build/
 android/local.properties
@@ -15,4 +24,3 @@ android/local.properties
 *.log
 *.pdb
 *.dSYM/
-

@@ -1,8 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
-  <title>Codex Atlas</title>
-  <rect width="512" height="512" rx="128" fill="#171A17"/>
-  <path d="M154 176H358" stroke="#EEF2EE" stroke-width="28" stroke-linecap="round"/>
-  <path d="M154 256H286" stroke="#EEF2EE" stroke-width="28" stroke-linecap="round"/>
-  <path d="M154 336H238" stroke="#6DDE55" stroke-width="28" stroke-linecap="round"/>
-  <circle cx="350" cy="336" r="22" fill="#6DDE55"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 108 108" fill="none">
+  <title>Codex Atlas CRT</title>
+  <rect x="18" y="12" width="72" height="84" rx="6" fill="#F5F7F3"/>
+  <rect x="24" y="23" width="63" height="52" rx="3" fill="#243025"/>
+  <rect x="28" y="28" width="52" height="42" rx="2" fill="#BFE7B8"/>
+  <rect x="31" y="34" width="7" height="7" fill="#5DBB68"/>
+  <rect x="44" y="34" width="33" height="3" fill="#5DBB68"/>
+  <rect x="31" y="47" width="41" height="3" fill="#7EBB83"/>
+  <rect x="31" y="57" width="32" height="3" fill="#7EBB83"/>
+  <rect x="31" y="82" width="10" height="5" fill="#243025"/>
+  <rect x="49" y="82" width="10" height="5" fill="#243025"/>
+  <rect x="67" y="82" width="10" height="5" fill="#243025"/>
 </svg>
