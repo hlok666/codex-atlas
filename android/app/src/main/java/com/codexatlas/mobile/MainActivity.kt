@@ -130,7 +130,16 @@ class MainActivity : ComponentActivity() {
 
         fun parsePairing(raw: String): PairingDetails? {
             val cleaned = raw.trim().removePrefix("\uFEFF").trim()
-            val uri = runCatching { Uri.parse(cleaned) }.getOrNull() ?: return null
+            // Desktop builds before 0.1.4 emitted `connect&lan=...` without
+            // the query marker. Accept those links so users do not need to
+            // regenerate a pairing code after updating the app.
+            val legacyPrefix = "codex-atlas://connect&"
+            val normalized = if (cleaned.startsWith(legacyPrefix, ignoreCase = true)) {
+                "codex-atlas://connect?${cleaned.substring(legacyPrefix.length)}"
+            } else {
+                cleaned
+            }
+            val uri = runCatching { Uri.parse(normalized) }.getOrNull() ?: return null
             if (!uri.scheme.equals("codex-atlas", ignoreCase = true) || !uri.host.equals("connect", ignoreCase = true)) return null
             val lan = (uri.getQueryParameter("lan") ?: uri.getQueryParameter("url"))?.trim().orEmpty()
             val tunnel = uri.getQueryParameter("tunnel")?.trim().orEmpty()
@@ -144,6 +153,27 @@ class MainActivity : ComponentActivity() {
 }
 
 data class PairingDetails(val lanUrl: String, val tunnelUrl: String, val token: String, val preferTunnel: Boolean)
+
+private enum class ConnectionRoute(val key: String) {
+    Auto("auto"),
+    Lan("lan"),
+    Server("server");
+
+    companion object {
+        fun fromKey(value: String): ConnectionRoute = entries.firstOrNull { it.key == value } ?: Auto
+    }
+}
+
+private fun primaryBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
+    ConnectionRoute.Auto -> if (details.preferTunnel) details.tunnelUrl else details.lanUrl
+    ConnectionRoute.Lan -> details.lanUrl
+    ConnectionRoute.Server -> details.tunnelUrl
+}
+
+private fun fallbackBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
+    ConnectionRoute.Auto -> if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+    ConnectionRoute.Lan, ConnectionRoute.Server -> ""
+}
 
 private fun mergeAtlasMessages(current: List<AtlasMessage>, incoming: List<AtlasMessage>): List<AtlasMessage> =
     (current + incoming)
@@ -187,6 +217,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     val messageScrollState = rememberScrollState()
     var scannerVisible by remember { mutableStateOf(false) }
     var permissionDenied by remember { mutableStateOf(false) }
+    var connectionRoute by remember { mutableStateOf(ConnectionRoute.fromKey(BridgePreferences.connectionRoute(context))) }
     var audioPermissionDenied by remember { mutableStateOf(false) }
     var pendingVoiceMode by remember { mutableStateOf(false) }
     var voiceSnapshot by remember { mutableStateOf(VoiceInputSnapshot()) }
@@ -258,10 +289,12 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         syncCursorMs = 0L
         scope.launch {
             BridgePreferences.savePairing(context, details.lanUrl, details.tunnelUrl, details.token, details.preferTunnel)
+            BridgePreferences.saveConnectionRoute(context, connectionRoute.key)
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
-                    val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    if (primary.isBlank()) error(if (zh) "没有可用的服务器通道地址" else "No server route is available")
                     val client = AtlasBridgeClient(primary, details.token)
                     val fresh = client.snapshotAny(fallback)
                     val available = client.listSessionsAny(fallback)
@@ -274,7 +307,10 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 val requestedId = initialSessionId.takeIf { requested -> available.any { it.id == requested } }
                 selectedSessionId = requestedId ?: preferredId.ifBlank { available.firstOrNull()?.id.orEmpty() }
                 val target = selectedSessionId
-                messages = if (target.isBlank()) freshSnapshot.messages else withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).messagesAny(target, if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }.getOrDefault(freshSnapshot.messages) }
+                messages = if (target.isBlank()) freshSnapshot.messages else withContext(Dispatchers.IO) {
+                    val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
+                    runCatching { AtlasBridgeClient(primary, details.token).messagesAny(target, fallback) }.getOrDefault(freshSnapshot.messages)
+                }
                 state = ConnectionState.Connected(freshSnapshot.title)
                 AtlasWidgetReceiver.requestRefresh(context)
             }.onFailure { error ->
@@ -283,20 +319,21 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         }
     }
 
-    LaunchedEffect(pairing) {
+    LaunchedEffect(pairing, connectionRoute) {
         if (MainActivity.parsePairing(pairing) != null) {
             delay(250)
             connect(pairing)
         }
     }
 
-    LaunchedEffect(state, pairing, selectedSessionId, voiceSnapshot.active, readRepliesAloud) {
+    LaunchedEffect(state, pairing, selectedSessionId, voiceSnapshot.active, readRepliesAloud, connectionRoute) {
         val details = MainActivity.parsePairing(pairing) ?: return@LaunchedEffect
         while (state is ConnectionState.Connected) {
             val fresh = withContext(Dispatchers.IO) {
                 runCatching {
-                    val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
-                    val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    if (primary.isBlank()) error("No server route is available")
                     // The bridge holds this request until a new event arrives
                     // (or the server-side timeout expires), so the UI updates
                     // immediately without a fixed three-second polling tick.
@@ -350,14 +387,15 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             messageBusy = true
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
-                    val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    if (primary.isBlank()) error("No server route is available")
                     AtlasBridgeClient(primary, details.token).sendMessageAny(conversationId, text, fallback)
                 }
             }
             result.onSuccess {
-                val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
-                val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+                val primary = primaryBridgeUrl(details, connectionRoute)
+                val fallback = fallbackBridgeUrl(details, connectionRoute)
                 messages = withContext(Dispatchers.IO) {
                     runCatching { AtlasBridgeClient(primary, details.token).messagesAny(conversationId, fallback) }
                         .getOrDefault(messages)
@@ -439,6 +477,29 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     )
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        val pairingDetails = MainActivity.parsePairing(pairing)
+                        ConnectionRoute.entries.forEach { route ->
+                            val serverAvailable = pairingDetails?.tunnelUrl?.isNotBlank() == true
+                            val enabled = route != ConnectionRoute.Server || serverAvailable
+                            val label = when (route) {
+                                ConnectionRoute.Auto -> if (zh) "自动" else "Auto"
+                                ConnectionRoute.Lan -> if (zh) "局域网" else "LAN"
+                                ConnectionRoute.Server -> if (zh) "服务器" else "Server"
+                            }
+                            if (route == connectionRoute) {
+                                Button(onClick = {
+                                    connectionRoute = route
+                                    BridgePreferences.saveConnectionRoute(context, route.key)
+                                }, enabled = enabled) { Text(label) }
+                            } else {
+                                OutlinedButton(onClick = {
+                                    connectionRoute = route
+                                    BridgePreferences.saveConnectionRoute(context, route.key)
+                                }, enabled = enabled) { Text(label) }
+                            }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(onClick = {
                             if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scannerVisible = true
                             else permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -471,7 +532,8 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 LaunchedEffect(conversationId) {
                     if (conversationId.isBlank()) return@LaunchedEffect
                     messages = withContext(Dispatchers.IO) {
-                        runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).messagesAny(conversationId, if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }
+                        val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
+                        runCatching { AtlasBridgeClient(primary, details.token).messagesAny(conversationId, fallback) }
                             .getOrDefault(emptyList())
                     }
                 }
@@ -537,8 +599,8 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                     scope.launch {
                                         val result = withContext(Dispatchers.IO) {
                                             runCatching {
-                                                val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
-                                                val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+                                                val primary = primaryBridgeUrl(details, connectionRoute)
+                                                val fallback = fallbackBridgeUrl(details, connectionRoute)
                                                 AtlasBridgeClient(primary, details.token).inputAny(conversationId, choice, fallback)
                                             }
                                         }
@@ -563,15 +625,15 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             scope.launch {
                                 val result = withContext(Dispatchers.IO) {
                                     runCatching {
-                                        val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
-                                        val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+                                        val primary = primaryBridgeUrl(details, connectionRoute)
+                                        val fallback = fallbackBridgeUrl(details, connectionRoute)
                                         AtlasBridgeClient(primary, details.token).sendMessageAny(conversationId, normalized, fallback)
                                     }
                                 }
                                 result.onSuccess {
                                     message = ""
-                                    val primary = if (details.preferTunnel) details.tunnelUrl else details.lanUrl
-                                    val fallback = if (details.preferTunnel) details.lanUrl else details.tunnelUrl
+                                    val primary = primaryBridgeUrl(details, connectionRoute)
+                                    val fallback = fallbackBridgeUrl(details, connectionRoute)
                                     messages = withContext(Dispatchers.IO) {
                                         runCatching { AtlasBridgeClient(primary, details.token).messagesAny(conversationId, fallback) }
                                             .getOrDefault(messages)
@@ -643,7 +705,10 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             if (paseoBusy) return@OutlinedButton
                             paseoBusy = true
                             scope.launch {
-                                val result = withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).importAllPaseoAny(if (details.preferTunnel) details.lanUrl else details.tunnelUrl) } }
+                                val result = withContext(Dispatchers.IO) {
+                                    val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
+                                    runCatching { AtlasBridgeClient(primary, details.token).importAllPaseoAny(fallback) }
+                                }
                                 result.onSuccess { Toast.makeText(context, if (zh) "已同步到 Paseo" else "Imported into Paseo", Toast.LENGTH_SHORT).show() }.onFailure { error -> Toast.makeText(context, error.message ?: if (zh) "Paseo 同步失败" else "Paseo import failed", Toast.LENGTH_LONG).show() }
                                 paseoBusy = false
                             }
@@ -658,14 +723,23 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                 if (createCwd.isBlank() || createBusy) return@Button
                                 createBusy = true
                                 scope.launch {
-                                    val result = withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).createSessionAny(createCwd.trim(), createPrompt.trim(), snapshot!!.model, "Workspace write", if (details.preferTunnel) details.lanUrl else details.tunnelUrl) } }
+                                    val result = withContext(Dispatchers.IO) {
+                                        val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
+                                        runCatching { AtlasBridgeClient(primary, details.token).createSessionAny(createCwd.trim(), createPrompt.trim(), snapshot!!.model, "Workspace write", fallback) }
+                                    }
                                     result.onSuccess {
                                         createVisible = false
                                         createPrompt = ""
-                                        val fresh = withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).listSessionsAny(if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }.getOrDefault(sessions) }
+                                        val fresh = withContext(Dispatchers.IO) {
+                                            val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
+                                            runCatching { AtlasBridgeClient(primary, details.token).listSessionsAny(fallback) }.getOrDefault(sessions)
+                                        }
                                         sessions = fresh
                                         selectedSessionId = fresh.firstOrNull()?.id ?: selectedSessionId
-                                        snapshot = withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).snapshotAny(if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }.getOrNull() } ?: snapshot
+                                        snapshot = withContext(Dispatchers.IO) {
+                                            val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
+                                            runCatching { AtlasBridgeClient(primary, details.token).snapshotAny(fallback) }.getOrNull()
+                                        } ?: snapshot
                                         AtlasWidgetReceiver.requestRefresh(context)
                                     }.onFailure { error -> state = ConnectionState.Failed(error.message ?: if (zh) "新会话创建失败" else "Could not create session") }
                                     createBusy = false

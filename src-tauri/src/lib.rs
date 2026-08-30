@@ -705,24 +705,9 @@ fn resolved_server_host(settings: &ServerTunnelSettings) -> String {
 
 fn server_public_url(settings: &ServerTunnelSettings) -> String {
     if !settings.tunnel_url.trim().is_empty() {
-        if let Ok(parsed) = Url::parse(settings.tunnel_url.trim()) {
-            let configured_host = parsed.host_str().unwrap_or_default();
-            let server_host = resolved_server_host(settings);
-            // A URL pointing back to this server is direct SSH reverse
-            // forwarding, even when an old config contains a path suffix.
-            // The bridge is exposed on its own port; preserving `/codex-atlas`
-            // would make the pairing URL hit an unrelated web route.
-            if configured_host.eq_ignore_ascii_case(&server_host)
-                || configured_host.eq_ignore_ascii_case(settings.host.trim())
-            {
-                return format!(
-                    "{}://{}:{}",
-                    parsed.scheme(),
-                    server_host,
-                    settings.remote_port
-                );
-            }
-        }
+        // An explicitly configured URL may point at a reverse-proxy path
+        // (for example `/codex-atlas`). Preserve it verbatim; rewriting it
+        // to `host:remotePort` bypasses the proxy and commonly returns 502.
         return settings.tunnel_url.trim().trim_end_matches('/').to_string();
     }
     format!(
@@ -736,18 +721,10 @@ fn server_reverse_bind_host(settings: &ServerTunnelSettings) -> &'static str {
     if settings.tunnel_url.trim().is_empty() {
         return "0.0.0.0";
     }
-    let Ok(parsed) = Url::parse(settings.tunnel_url.trim()) else {
-        return "127.0.0.1";
-    };
-    let configured_host = parsed.host_str().unwrap_or_default();
-    let server_host = resolved_server_host(settings);
-    if configured_host.eq_ignore_ascii_case(&server_host)
-        || configured_host.eq_ignore_ascii_case(settings.host.trim())
-    {
-        "0.0.0.0"
-    } else {
-        "127.0.0.1"
-    }
+    // A non-empty tunnel URL is an explicit proxy/public route. Keep the
+    // reverse-forward listener private so the proxy can own the public port;
+    // direct public binding is used only when the URL is left blank.
+    "127.0.0.1"
 }
 
 fn ssh_config_path() -> PathBuf {
@@ -1478,7 +1455,9 @@ fn mobile_bridge_config() -> MobileBridgeConfig {
         "lan"
     };
     let token = mobile_bridge_token();
-    let mut pairing = url::form_urlencoded::Serializer::new(String::from("codex-atlas://connect"));
+    // `Serializer` only adds `&` between pairs; seed the custom URI with `?`
+    // so Android and other URI parsers see a real query string.
+    let mut pairing = url::form_urlencoded::Serializer::new(String::from("codex-atlas://connect?"));
     pairing.append_pair("lan", &lan_url);
     if let Some(tunnel) = tunnel_url.as_deref() {
         pairing.append_pair("tunnel", tunnel);
@@ -6139,6 +6118,163 @@ fn extract_voice_archive(archive_path: &Path, models_dir: &Path) -> Result<(), S
     }
 }
 
+async fn download_voice_archive_with_reqwest(
+    spec: &'static VoiceModelSpec,
+    temp_path: &Path,
+    step: u8,
+) -> Result<(u64, Option<u64>), String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("创建语音下载器失败: {error}"))?;
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        let existing = fs::metadata(temp_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut request = client.get(spec.archive_url);
+        if existing > 0 {
+            request = request.header("Range", format!("bytes={existing}-"));
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = format!("连接失败: {error}");
+                if attempt < 3 {
+                    async_sleep(Duration::from_secs(attempt as u64)).await;
+                    continue;
+                }
+                break;
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            last_error = format!("HTTP {status}");
+            if attempt < 3 {
+                async_sleep(Duration::from_secs(attempt as u64)).await;
+                continue;
+            }
+            break;
+        }
+
+        // A server that ignores Range returns 200. Restart the temporary file
+        // in that case instead of appending a duplicate full archive.
+        let append = existing > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        let mut downloaded_bytes = if append { existing } else { 0 };
+        let total_bytes = if append {
+            response
+                .headers()
+                .get("content-range")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.rsplit('/').next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .or_else(|| response.content_length().map(|length| existing + length))
+        } else {
+            response.content_length()
+        };
+        let file_result = if append {
+            OpenOptions::new().create(true).append(true).open(temp_path)
+        } else {
+            File::create(temp_path)
+        };
+        let mut file = match file_result {
+            Ok(file) => file,
+            Err(error) => return Err(format!("写入语音模型失败: {error}")),
+        };
+        set_voice_service_progress(
+            "downloading",
+            step,
+            format!("正在下载 {}（第 {attempt}/3 次）", spec.id),
+            downloaded_bytes,
+            total_bytes,
+            None,
+            None,
+        );
+        let mut response = response;
+        let mut stream_error = None;
+        while let Some(chunk) = match response.chunk().await {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                stream_error = Some(format!("读取下载内容失败: {error}"));
+                None
+            }
+        } {
+            if let Err(error) = file.write_all(&chunk) {
+                stream_error = Some(format!("写入下载内容失败: {error}"));
+                break;
+            }
+            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+            set_voice_service_progress(
+                "downloading",
+                step,
+                format!("正在下载 {}（第 {attempt}/3 次）", spec.id),
+                downloaded_bytes,
+                total_bytes,
+                None,
+                None,
+            );
+        }
+        drop(file);
+        if let Some(error) = stream_error {
+            last_error = error;
+            if attempt < 3 {
+                async_sleep(Duration::from_secs(attempt as u64)).await;
+                continue;
+            }
+            break;
+        }
+        return Ok((downloaded_bytes, total_bytes));
+    }
+    Err(last_error)
+}
+
+#[cfg(target_os = "windows")]
+fn download_voice_archive_with_powershell(url: &str, temp_path: &Path) -> Result<u64, String> {
+    let escaped_url = powershell_single_quote(url);
+    let escaped_path = powershell_single_quote(&temp_path.to_string_lossy());
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; $url = '{escaped_url}'; $target = '{escaped_path}'; $parent = Split-Path -Parent $target; if ($parent) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}; $done = $false; $last = $null; for ($attempt = 1; $attempt -le 3 -and -not $done; $attempt++) {{ try {{ Invoke-WebRequest -Uri $url -OutFile $target -Resume; $done = $true }} catch {{ $last = $_.Exception.Message; if ($attempt -lt 3) {{ Start-Sleep -Seconds ([Math]::Min(8, [Math]::Pow(2, $attempt))) }} }} }}; if (-not $done) {{ throw $last }}",
+    );
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &script,
+    ]);
+    command.stdin(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("启动 Windows 系统下载器失败: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("PowerShell 下载失败: {}", output.status)
+        } else {
+            detail
+        });
+    }
+    let size = fs::metadata(temp_path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("读取下载文件大小失败: {error}"))?;
+    if size == 0 {
+        return Err("Windows 系统下载器没有生成有效文件".to_string());
+    }
+    Ok(size)
+}
+
+async fn async_sleep(duration: Duration) {
+    let _ = tauri::async_runtime::spawn_blocking(move || thread::sleep(duration)).await;
+}
+
 async fn download_voice_model(spec: &'static VoiceModelSpec, step: u8) -> Result<(), String> {
     if voice_model_ready(spec) {
         set_voice_service_progress(
@@ -6172,38 +6308,49 @@ async fn download_voice_model(spec: &'static VoiceModelSpec, step: u8) -> Result
         None,
         None,
     );
-    let response = Client::new()
-        .get(spec.archive_url)
-        .send()
-        .await
-        .map_err(|error| format!("下载 {} 失败: {error}", spec.id))?;
-    if !response.status().is_success() {
-        return Err(format!("下载 {} 失败: HTTP {}", spec.id, response.status()));
-    }
-    let total_bytes = response.content_length();
-    let mut downloaded_bytes = 0_u64;
-    let mut file =
-        File::create(&temp_path).map_err(|error| format!("写入语音模型失败: {error}"))?;
-    let mut response = response;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("读取 {} 下载内容失败: {error}", spec.id))?
-    {
-        file.write_all(&chunk)
-            .map_err(|error| format!("写入 {} 下载内容失败: {error}", spec.id))?;
-        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-        set_voice_service_progress(
-            "downloading",
-            step,
-            format!("正在下载 {}", spec.id),
-            downloaded_bytes,
-            total_bytes,
-            None,
-            None,
-        );
-    }
-    drop(file);
+    let download_result = download_voice_archive_with_reqwest(spec, &temp_path, step).await;
+    let (downloaded_bytes, total_bytes) = match download_result {
+        Ok(result) => result,
+        Err(reqwest_error) => {
+            #[cfg(target_os = "windows")]
+            {
+                set_voice_service_progress(
+                    "downloading",
+                    step,
+                    format!("网络连接失败，使用 Windows 系统下载器重试 {}", spec.id),
+                    fs::metadata(&temp_path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0),
+                    None,
+                    None,
+                    None,
+                );
+                let url = spec.archive_url.to_string();
+                let fallback_path = temp_path.clone();
+                let fallback = tauri::async_runtime::spawn_blocking(move || {
+                    download_voice_archive_with_powershell(&url, &fallback_path)
+                })
+                .await
+                .map_err(|error| format!("Windows 下载任务失败: {error}"))?;
+                match fallback {
+                    Ok(size) => (size, Some(size)),
+                    Err(fallback_error) => {
+                        return Err(format!(
+                            "下载 {} 失败：{}；Windows 系统下载器重试也失败：{}。请检查 GitHub 连接或系统代理设置。",
+                            spec.id, reqwest_error, fallback_error
+                        ));
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                return Err(format!(
+                    "下载 {} 失败：{}。请检查 GitHub 连接或系统代理设置。",
+                    spec.id, reqwest_error
+                ));
+            }
+        }
+    };
     // A previous interrupted extraction may have left the final archive in
     // place. Remove it before replacing so retry works on Windows too.
     let _ = fs::remove_file(&archive_path);
