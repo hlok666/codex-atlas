@@ -367,6 +367,7 @@ type DesktopOutputEvent = {
 type ApprovalOption = {
   label: string
   value: string
+  kind?: 'choice' | 'other'
 }
 
 type ApprovalRequest = {
@@ -387,8 +388,14 @@ function parseApprovalRequest(item: Session | undefined, language: UiLanguage): 
     const match = numbered || checklist
     if (!match) continue
     const value = numbered ? match[1] : match[1]
-    const label = (numbered ? match[2] : match[1]).replace(/[：:]$/, '').trim()
-    if (label && !options.some((option) => option.value === value)) options.push({ label, value })
+    const rawLabel = (numbered ? match[2] : match[1]).replace(/[：:]$/, '').trim()
+    if (!rawLabel || options.some((option) => option.value === value)) continue
+    const kind = isOtherApprovalLabel(rawLabel) ? 'other' : 'choice'
+    options.push({
+      label: kind === 'other' ? (language === 'zh' ? '其他' : 'Other') : rawLabel,
+      value,
+      kind,
+    })
   }
   if (!approvalMarker.test(prompt) && !options.length) return null
   if (!options.length && /(?:\[\s*(?:y\s*\/\s*n|yes\s*\/\s*no)\s*\]|\b(?:y\s*\/\s*n|yes\s*\/\s*no)\b)/i.test(prompt)) {
@@ -403,7 +410,17 @@ function parseApprovalRequest(item: Session | undefined, language: UiLanguage): 
       { label: language === 'zh' ? '取消' : 'Deny', value: 'n' },
     )
   }
-  return { prompt, options: options.slice(0, 4) }
+  const visible = options.slice(0, 8)
+  const parsedOther = options.find((option) => option.kind === 'other')
+  if (parsedOther && !visible.some((option) => option.value === parsedOther.value)) visible.push(parsedOther)
+  if (!visible.some((option) => option.kind === 'other')) {
+    visible.push({ label: language === 'zh' ? '其他' : 'Other', value: '__other__', kind: 'other' })
+  }
+  return { prompt, options: visible }
+}
+
+function isOtherApprovalLabel(label: string) {
+  return /(?:\bother\b|tell\s+codex|different\s+(?:instructions|approach|way)|provide\s+(?:feedback|instructions)|custom|补充|其他|其它|自定义)/i.test(label)
 }
 
 function relativeUpdated(timestamp: number, language: UiLanguage = 'en') {
@@ -2148,6 +2165,7 @@ function FloatingMini() {
   const [actionBusy, setActionBusy] = useState<'activate' | 'input' | null>(null)
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null)
   const [approvalOther, setApprovalOther] = useState('')
+  const approvalOtherInputRef = useRef<HTMLInputElement | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const selectedSessionRef = useRef<string | null>(null)
   const eventTime = (item: Session) => item.lastEventAtMs || item.timestamp || 0
@@ -2383,6 +2401,29 @@ function FloatingMini() {
   }
   const respondToApproval = (option: ApprovalOption) => {
     if (!selectedItem || approvalBusy) return
+    if (option.kind === 'other') {
+      const focusOtherInput = () => window.setTimeout(() => approvalOtherInputRef.current?.focus(), 60)
+      if (option.value === '__other__') {
+        focusOtherInput()
+        setMessage(language === 'zh' ? '请输入补充内容后提交' : 'Enter the additional instruction, then submit')
+        window.setTimeout(() => setMessage(''), 2200)
+        return
+      }
+      setApprovalBusy(option.value)
+      void sendTerminalInput(selectedItem.id, option.value).then((ok) => {
+        setMessage(ok
+          ? (language === 'zh' ? '已选择其他，请输入补充内容' : 'Other selected; enter the additional instruction')
+          : (language === 'zh' ? '审批提交失败' : 'Approval could not be submitted'))
+        setApprovalBusy(null)
+        if (ok) focusOtherInput()
+        window.setTimeout(() => setMessage(''), 2200)
+      }).catch(() => {
+        setApprovalBusy(null)
+        setMessage(language === 'zh' ? '审批提交失败' : 'Approval could not be submitted')
+        window.setTimeout(() => setMessage(''), 2200)
+      })
+      return
+    }
     setApprovalBusy(option.value)
     void sendTerminalInput(selectedItem.id, option.value).then((ok) => {
       setMessage(ok
@@ -2390,6 +2431,10 @@ function FloatingMini() {
         : (language === 'zh' ? '审批提交失败' : 'Approval could not be submitted'))
       if (ok) setItems((current) => current.map((item) => item.id === selectedItem.id ? { ...item, requiresAttention: false, liveState: 'working', lastOutput: '' } : item))
       setApprovalBusy(null)
+      window.setTimeout(() => setMessage(''), 2200)
+    }).catch(() => {
+      setApprovalBusy(null)
+      setMessage(language === 'zh' ? '审批提交失败' : 'Approval could not be submitted')
       window.setTimeout(() => setMessage(''), 2200)
     })
   }
@@ -2433,7 +2478,7 @@ function FloatingMini() {
             <div className="desktop-tv-scanlines" aria-hidden="true" />
             <div className="desktop-tv-screen-head"><span><i className="desktop-tv-status-dot" />{phaseLabel}</span><b>{sessionLabel}</b></div>
               <div className="desktop-tv-session-meta"><strong title={selectedItem?.title}>{selectedItem?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{selectedItem ? `${selectedItem.folder} · ${selectedItem.model}` : ''}</small></div>
-             {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite"><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
+             {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite"><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input ref={approvalOtherInputRef} value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
           </div>
         </div>
       </div>

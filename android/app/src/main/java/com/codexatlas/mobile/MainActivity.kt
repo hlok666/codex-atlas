@@ -746,6 +746,7 @@ private fun formatConversationTime(timestampMs: Long): String =
 private fun ApprovalActions(chinese: Boolean, detail: String, onSelect: (String) -> Unit) {
     val options = parseApprovalOptions(detail, chinese)
     var custom by remember(detail) { mutableStateOf("") }
+    var otherArmed by remember(detail) { mutableStateOf(false) }
     Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFFFFF6E6), tonalElevation = 0.dp) {
         Column(modifier = Modifier.fillMaxWidth().padding(11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text(if (chinese) "需要审批" else "Approval required", color = Color(0xFF9A6B2F), fontWeight = FontWeight.SemiBold)
@@ -756,11 +757,11 @@ private fun ApprovalActions(chinese: Boolean, detail: String, onSelect: (String)
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEachIndexed { index, option ->
                         if ((rowIndex * 2 + index) == 0) {
-                            Button(onClick = { onSelect(option.value) }, modifier = Modifier.weight(1f)) {
+                            Button(onClick = { if (option.isOther) { if (option.value != "__other__") onSelect(option.value); otherArmed = true } else onSelect(option.value) }, modifier = Modifier.weight(1f)) {
                                 Text(option.label, maxLines = 2)
                             }
                         } else {
-                            OutlinedButton(onClick = { onSelect(option.value) }, modifier = Modifier.weight(1f)) {
+                            OutlinedButton(onClick = { if (option.isOther) { if (option.value != "__other__") onSelect(option.value); otherArmed = true } else onSelect(option.value) }, modifier = Modifier.weight(1f)) {
                                 Text(option.label, maxLines = 2)
                             }
                         }
@@ -774,9 +775,9 @@ private fun ApprovalActions(chinese: Boolean, detail: String, onSelect: (String)
                     onValueChange = { custom = it },
                     modifier = Modifier.weight(1f),
                     singleLine = true,
-                    placeholder = { Text(if (chinese) "其他：输入回复" else "Other: enter a response") },
+                    placeholder = { Text(if (otherArmed) { if (chinese) "输入补充内容" else "Enter the additional instruction" } else { if (chinese) "其他：输入回复" else "Other: enter a response" }) },
                 )
-                Button(onClick = { val value = custom.trim(); if (value.isNotEmpty()) { onSelect(value); custom = "" } }, enabled = custom.trim().isNotEmpty()) {
+                Button(onClick = { val value = custom.trim(); if (value.isNotEmpty()) { onSelect(value); custom = ""; otherArmed = false } }, enabled = custom.trim().isNotEmpty()) {
                     Text(if (chinese) "发送" else "Send")
                 }
             }
@@ -784,31 +785,51 @@ private fun ApprovalActions(chinese: Boolean, detail: String, onSelect: (String)
     }
 }
 
-private data class ApprovalOption(val value: String, val label: String)
+private data class ApprovalOption(val value: String, val label: String, val isOther: Boolean = false)
 
 private fun parseApprovalOptions(detail: String, chinese: Boolean): List<ApprovalOption> {
     val numbered = Regex("^\\s*(\\d+)[.)]\\s*(.+?)\\s*$")
         .findAll(detail.replace("\r\n", "\n"))
-        .map { ApprovalOption(it.groupValues[1], it.groupValues[2].trim()) }
+        .map {
+            val rawLabel = it.groupValues[2].trim()
+            val other = isOtherApprovalLabel(rawLabel)
+            ApprovalOption(it.groupValues[1], if (other) if (chinese) "其他" else "Other" else rawLabel, other)
+        }
         .filter { it.label.length in 1..180 }
         .distinctBy { it.value }
         .toList()
-    if (numbered.isNotEmpty()) return numbered.take(8)
+    if (numbered.isNotEmpty()) {
+        val visible = numbered.take(8).toMutableList()
+        numbered.firstOrNull { it.isOther }?.let { parsedOther ->
+            if (visible.none { it.value == parsedOther.value }) visible += parsedOther
+        }
+        if (visible.none { it.isOther }) visible += ApprovalOption("__other__", if (chinese) "其他" else "Other", true)
+        return visible
+    }
     val lower = detail.lowercase()
     val yesNo = lower.contains("[y/n") || lower.contains("[yes/no") || lower.contains("yes/no") || lower.contains("y/n")
     if (yesNo) return listOf(
         ApprovalOption("y", if (chinese) "是 / 继续" else "Yes / continue"),
         ApprovalOption("n", if (chinese) "否 / 停止" else "No / stop"),
+        ApprovalOption("__other__", if (chinese) "其他" else "Other", true),
     )
     val hasApprovalLanguage = lower.contains("allow") || lower.contains("approve") || lower.contains("permission") || detail.contains("允许") || detail.contains("审批") || detail.contains("授权")
     if (hasApprovalLanguage) return listOf(
         ApprovalOption("1", if (chinese) "允许" else "Allow"),
         ApprovalOption("2", if (chinese) "拒绝" else "Deny"),
+        ApprovalOption("__other__", if (chinese) "其他" else "Other", true),
     )
     return listOf(
         ApprovalOption("1", if (chinese) "继续" else "Continue"),
         ApprovalOption("2", if (chinese) "取消" else "Cancel"),
+        ApprovalOption("__other__", if (chinese) "其他" else "Other", true),
     )
+}
+
+private fun isOtherApprovalLabel(label: String): Boolean {
+    val lower = label.lowercase()
+    return Regex("\\bother\\b|tell\\s+codex|different\\s+(instructions|approach|way)|provide\\s+(feedback|instructions)|custom").containsMatchIn(lower)
+        || label.contains("补充") || label.contains("其他") || label.contains("其它") || label.contains("自定义")
 }
 
 private fun appendVoiceText(existing: String, transcript: String): String {
