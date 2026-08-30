@@ -5,7 +5,40 @@ import kotlinx.serialization.encodeToString
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URI
 import java.util.concurrent.TimeUnit
+
+private fun bridgeCandidates(primary: String, fallback: String): List<String> {
+    val bases = listOf(primary, fallback)
+        .map { it.trimEnd('/') }
+        .filter { it.isNotBlank() }
+        .distinct()
+    return buildList {
+        bases.forEach { candidate ->
+            add(candidate)
+            val uri = runCatching { URI(candidate) }.getOrNull() ?: return@forEach
+            if (uri.host.isNullOrBlank() || !uri.scheme.equals("http", true) && !uri.scheme.equals("https", true)) return@forEach
+            if (!uri.path.isNullOrBlank() && uri.path != "/") return@forEach
+
+            // Older desktop builds exposed a reverse-proxy endpoint as a
+            // bare host/port. Keep the original first, then recover the
+            // current `/codex-atlas` route when the bare endpoint is 502.
+            val pathPort = runCatching {
+                URI(uri.scheme, uri.userInfo, uri.host, uri.port, "/codex-atlas", uri.query, uri.fragment).toString()
+            }.getOrNull()
+            if (!pathPort.isNullOrBlank()) add(pathPort)
+
+            // The old QR sometimes contained the public server's internal
+            // bridge port. The reverse proxy is normally served on 80/443.
+            if (uri.port == 15730) {
+                val publicPath = runCatching {
+                    URI(uri.scheme, uri.userInfo, uri.host, -1, "/codex-atlas", uri.query, uri.fragment).toString()
+                }.getOrNull()
+                if (!publicPath.isNullOrBlank()) add(publicPath)
+            }
+        }
+    }.distinct()
+}
 
 class AtlasBridgeClient(
     private val baseUrl: String,
@@ -32,16 +65,18 @@ class AtlasBridgeClient(
     }
 
     fun snapshotAny(fallbackUrl: String = ""): AtlasSnapshot {
-        val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
-            try { return AtlasBridgeClient(candidate, token).snapshot() } catch (error: Throwable) { failure = error }
+            try { return AtlasBridgeClient(candidate, token).snapshot() } catch (error: Throwable) {
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
         }
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
     fun syncAny(sinceMs: Long, fallbackUrl: String = "", waitMs: Long = 0): AtlasSyncResponse {
-        val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
@@ -55,14 +90,14 @@ class AtlasBridgeClient(
                     return json.decodeFromString(response.body?.string().orEmpty())
                 }
             } catch (error: Throwable) {
-                failure = error
+                failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
     fun listSessionsAny(fallbackUrl: String = ""): List<AtlasSession> {
-        val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
@@ -76,14 +111,14 @@ class AtlasBridgeClient(
                     return json.decodeFromString(response.body?.string().orEmpty())
                 }
             } catch (error: Throwable) {
-                failure = error
+                failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
     fun messagesAny(sessionId: String, fallbackUrl: String = ""): List<AtlasMessage> {
-        val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
@@ -97,7 +132,7 @@ class AtlasBridgeClient(
                     return json.decodeFromString(response.body?.string().orEmpty())
                 }
             } catch (error: Throwable) {
-                failure = error
+                failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
@@ -131,14 +166,14 @@ class AtlasBridgeClient(
         postAny("/v1/paseo/import-all", "{}", fallbackUrl)
 
     private fun postAny(path: String, body: String, fallbackUrl: String) {
-        val candidates = listOf(baseUrl, fallbackUrl).map { it.trimEnd('/') }.filter { it.isNotBlank() }.distinct()
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
                 AtlasBridgeClient(candidate, token).post(path, body)
                 return
             } catch (error: Throwable) {
-                failure = error
+                failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")

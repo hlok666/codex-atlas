@@ -110,11 +110,12 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
         }.getOrDefault(AtlasSnapshot())
 
         private fun preferredUrl(context: Context): String =
-            if (BridgePreferences.preferTunnel(context)) BridgePreferences.tunnelUrl(context)
+            if (BridgePreferences.connectionRoute(context) == "server") BridgePreferences.tunnelUrl(context)
             else BridgePreferences.url(context)
 
         private fun fallbackUrl(context: Context): String =
-            if (BridgePreferences.preferTunnel(context)) BridgePreferences.url(context)
+            if (BridgePreferences.connectionRoute(context) == "lan") ""
+            else if (BridgePreferences.connectionRoute(context) == "server") ""
             else BridgePreferences.tunnelUrl(context)
 
         private fun render(context: Context, snapshot: AtlasSnapshot, widgetId: Int): RemoteViews {
