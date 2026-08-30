@@ -1729,7 +1729,8 @@ html.floating-window body { color: #171a17; }
 .app-shell .connection-status strong, .app-shell .server-tunnel-status strong { color: var(--app-ink); font-size: 13px; }
 .app-shell .connection-status small { color: var(--app-muted); font-size: 11px; }
 .app-shell .pairing-card { align-items: center; gap: 24px; padding: 16px; border-radius: 8px; background: #fbfdfb; }
-.app-shell .pairing-card svg { flex: 0 0 auto; width: 128px; height: 128px; padding: 6px; border: 1px solid var(--app-line); border-radius: 8px; background: #fff; }
+.app-shell .pairing-card > .pairing-qr { display: block; flex: 0 0 auto; width: 220px; height: 220px; padding: 6px; border: 1px solid var(--app-line); border-radius: 8px; background: #fff; }
+.app-shell .pairing-card button svg { width: 14px; height: 14px; padding: 0; border: 0; border-radius: 0; background: transparent; }
 .app-shell .pairing-copy { min-width: 0; flex: 1; }
 .app-shell .pairing-copy strong, .app-shell .pairing-copy small { display: block; }
 .app-shell .pairing-copy small { margin-top: 5px; color: var(--app-muted); line-height: 1.45; }

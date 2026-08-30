@@ -71,6 +71,14 @@ struct MobileSyncState {
 
 static MOBILE_SYNC_STATE: OnceLock<Mutex<MobileSyncState>> = OnceLock::new();
 
+#[derive(Default)]
+struct ProcessSnapshotCache {
+    snapshots: Vec<ProcessSnapshot>,
+    refreshed_at_ms: i64,
+}
+
+static PROCESS_SNAPSHOT_CACHE: OnceLock<Mutex<ProcessSnapshotCache>> = OnceLock::new();
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
@@ -2639,7 +2647,7 @@ fn extract_working_directory(command_line: &str) -> Option<String> {
     None
 }
 
-fn process_snapshots() -> Vec<ProcessSnapshot> {
+fn collect_process_snapshots() -> Vec<ProcessSnapshot> {
     let refresh = ProcessRefreshKind::nothing()
         .with_cmd(UpdateKind::Always)
         .with_cwd(UpdateKind::Always)
@@ -2667,6 +2675,28 @@ fn process_snapshots() -> Vec<ProcessSnapshot> {
             start_time_ms: (process.start_time() as i64).saturating_mul(1000),
         })
         .collect()
+}
+
+fn process_snapshots() -> Vec<ProcessSnapshot> {
+    // Runtime status is requested by both the native monitor and the renderer
+    // fallback poll. Reusing a short-lived snapshot prevents two full Windows
+    // process metadata walks from running at the same time.
+    const CACHE_TTL_MS: i64 = 3_000;
+    let cache = PROCESS_SNAPSHOT_CACHE.get_or_init(|| Mutex::new(ProcessSnapshotCache::default()));
+    let now = now_ms();
+    if let Ok(snapshot) = cache.lock() {
+        if !snapshot.snapshots.is_empty()
+            && now.saturating_sub(snapshot.refreshed_at_ms) <= CACHE_TTL_MS
+        {
+            return snapshot.snapshots.clone();
+        }
+    }
+    let snapshots = collect_process_snapshots();
+    if let Ok(mut snapshot) = cache.lock() {
+        snapshot.snapshots = snapshots.clone();
+        snapshot.refreshed_at_ms = now_ms();
+    }
+    snapshots
 }
 
 /// Console hosts are children of PowerShell/cmd rather than ancestors of the
@@ -4228,6 +4258,74 @@ fn powershell_single_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+/// Record a Codex hook event without starting a shell. Hook commands run once
+/// for every prompt/tool event, so using PowerShell here makes the desktop
+/// process flash a console and adds substantial startup overhead. The native
+/// helper keeps the same JSONL contract while remaining invisible on Windows.
+pub fn record_codex_hook_event() -> Result<(), String> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|error| format!("read Codex hook input: {error}"))?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let line = match serde_json::from_str::<Value>(trimmed) {
+        Ok(mut event) => {
+            if let Some(object) = event.as_object_mut() {
+                object.insert(
+                    "atlas_observed_at_ms".to_string(),
+                    Value::Number(serde_json::Number::from(now_ms())),
+                );
+            }
+            serde_json::to_string(&event).unwrap_or_else(|_| trimmed.to_string())
+        }
+        Err(_) => trimmed.to_string(),
+    };
+
+    let path = atlas_hook_events_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create hook state directory: {error}"))?;
+    }
+    // Keep the event stream bounded. Runtime reads only the tail, and a stale
+    // multi-hundred-megabyte file should never make the app progressively
+    // slower over time.
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    if fs::metadata(&path)
+        .map(|metadata| metadata.len() > MAX_BYTES)
+        .unwrap_or(false)
+    {
+        let rotated = path.with_extension("jsonl.1");
+        let _ = fs::remove_file(&rotated);
+        let _ = fs::rename(&path, rotated);
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("open hook state: {error}"))?;
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|error| format!("write hook state: {error}"))?;
+    Ok(())
+}
+
+fn atlas_hook_command() -> String {
+    let executable = std::env::current_exe()
+        .ok()
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from("codex-atlas"));
+    // `atlas-hook` is retained as a marker so existing-config detection can
+    // recognize and update hooks installed by older Atlas releases.
+    format!(
+        "\"{}\" --hook atlas-hook",
+        executable.to_string_lossy().replace('"', "\\\"")
+    )
+}
+
 #[cfg(target_os = "windows")]
 fn atlas_hook_assets() -> (Vec<(PathBuf, String)>, String, PathBuf) {
     let path = codex_home().join("atlas-hook.ps1");
@@ -4242,10 +4340,7 @@ fn atlas_hook_assets() -> (Vec<(PathBuf, String)>, String, PathBuf) {
         path.to_string_lossy()
     );
     let paseo_wrapper = "@echo off\r\nsetlocal EnableExtensions\r\nif not defined PASEO_TERMINAL_ID (echo {}& exit /b 0)\r\nset \"ATLAS_PASEO_EVENT=%~1\"\r\nset \"ATLAS_PASEO_OUTPUT=%TEMP%\\codex-atlas-paseo-%RANDOM%-%RANDOM%.tmp\"\r\nif defined PASEO_HOOK_CLI (\r\n  call \"%PASEO_HOOK_CLI%\" hooks codex \"%ATLAS_PASEO_EVENT%\" >\"%ATLAS_PASEO_OUTPUT%\" 2>nul\r\n) else (\r\n  call paseo hooks codex \"%ATLAS_PASEO_EVENT%\" >\"%ATLAS_PASEO_OUTPUT%\" 2>nul\r\n)\r\nset \"ATLAS_PASEO_EXIT=%ERRORLEVEL%\"\r\nif \"%ATLAS_PASEO_EXIT%\"==\"0\" (\r\n  if exist \"%ATLAS_PASEO_OUTPUT%\" type \"%ATLAS_PASEO_OUTPUT%\"\r\n) else (\r\n  echo {}\r\n)\r\nif exist \"%ATLAS_PASEO_OUTPUT%\" del /q \"%ATLAS_PASEO_OUTPUT%\" >nul 2>&1\r\nexit /b 0\r\n".to_string();
-    let command = format!(
-        "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
-        path.to_string_lossy()
-    );
+    let command = atlas_hook_command();
     (
         vec![
             (path, script),
@@ -4323,19 +4418,40 @@ fn add_atlas_hooks(root: &mut Value, command: &str) -> Result<bool, String> {
                     handler.insert("command".to_string(), Value::String(command.to_string()));
                     changed = true;
                 }
+                #[cfg(target_os = "windows")]
+                if handler.get("commandWindows").and_then(Value::as_str) != Some(command) {
+                    handler.insert(
+                        "commandWindows".to_string(),
+                        Value::String(command.to_string()),
+                    );
+                    changed = true;
+                }
             }
         }
         if existing {
             continue;
         }
         let timeout = if event_name == "SessionEnd" { 3 } else { 5 };
-        entries.push(serde_json::json!({
+        let mut handler = serde_json::json!({
             "hooks": [{
                 "type": "command",
                 "command": command,
                 "timeout": timeout
             }]
-        }));
+        });
+        #[cfg(target_os = "windows")]
+        if let Some(map) = handler
+            .get_mut("hooks")
+            .and_then(Value::as_array_mut)
+            .and_then(|hooks| hooks.first_mut())
+            .and_then(|hook| hook.as_object_mut())
+        {
+            map.insert(
+                "commandWindows".to_string(),
+                Value::String(command.to_string()),
+            );
+        }
+        entries.push(handler);
         changed = true;
     }
     Ok(changed)
@@ -4999,7 +5115,7 @@ fn cached_runtime_base_sessions(state: &AppState) -> Vec<SessionRecord> {
     // Runtime state is consumed by the desktop event stream. Keep this cache
     // short so a newly-created rollout is visible on the next tick instead of
     // waiting several seconds for the SQLite index to catch up.
-    const CACHE_TTL_MS: i64 = 1_000;
+    const CACHE_TTL_MS: i64 = 2_500;
     let now = now_ms();
     if let Ok(cache) = state.runtime_cache.lock() {
         if !cache.sessions.is_empty() && now.saturating_sub(cache.refreshed_at_ms) <= CACHE_TTL_MS {
@@ -5039,6 +5155,10 @@ fn runtime_signature(records: &[RunningCodexSession]) -> String {
 /// recovery if the event bridge is temporarily unavailable.
 fn spawn_runtime_monitor(app: AppHandle, state: AppState) {
     thread::spawn(move || {
+        // Let WebView/Tauri finish its first paint before the initial Windows
+        // process metadata walk. This avoids a transient "Not Responding"
+        // state on machines with many terminal processes.
+        thread::sleep(Duration::from_millis(1_200));
         let mut previous_signature = String::new();
         let mut emitted_initial = false;
         loop {
@@ -5054,7 +5174,10 @@ fn spawn_runtime_monitor(app: AppHandle, state: AppState) {
                 previous_signature = signature;
                 emitted_initial = true;
             }
-            thread::sleep(Duration::from_millis(750));
+            // Process metadata collection is comparatively expensive on
+            // Windows. Two seconds keeps the widget responsive without
+            // competing with the Codex renderer or terminal.
+            thread::sleep(Duration::from_millis(2_000));
         }
     });
 }
@@ -5214,9 +5337,53 @@ fn spawn_detached(path_or_name: &str, args: &[String]) -> Result<(), String> {
 
 fn output_command(path_or_name: &str, args: &[String]) -> Result<std::process::Output, String> {
     let mut command = command_for(path_or_name, args)?;
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // CLI probes are background checks. Do not create a console window for
+        // npm .cmd/.ps1 shims invoked by the desktop app.
+        command.creation_flags(0x08000000);
+    }
     command
         .output()
         .map_err(|error| format!("run {path_or_name}: {error}"))
+}
+
+fn command_succeeds_with_timeout(path_or_name: &str, args: &[String], timeout: Duration) -> bool {
+    let Ok(mut command) = command_for(path_or_name, args) else {
+        return false;
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(30));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn codex_executable() -> String {
@@ -6066,8 +6233,20 @@ async fn download_voice_model(spec: &'static VoiceModelSpec, step: u8) -> Result
 }
 
 #[tauri::command]
-fn get_voice_service_status() -> VoiceServiceStatus {
-    voice_service_status()
+async fn get_voice_service_status() -> VoiceServiceStatus {
+    tauri::async_runtime::spawn_blocking(voice_service_status)
+        .await
+        .unwrap_or_else(|_| VoiceServiceStatus {
+            paseo_installed: false,
+            paseo_version: None,
+            daemon_running: false,
+            stt_ready: false,
+            tts_ready: false,
+            models_dir: voice_models_dir().to_string_lossy().to_string(),
+            provider: "Paseo local · Sherpa ONNX".to_string(),
+            ready: false,
+            error: Some("语音服务状态检测失败".to_string()),
+        })
 }
 
 #[tauri::command]
@@ -6153,16 +6332,15 @@ fn paseo_daemon_ready() -> bool {
 }
 
 fn paseo_daemon_ready_with(path: &str) -> bool {
-    output_command(
+    command_succeeds_with_timeout(
         path,
         &[
             "ls".to_string(),
             "--json".to_string(),
             "--no-headers".to_string(),
         ],
+        Duration::from_millis(1_200),
     )
-    .map(|output| output.status.success())
-    .unwrap_or(false)
 }
 
 fn ensure_paseo_daemon() -> Result<(), String> {
@@ -7308,13 +7486,20 @@ pub fn run() {
             let _ = install_codex_hook_now();
             let _ = build_tray(app.handle());
             spawn_mobile_bridge();
+            // Tunnel startup performs network handshakes and must never block
+            // Tauri setup. Run both optional transports in the background so
+            // the main window is usable immediately even when a host is down.
             let bridge_settings = mobile_bridge_settings();
             if bridge_settings.auto_start_tunnel {
-                let _ = launch_mobile_tunnel(&bridge_settings);
+                thread::spawn(move || {
+                    let _ = launch_mobile_tunnel(&bridge_settings);
+                });
             }
             let server_settings = server_tunnel_settings();
             if server_settings.auto_start && server_tunnel_key_path().exists() {
-                let _ = start_server_tunnel_process(&server_settings);
+                thread::spawn(move || {
+                    let _ = start_server_tunnel_process(&server_settings);
+                });
             }
             let state = app.state::<AppState>().inner().clone();
             spawn_runtime_monitor(app.handle().clone(), state);

@@ -1,6 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    if std::env::args().skip(1).any(|arg| arg == "--hook") {
+        if let Err(error) = codex_atlas_lib::record_codex_hook_event() {
+            // Hook failures must never block a Codex turn. Keep diagnostics on
+            // stderr for manual invocation while returning success to Codex.
+            eprintln!("Codex Atlas hook failed: {error}");
+        }
+        return;
+    }
     // Keep hook installation usable from an already-built desktop binary. The
     // command performs the same atomic, backed-up install as the Runtime page
     // without opening a second Tauri window.
