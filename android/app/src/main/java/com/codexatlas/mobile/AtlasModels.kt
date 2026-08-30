@@ -23,6 +23,19 @@ data class AtlasSnapshot(
     val statusSource: String = "",
     val lastEventAtMs: Long = 0,
     val messages: List<AtlasMessage> = emptyList(),
+    val approval: AtlasApproval? = null,
+)
+
+@Serializable
+data class AtlasApprovalOption(
+    val value: String = "",
+    val label: String = "",
+)
+
+@Serializable
+data class AtlasApproval(
+    val prompt: String = "",
+    val options: List<AtlasApprovalOption> = emptyList(),
 )
 
 @Serializable
@@ -50,6 +63,7 @@ data class AtlasSession(
     val foreground: Boolean = false,
     val statusSource: String = "",
     val lastEventAtMs: Long = 0,
+    val approval: AtlasApproval? = null,
 )
 
 @Serializable

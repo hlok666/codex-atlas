@@ -101,6 +101,8 @@ pub struct SessionRecord {
     pub last_output: Option<String>,
     /// True only for the running thread matched to the current foreground terminal window.
     pub foreground: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<MobileApprovalRequest>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -380,6 +382,22 @@ struct MobileStatusSnapshot {
     last_event_at_ms: i64,
     #[serde(default)]
     messages: Vec<MobileSessionMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval: Option<MobileApprovalRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileApprovalOption {
+    value: String,
+    label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileApprovalRequest {
+    prompt: String,
+    options: Vec<MobileApprovalOption>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1494,6 +1512,96 @@ fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage>
     messages
 }
 
+fn mobile_approval_request(session: &SessionRecord) -> Option<MobileApprovalRequest> {
+    if !session.requires_attention {
+        return None;
+    }
+    let prompt = session
+        .last_error
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(session.last_output.as_deref())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        return None;
+    }
+
+    let mut options = Vec::new();
+    for line in prompt.lines() {
+        let trimmed = line.trim();
+        let bytes = trimmed.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == 0 || index >= bytes.len() || !matches!(bytes[index], b'.' | b')' | b':') {
+            continue;
+        }
+        let label = trimmed[index + 1..].trim();
+        if !label.is_empty() {
+            options.push(MobileApprovalOption {
+                value: trimmed[..index].to_string(),
+                label: label.to_string(),
+            });
+        }
+    }
+
+    let lower = prompt.to_ascii_lowercase();
+    let approval_language = lower.contains("allow")
+        || lower.contains("approve")
+        || lower.contains("permission")
+        || prompt.contains("允许")
+        || prompt.contains("审批")
+        || prompt.contains("授权");
+    let continue_language = lower.contains("continue")
+        || lower.contains("proceed")
+        || prompt.contains("继续")
+        || prompt.contains("是否继续");
+    if options.is_empty() && approval_language {
+        options = vec![
+            MobileApprovalOption {
+                value: "1".to_string(),
+                label: "Allow".to_string(),
+            },
+            MobileApprovalOption {
+                value: "2".to_string(),
+                label: "Deny".to_string(),
+            },
+            MobileApprovalOption {
+                value: "__other__".to_string(),
+                label: "Other".to_string(),
+            },
+        ];
+    } else if options.is_empty() && continue_language {
+        options = vec![
+            MobileApprovalOption {
+                value: "1".to_string(),
+                label: "Continue".to_string(),
+            },
+            MobileApprovalOption {
+                value: "2".to_string(),
+                label: "Cancel".to_string(),
+            },
+            MobileApprovalOption {
+                value: "__other__".to_string(),
+                label: "Other".to_string(),
+            },
+        ];
+    }
+    if options.is_empty() {
+        return None;
+    }
+    if !options.iter().any(|option| option.value == "__other__") {
+        options.push(MobileApprovalOption {
+            value: "__other__".to_string(),
+            label: "Other".to_string(),
+        });
+    }
+    Some(MobileApprovalRequest { prompt, options })
+}
+
 fn mobile_status_snapshot() -> Option<MobileStatusSnapshot> {
     let sessions = list_sessions_sync().ok()?;
     let session = sessions
@@ -1553,6 +1661,7 @@ fn mobile_status_snapshot() -> Option<MobileStatusSnapshot> {
         status_source: session.status_source.clone(),
         last_event_at_ms: session.last_event_at_ms,
         messages: mobile_session_messages(session),
+        approval: mobile_approval_request(session),
     })
 }
 
@@ -1963,6 +2072,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> 
         failure_key: None,
         last_output: None,
         foreground: false,
+        approval: None,
     })
 }
 
@@ -2212,6 +2322,7 @@ fn scan_jsonl_sessions_with_limits(
             failure_key: None,
             last_output: None,
             foreground: false,
+            approval: None,
         });
     }
     // A rollout may briefly exist in both `sessions` and
@@ -4743,6 +4854,7 @@ fn enrich_sessions_with_mode(
         session.failure_key = observation.failure_key.clone();
         session.last_output = observation.last_output.clone();
         session.foreground = foreground_session_index == Some(index);
+        session.approval = mobile_approval_request(session);
         if observation.last_event_at_ms > session.updated_at_ms {
             session.updated_at_ms = observation.last_event_at_ms;
         }
@@ -6964,6 +7076,7 @@ mod runtime_probe_tests {
             failure_key: None,
             last_output: None,
             foreground: false,
+            approval: None,
         };
         let command = powershell_resume_command(&session);
         assert!(command.contains("Set-Location -LiteralPath 'C:\\work folder\\project''s files'"));

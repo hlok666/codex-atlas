@@ -513,6 +513,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             ApprovalActions(
                                 chinese = zh,
                                 detail = selectedSession.lastError ?: selectedSession.lastOutput ?: snapshot!!.lastOutput,
+                                structured = selectedSession.approval ?: snapshot!!.approval,
                                 onSelect = { choice ->
                                     scope.launch {
                                         val result = withContext(Dispatchers.IO) {
@@ -807,15 +808,19 @@ private fun formatConversationTime(timestampMs: Long): String =
     java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(timestampMs))
 
 @Composable
-private fun ApprovalActions(chinese: Boolean, detail: String, onSelect: (String) -> Unit) {
-    val options = parseApprovalOptions(detail, chinese)
-    var custom by remember(detail) { mutableStateOf("") }
-    var otherArmed by remember(detail) { mutableStateOf(false) }
+private fun ApprovalActions(chinese: Boolean, detail: String, structured: AtlasApproval?, onSelect: (String) -> Unit) {
+    val options = structured?.options
+        ?.takeIf { it.isNotEmpty() }
+        ?.map { option -> ApprovalOption(option.value, localizedApprovalLabel(option, chinese), option.value == "__other__") }
+        ?: parseApprovalOptions(detail, chinese)
+    val prompt = structured?.prompt?.takeIf { it.isNotBlank() } ?: detail
+    var custom by remember(prompt) { mutableStateOf("") }
+    var otherArmed by remember(prompt) { mutableStateOf(false) }
     Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFFFFF6E6), tonalElevation = 0.dp) {
         Column(modifier = Modifier.fillMaxWidth().padding(11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text(if (chinese) "需要审批" else "Approval required", color = Color(0xFF9A6B2F), fontWeight = FontWeight.SemiBold)
-            if (detail.isNotBlank()) {
-                Text(detail, color = Color(0xFF5F4A2F), style = MaterialTheme.typography.bodySmall, maxLines = 12)
+            if (prompt.isNotBlank()) {
+                Text(prompt, color = Color(0xFF5F4A2F), style = MaterialTheme.typography.bodySmall, maxLines = 12)
             }
             options.chunked(2).forEachIndexed { rowIndex, row ->
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -846,6 +851,18 @@ private fun ApprovalActions(chinese: Boolean, detail: String, onSelect: (String)
                 }
             }
         }
+    }
+}
+
+private fun localizedApprovalLabel(option: AtlasApprovalOption, chinese: Boolean): String {
+    if (!chinese) return option.label
+    return when {
+        option.value == "__other__" -> "其他"
+        option.label.equals("Allow", ignoreCase = true) -> "允许"
+        option.label.equals("Deny", ignoreCase = true) -> "拒绝"
+        option.label.equals("Continue", ignoreCase = true) -> "继续"
+        option.label.equals("Cancel", ignoreCase = true) -> "取消"
+        else -> option.label
     }
 }
 

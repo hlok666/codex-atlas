@@ -31,6 +31,16 @@ export type CcSwitchProviderBalance = CcSwitchBalanceResponse & {
   baseUrl: string
 }
 
+export type DesktopApprovalOption = {
+  value: string
+  label: string
+}
+
+export type DesktopApprovalRequest = {
+  prompt: string
+  options: DesktopApprovalOption[]
+}
+
 export type DesktopSessionRecord = {
   id: string
   title: string
@@ -62,6 +72,7 @@ export type DesktopSessionRecord = {
   lastOutput?: string
   /** True when this session belongs to the current foreground terminal window. */
   foreground?: boolean
+  approval?: DesktopApprovalRequest
 }
 
 export type NewCodexSessionRequest = {
