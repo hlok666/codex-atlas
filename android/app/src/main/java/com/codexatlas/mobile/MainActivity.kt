@@ -3,6 +3,7 @@ package com.codexatlas.mobile
 import android.Manifest
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -70,17 +71,20 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity() {
     private var pairingFromIntent by mutableStateOf("")
+    private var sessionIdFromIntent by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         consumePairing(intent)
-        setContent { AtlasMobileApp(pairingFromIntent) }
+        consumeSessionIntent(intent)
+        setContent { AtlasMobileApp(pairingFromIntent, sessionIdFromIntent) }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         consumePairing(intent)
+        consumeSessionIntent(intent)
     }
 
     private fun consumePairing(intent: Intent?) {
@@ -93,7 +97,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun consumeSessionIntent(intent: Intent?) {
+        val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)?.trim().orEmpty()
+        if (sessionId.isNotBlank()) sessionIdFromIntent = sessionId
+    }
+
     companion object {
+        const val EXTRA_SESSION_ID = "com.codexatlas.mobile.extra.SESSION_ID"
+
+        fun storedPairing(context: Context): String {
+            val lan = BridgePreferences.url(context).trim()
+            val tunnel = BridgePreferences.tunnelUrl(context).trim()
+            val token = BridgePreferences.token(context).trim()
+            if (lan.isBlank() || token.isBlank()) return ""
+            return Uri.Builder()
+                .scheme("codex-atlas")
+                .authority("connect")
+                .appendQueryParameter("lan", lan)
+                .apply { if (tunnel.isNotBlank()) appendQueryParameter("tunnel", tunnel) }
+                .appendQueryParameter("token", token)
+                .appendQueryParameter("preferTunnel", if (BridgePreferences.preferTunnel(context)) "1" else "0")
+                .build()
+                .toString()
+        }
+
         fun parsePairing(raw: String): PairingDetails? {
             val uri = runCatching { Uri.parse(raw.trim()) }.getOrNull() ?: return null
             if (uri.scheme != "codex-atlas" || uri.host != "connect") return null
@@ -116,15 +143,15 @@ private sealed interface ConnectionState {
 }
 
 @Composable
-private fun AtlasMobileApp(initialPairing: String) {
+private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = "") {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val zh = remember { Locale.getDefault().language.startsWith("zh") }
-    var pairing by remember(initialPairing) { mutableStateOf(initialPairing) }
+    var pairing by remember(initialPairing) { mutableStateOf(initialPairing.ifBlank { MainActivity.storedPairing(context) }) }
     var state by remember { mutableStateOf<ConnectionState>(ConnectionState.Idle) }
     var snapshot by remember { mutableStateOf<AtlasSnapshot?>(null) }
     var sessions by remember { mutableStateOf<List<AtlasSession>>(emptyList()) }
-    var selectedSessionId by remember { mutableStateOf("") }
+    var selectedSessionId by remember(initialSessionId) { mutableStateOf(initialSessionId) }
     var messages by remember { mutableStateOf<List<AtlasMessage>>(emptyList()) }
     var message by remember { mutableStateOf("") }
     var sessionQuery by remember { mutableStateOf("") }
@@ -223,8 +250,9 @@ private fun AtlasMobileApp(initialPairing: String) {
             result.onSuccess { (freshSnapshot, available, preferredId) ->
                 snapshot = freshSnapshot
                 sessions = available
-                selectedSessionId = preferredId.ifBlank { available.firstOrNull()?.id.orEmpty() }
-                val target = preferredId.ifBlank { available.firstOrNull()?.id.orEmpty() }
+                    val requestedId = initialSessionId.takeIf { requested -> available.any { it.id == requested } }
+                    selectedSessionId = requestedId ?: preferredId.ifBlank { available.firstOrNull()?.id.orEmpty() }
+                    val target = selectedSessionId
                 messages = if (target.isBlank()) freshSnapshot.messages else withContext(Dispatchers.IO) { runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).messagesAny(target, if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }.getOrDefault(freshSnapshot.messages) }
                 state = ConnectionState.Connected(freshSnapshot.title)
                 AtlasWidgetReceiver.requestRefresh(context)
@@ -399,6 +427,13 @@ private fun AtlasMobileApp(initialPairing: String) {
                 val conversationTitle = selectedSession?.title?.ifBlank { null } ?: snapshot!!.title
                 val conversationFolder = selectedSession?.cwd?.ifBlank { null } ?: snapshot!!.folder
                 val conversationModel = selectedSession?.model?.ifBlank { null } ?: snapshot!!.model
+                LaunchedEffect(conversationId) {
+                    if (conversationId.isBlank()) return@LaunchedEffect
+                    messages = withContext(Dispatchers.IO) {
+                        runCatching { AtlasBridgeClient(if (details.preferTunnel) details.tunnelUrl else details.lanUrl, details.token).messagesAny(conversationId, if (details.preferTunnel) details.lanUrl else details.tunnelUrl) }
+                            .getOrDefault(emptyList())
+                    }
+                }
                 LaunchedEffect(conversationId, messages.size, messages.lastOrNull()?.id) {
                     if (messages.isNotEmpty()) messageScrollState.animateScrollTo(messageScrollState.maxValue)
                 }

@@ -119,5 +119,18 @@
             android:textColor="#2F7C3B"
             android:textSize="14sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/atlas_widget_reply"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:background="@drawable/atlas_action_background"
+            android:gravity="center"
+            android:text="回复"
+            android:textColor="#2F7C3B"
+            android:textSize="14sp"
+            android:textStyle="bold" />
     </LinearLayout>
 </LinearLayout>

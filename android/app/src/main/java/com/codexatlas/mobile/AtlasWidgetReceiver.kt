@@ -30,6 +30,7 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
         when (intent.action) {
             ACTION_REFRESH -> updateAll(context)
             ACTION_ACTIVATE, ACTION_CONTINUE -> performSessionAction(context, intent.action == ACTION_CONTINUE, goAsync())
+            ACTION_REPLY -> openConversation(context, goAsync())
             else -> super.onReceive(context, intent)
         }
     }
@@ -38,9 +39,11 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
         const val ACTION_REFRESH = "com.codexatlas.mobile.action.REFRESH_WIDGET"
         const val ACTION_ACTIVATE = "com.codexatlas.mobile.action.ACTIVATE_SESSION"
         const val ACTION_CONTINUE = "com.codexatlas.mobile.action.INPUT_CONTINUE"
+        const val ACTION_REPLY = "com.codexatlas.mobile.action.OPEN_REPLY"
         private const val REQUEST_REFRESH = 7001
         private const val REQUEST_ACTIVATE = 7002
         private const val REQUEST_CONTINUE = 7003
+        private const val REQUEST_REPLY = 7004
 
         fun updateAll(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
@@ -78,6 +81,23 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
                         }
                     }
                     updateAll(context)
+                } finally {
+                    pending?.finish()
+                }
+            }
+        }
+
+        private fun openConversation(context: Context, pending: BroadcastReceiver.PendingResult?) {
+            widgetScope.launch(Dispatchers.IO) {
+                try {
+                    val sessionId = loadSnapshot(context).sessionId
+                    withContext(Dispatchers.Main) {
+                        val intent = Intent(context, MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            if (sessionId.isNotBlank()) putExtra(MainActivity.EXTRA_SESSION_ID, sessionId)
+                        }
+                        context.startActivity(intent)
+                    }
                 } finally {
                     pending?.finish()
                 }
@@ -127,8 +147,10 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
             views.setTextColor(R.id.atlas_widget_balance, if (snapshot.balanceRemaining != null && snapshot.balanceRemaining <= 0.0) Color.rgb(216, 93, 89) else Color.rgb(146, 201, 149))
             views.setBoolean(R.id.atlas_widget_activate, "setEnabled", snapshot.canActivate && snapshot.sessionId.isNotBlank())
             views.setBoolean(R.id.atlas_widget_continue, "setEnabled", snapshot.canInputContinue && snapshot.sessionId.isNotBlank())
+            views.setBoolean(R.id.atlas_widget_reply, "setEnabled", snapshot.sessionId.isNotBlank())
             views.setOnClickPendingIntent(R.id.atlas_widget_activate, pendingIntent(context, ACTION_ACTIVATE, REQUEST_ACTIVATE + widgetId))
             views.setOnClickPendingIntent(R.id.atlas_widget_continue, pendingIntent(context, ACTION_CONTINUE, REQUEST_CONTINUE + widgetId))
+            views.setOnClickPendingIntent(R.id.atlas_widget_reply, pendingIntent(context, ACTION_REPLY, REQUEST_REPLY + widgetId))
             views.setOnClickPendingIntent(R.id.atlas_widget_root, pendingIntent(context, ACTION_REFRESH, REQUEST_REFRESH + widgetId))
             return views
         }
