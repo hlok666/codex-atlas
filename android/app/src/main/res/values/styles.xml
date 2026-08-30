@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.CodexAtlas" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#5DBB68</item>
+        <item name="android:navigationBarColor">#F7F9F6</item>
+        <item name="android:statusBarColor">#F7F9F6</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>Codex Atlas</title>
+  <rect width="512" height="512" rx="128" fill="#171A17"/>
+  <path d="M154 176H358" stroke="#EEF2EE" stroke-width="28" stroke-linecap="round"/>
+  <path d="M154 256H286" stroke="#EEF2EE" stroke-width="28" stroke-linecap="round"/>
+  <path d="M154 336H238" stroke="#6DDE55" stroke-width="28" stroke-linecap="round"/>
+  <circle cx="350" cy="336" r="22" fill="#6DDE55"/>
+</svg>

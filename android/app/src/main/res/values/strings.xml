@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Codex Atlas</string>
+    <string name="atlas_widget_label">Codex Atlas</string>
+    <string name="atlas_widget_description">Codex Atlas CRT session card</string>
+</resources>
