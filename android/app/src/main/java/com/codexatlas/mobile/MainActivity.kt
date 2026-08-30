@@ -8,6 +8,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -20,6 +22,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,6 +63,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScanner
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -68,6 +74,7 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : ComponentActivity() {
     private var pairingFromIntent by mutableStateOf("")
@@ -122,13 +129,16 @@ class MainActivity : ComponentActivity() {
         }
 
         fun parsePairing(raw: String): PairingDetails? {
-            val uri = runCatching { Uri.parse(raw.trim()) }.getOrNull() ?: return null
-            if (uri.scheme != "codex-atlas" || uri.host != "connect") return null
-            val lan = uri.getQueryParameter("lan")?.trim().orEmpty()
+            val cleaned = raw.trim().removePrefix("\uFEFF").trim()
+            val uri = runCatching { Uri.parse(cleaned) }.getOrNull() ?: return null
+            if (!uri.scheme.equals("codex-atlas", ignoreCase = true) || !uri.host.equals("connect", ignoreCase = true)) return null
+            val lan = (uri.getQueryParameter("lan") ?: uri.getQueryParameter("url"))?.trim().orEmpty()
             val tunnel = uri.getQueryParameter("tunnel")?.trim().orEmpty()
             val token = uri.getQueryParameter("token")?.trim().orEmpty()
             if (lan.isBlank() || token.isBlank()) return null
-            return PairingDetails(lan, tunnel, token, uri.getQueryParameter("preferTunnel") == "1")
+            val preferTunnel = uri.getQueryParameter("preferTunnel").equals("1") ||
+                uri.getQueryParameter("preferTunnel").equals("true", ignoreCase = true)
+            return PairingDetails(lan, tunnel, token, preferTunnel)
         }
     }
 }
@@ -438,7 +448,16 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             else Text(if (zh) "立即连接" else "Connect")
                         }
                     }
-                    if (permissionDenied) Text(if (zh) "相机权限被拒绝，请在系统设置中允许。" else "Camera permission was denied. Allow it in system settings.", color = Color(0xFFB44A45), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+                    if (permissionDenied) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (zh) "相机权限被拒绝" else "Camera permission was denied", color = Color(0xFFB44A45), style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = {
+                                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                })
+                            }) { Text(if (zh) "打开设置" else "Open settings") }
+                        }
+                    }
                 }
             }
             ConnectionStatus(state, zh)
@@ -1018,16 +1037,31 @@ private fun formatVoiceDuration(seconds: Int): String {
     return "%02d:%02d".format(Locale.US, mins, secs)
 }
 
+private enum class ScannerState { Starting, Ready, Error }
+private enum class ScanFeedback { FrameUnavailable, ScannerUnavailable, InvalidPairing, RecognitionFailed }
+
 @Composable
 private fun ScannerScreen(chinese: Boolean, onResult: (String) -> Unit, onClose: () -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
-    val scanner = remember { BarcodeScanning.getClient() }
+    val scannerOptions = remember {
+        BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .build()
+    }
+    val scanner = remember { BarcodeScanning.getClient(scannerOptions) }
     val found = remember { AtomicBoolean(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val disposed = remember { AtomicBoolean(false) }
+    val providerRef = remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    val lastStatusAt = remember { AtomicLong(0L) }
+    val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
+    var scannerState by remember { mutableStateOf(ScannerState.Starting) }
+    var status by remember { mutableStateOf(if (chinese) "正在启动相机…" else "Starting camera…") }
     DisposableEffect(Unit) {
         onDispose {
+            disposed.set(true)
+            providerRef.value?.unbindAll()
             executor.shutdown()
             scanner.close()
         }
@@ -1035,38 +1069,132 @@ private fun ScannerScreen(chinese: Boolean, onResult: (String) -> Unit, onClose:
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             factory = { PreviewView(it).also { view ->
+                view.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                view.scaleType = PreviewView.ScaleType.FILL_CENTER
                 val providerFuture = ProcessCameraProvider.getInstance(context)
                 providerFuture.addListener({
+                    if (disposed.get()) return@addListener
                     runCatching {
                         val provider = providerFuture.get()
+                        providerRef.value = provider
                         val preview = Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
-                        val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
-                        analysis.setAnalyzer(executor) { proxy -> scanFrame(proxy, scanner, found, onResult) }
+                        val analysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                        analysis.setAnalyzer(executor) { proxy ->
+                            scanFrame(
+                                proxy = proxy,
+                                scanner = scanner,
+                                found = found,
+                                onResult = { value ->
+                                    mainExecutor.execute {
+                                        if (!disposed.get()) {
+                                            found.set(true)
+                                            scannerState = ScannerState.Ready
+                                            status = if (chinese) "已识别，正在连接…" else "Recognized, connecting…"
+                                            onResult(value)
+                                        }
+                                    }
+                                },
+                                onStatus = { message ->
+                                    val now = SystemClock.elapsedRealtime()
+                                    val previous = lastStatusAt.get()
+                                    if (now - previous >= 1_500L && lastStatusAt.compareAndSet(previous, now)) {
+                                        mainExecutor.execute {
+                                            if (!disposed.get()) {
+                                                status = when (message) {
+                                                    ScanFeedback.FrameUnavailable -> if (chinese) "无法读取相机画面" else "Unable to read camera frames"
+                                                    ScanFeedback.ScannerUnavailable -> if (chinese) "扫码服务不可用" else "Barcode scanner unavailable"
+                                                    ScanFeedback.InvalidPairing -> if (chinese) "这不是 Codex Atlas 配对二维码" else "This is not a Codex Atlas pairing QR"
+                                                    ScanFeedback.RecognitionFailed -> if (chinese) "扫码识别失败" else "QR recognition failed"
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                            )
+                        }
                         provider.unbindAll()
                         provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-                    }.onFailure { error = it.message ?: if (chinese) "无法打开相机" else "Unable to open camera" }
+                        mainExecutor.execute {
+                            if (!disposed.get()) {
+                                scannerState = ScannerState.Ready
+                                status = if (chinese) "将二维码放入取景框" else "Place the QR code inside the frame"
+                            }
+                        }
+                    }.onFailure {
+                        mainExecutor.execute {
+                            if (!disposed.get()) {
+                                scannerState = ScannerState.Error
+                                status = it.message ?: if (chinese) "无法打开相机" else "Unable to open camera"
+                            }
+                        }
+                    }
                 }, ContextCompat.getMainExecutor(context))
             } }, modifier = Modifier.fillMaxSize()
         )
         Column(modifier = Modifier.align(Alignment.TopCenter).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(if (chinese) "扫描 Codex Atlas 二维码" else "Scan the Codex Atlas QR", color = Color.White, style = MaterialTheme.typography.titleLarge)
-            Text(if (chinese) "识别后会自动连接" else "It connects as soon as it is recognized", color = Color(0xFFDCE8DC))
+            Text(status, color = if (scannerState == ScannerState.Error) Color(0xFFFFB4AB) else Color(0xFFDCE8DC))
         }
-        if (error != null) Text(error.orEmpty(), color = Color(0xFFFFB4AB), modifier = Modifier.align(Alignment.Center).padding(24.dp))
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(238.dp)
+                .border(2.dp, if (scannerState == ScannerState.Error) Color(0xFFFF8275) else Color.White, RoundedCornerShape(18.dp)),
+        )
+        if (scannerState == ScannerState.Error) {
+            Column(modifier = Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(status, color = Color(0xFFFFB4AB))
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(onClick = {
+                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                    })
+                }) { Text(if (chinese) "打开相机权限" else "Open camera permissions", color = Color.White) }
+            }
+        }
         OutlinedButton(onClick = onClose, modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp)) { Text(if (chinese) "取消" else "Cancel", color = Color.White) }
     }
 }
 
-private fun scanFrame(proxy: ImageProxy, scanner: com.google.mlkit.vision.barcode.BarcodeScanner, found: AtomicBoolean, onResult: (String) -> Unit) {
+private fun scanFrame(
+    proxy: ImageProxy,
+    scanner: BarcodeScanner,
+    found: AtomicBoolean,
+    onResult: (String) -> Unit,
+    onStatus: (ScanFeedback) -> Unit,
+) {
     val image = proxy.image
     if (image == null || found.get()) {
         proxy.close()
         return
     }
-    scanner.process(InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees))
-        .addOnSuccessListener { codes ->
-            val value = codes.firstNotNullOfOrNull { it.rawValue }
-            if (value != null && MainActivity.parsePairing(value) != null && found.compareAndSet(false, true)) onResult(value)
+    val input = runCatching { InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees) }
+        .getOrElse {
+            proxy.close()
+            onStatus(ScanFeedback.FrameUnavailable)
+            return
         }
-        .addOnCompleteListener { proxy.close() }
+    val task = runCatching { scanner.process(input) }
+        .getOrElse {
+            proxy.close()
+            onStatus(ScanFeedback.ScannerUnavailable)
+            return
+        }
+    task.addOnSuccessListener { codes ->
+        if (found.get()) return@addOnSuccessListener
+        val value = codes.asSequence().mapNotNull { it.rawValue?.trim()?.takeIf(String::isNotBlank) }.firstOrNull()
+        if (value != null) {
+            if (MainActivity.parsePairing(value) != null && found.compareAndSet(false, true)) {
+                onResult(value)
+            } else if (MainActivity.parsePairing(value) == null) {
+                onStatus(ScanFeedback.InvalidPairing)
+            }
+        }
+    }.addOnFailureListener {
+        onStatus(ScanFeedback.RecognitionFailed)
+    }.addOnCompleteListener {
+        proxy.close()
+    }
 }
