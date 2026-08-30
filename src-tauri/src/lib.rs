@@ -312,6 +312,48 @@ pub struct ServerTunnelProgress {
     pub finished_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceServiceStatus {
+    pub paseo_installed: bool,
+    pub paseo_version: Option<String>,
+    pub daemon_running: bool,
+    pub stt_ready: bool,
+    pub tts_ready: bool,
+    pub models_dir: String,
+    pub provider: String,
+    pub ready: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceServiceProgress {
+    pub state: String,
+    pub step: u8,
+    pub total: u8,
+    pub message: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub started_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
+}
+
+impl Default for VoiceServiceProgress {
+    fn default() -> Self {
+        Self {
+            state: "idle".to_string(),
+            step: 0,
+            total: 6,
+            message: "尚未安装语音服务".to_string(),
+            downloaded_bytes: 0,
+            total_bytes: None,
+            started_at_ms: 0,
+            finished_at_ms: None,
+        }
+    }
+}
+
 impl Default for ServerTunnelProgress {
     fn default() -> Self {
         Self {
@@ -507,6 +549,7 @@ static MOBILE_TUNNEL_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SERVER_TUNNEL_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 static SERVER_TUNNEL_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SERVER_TUNNEL_PROGRESS: OnceLock<Mutex<ServerTunnelProgress>> = OnceLock::new();
+static VOICE_SERVICE_PROGRESS: OnceLock<Mutex<VoiceServiceProgress>> = OnceLock::new();
 
 fn mobile_tunnel_child() -> &'static Mutex<Option<Child>> {
     MOBILE_TUNNEL_CHILD.get_or_init(|| Mutex::new(None))
@@ -542,6 +585,32 @@ fn set_server_tunnel_progress(
         progress.state = state.to_string();
         progress.step = step;
         progress.message = message.into();
+        progress.finished_at_ms = finished_at_ms;
+    }
+}
+
+fn voice_service_progress() -> &'static Mutex<VoiceServiceProgress> {
+    VOICE_SERVICE_PROGRESS.get_or_init(|| Mutex::new(VoiceServiceProgress::default()))
+}
+
+fn set_voice_service_progress(
+    state: &str,
+    step: u8,
+    message: impl Into<String>,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+) {
+    if let Ok(mut progress) = voice_service_progress().lock() {
+        if let Some(started_at_ms) = started_at_ms {
+            progress.started_at_ms = started_at_ms;
+        }
+        progress.state = state.to_string();
+        progress.step = step;
+        progress.message = message.into();
+        progress.downloaded_bytes = downloaded_bytes;
+        progress.total_bytes = total_bytes;
         progress.finished_at_ms = finished_at_ms;
     }
 }
@@ -5689,6 +5758,9 @@ async fn set_floating_window_visible(app: AppHandle, visible: bool) -> Result<bo
         .minimizable(false)
         .closable(false)
         .visible(false)
+        // Keep the borderless widget genuinely transparent so only the CRT
+        // shell is visible. A transparent background also prevents a square
+        // rectangle from showing around the rounded television body.
         .transparent(true)
         .shadow(false)
         .focusable(true)
@@ -5762,6 +5834,296 @@ fn open_url(url: String) -> Result<bool, String> {
             .map_err(|error| format!("open URL: {error}"))?;
     }
     Ok(true)
+}
+
+struct VoiceModelSpec {
+    id: &'static str,
+    archive_url: &'static str,
+    extracted_dir: &'static str,
+    required_files: &'static [&'static str],
+}
+
+const VOICE_STT_MODEL: VoiceModelSpec = VoiceModelSpec {
+    id: "parakeet-tdt-0.6b-v2-int8",
+    archive_url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
+    extracted_dir: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+    required_files: &["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"],
+};
+
+const VOICE_TTS_MODEL: VoiceModelSpec = VoiceModelSpec {
+    id: "kokoro-en-v0_19",
+    archive_url:
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
+    extracted_dir: "kokoro-en-v0_19",
+    required_files: &["model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data"],
+};
+
+fn paseo_home_path() -> PathBuf {
+    std::env::var_os("PASEO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".paseo"))
+}
+
+fn voice_models_dir() -> PathBuf {
+    std::env::var_os("PASEO_LOCAL_MODELS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paseo_home_path().join("models").join("local-speech"))
+}
+
+fn voice_model_dir(spec: &VoiceModelSpec) -> PathBuf {
+    voice_models_dir().join(spec.extracted_dir)
+}
+
+fn voice_model_ready(spec: &VoiceModelSpec) -> bool {
+    let model_dir = voice_model_dir(spec);
+    spec.required_files.iter().all(|relative| {
+        let path = model_dir.join(relative);
+        fs::metadata(path)
+            .map(|metadata| metadata.is_dir() || (metadata.is_file() && metadata.len() > 0))
+            .unwrap_or(false)
+    })
+}
+
+fn paseo_cli_version() -> Option<String> {
+    let path = executable_candidate("paseo")?;
+    let output = output_command(&path.to_string_lossy(), &["--version".to_string()]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn voice_service_status() -> VoiceServiceStatus {
+    let paseo_version = paseo_cli_version();
+    let paseo_installed = paseo_version.is_some();
+    let stt_ready = voice_model_ready(&VOICE_STT_MODEL);
+    let tts_ready = voice_model_ready(&VOICE_TTS_MODEL);
+    let error = if !paseo_installed {
+        Some("未检测到 Paseo CLI".to_string())
+    } else if !stt_ready || !tts_ready {
+        Some("本地语音模型尚未完整安装".to_string())
+    } else {
+        None
+    };
+    VoiceServiceStatus {
+        paseo_installed,
+        paseo_version,
+        daemon_running: paseo_installed && paseo_daemon_ready(),
+        stt_ready,
+        tts_ready,
+        models_dir: voice_models_dir().to_string_lossy().to_string(),
+        provider: "Paseo local · Sherpa ONNX".to_string(),
+        ready: paseo_installed && stt_ready && tts_ready,
+        error,
+    }
+}
+
+fn install_paseo_cli() -> Result<(), String> {
+    if executable_candidate("paseo").is_some() {
+        return Ok(());
+    }
+    let output = command_for(
+        "npm",
+        &[
+            "install".to_string(),
+            "--global".to_string(),
+            "@getpaseo/cli@latest".to_string(),
+        ],
+    )?
+    .stdin(Stdio::null())
+    .output()
+    .map_err(|error| format!("安装 Paseo CLI 失败: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("npm 安装 Paseo 失败: {}", output.status)
+        } else {
+            detail
+        });
+    }
+    if executable_candidate("paseo").is_none() {
+        return Err("Paseo CLI 安装完成，但系统仍找不到 paseo 命令".to_string());
+    }
+    Ok(())
+}
+
+fn extract_voice_archive(archive_path: &Path, models_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(models_dir).map_err(|error| format!("创建语音模型目录失败: {error}"))?;
+    let archive = archive_path.to_string_lossy().to_string();
+    let destination = models_dir.to_string_lossy().to_string();
+    let output = Command::new("tar")
+        .args(["xf", &archive, "-C", &destination])
+        .output()
+        .map_err(|error| format!("解压语音模型失败: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if detail.is_empty() {
+            format!("tar 解压失败: {}", output.status)
+        } else {
+            detail
+        })
+    }
+}
+
+async fn download_voice_model(spec: &'static VoiceModelSpec, step: u8) -> Result<(), String> {
+    if voice_model_ready(spec) {
+        set_voice_service_progress(
+            "ready",
+            step,
+            format!("{} 已就绪", spec.id),
+            0,
+            None,
+            None,
+            None,
+        );
+        return Ok(());
+    }
+    let models_dir = voice_models_dir();
+    let downloads_dir = models_dir.join(".downloads");
+    fs::create_dir_all(&downloads_dir).map_err(|error| format!("创建语音下载目录失败: {error}"))?;
+    let archive_name = spec
+        .archive_url
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("voice-model.tar.bz2");
+    let archive_path = downloads_dir.join(archive_name);
+    let temp_path = downloads_dir.join(format!("{archive_name}.tmp"));
+    set_voice_service_progress(
+        "downloading",
+        step,
+        format!("正在下载 {}", spec.id),
+        0,
+        None,
+        None,
+        None,
+    );
+    let response = Client::new()
+        .get(spec.archive_url)
+        .send()
+        .await
+        .map_err(|error| format!("下载 {} 失败: {error}", spec.id))?;
+    if !response.status().is_success() {
+        return Err(format!("下载 {} 失败: HTTP {}", spec.id, response.status()));
+    }
+    let total_bytes = response.content_length();
+    let mut downloaded_bytes = 0_u64;
+    let mut file =
+        File::create(&temp_path).map_err(|error| format!("写入语音模型失败: {error}"))?;
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取 {} 下载内容失败: {error}", spec.id))?
+    {
+        file.write_all(&chunk)
+            .map_err(|error| format!("写入 {} 下载内容失败: {error}", spec.id))?;
+        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+        set_voice_service_progress(
+            "downloading",
+            step,
+            format!("正在下载 {}", spec.id),
+            downloaded_bytes,
+            total_bytes,
+            None,
+            None,
+        );
+    }
+    drop(file);
+    // A previous interrupted extraction may have left the final archive in
+    // place. Remove it before replacing so retry works on Windows too.
+    let _ = fs::remove_file(&archive_path);
+    fs::rename(&temp_path, &archive_path)
+        .map_err(|error| format!("整理 {} 下载文件失败: {error}", spec.id))?;
+    set_voice_service_progress(
+        "extracting",
+        step.saturating_add(1),
+        format!("正在解压 {}", spec.id),
+        downloaded_bytes,
+        total_bytes,
+        None,
+        None,
+    );
+    let archive_for_extract = archive_path.clone();
+    let models_for_extract = models_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        extract_voice_archive(&archive_for_extract, &models_for_extract)
+    })
+    .await
+    .map_err(|error| format!("解压 {} 任务失败: {error}", spec.id))??;
+    if !voice_model_ready(spec) {
+        return Err(format!("{} 解压完成，但模型文件校验未通过", spec.id));
+    }
+    let _ = fs::remove_file(&archive_path);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_voice_service_status() -> VoiceServiceStatus {
+    voice_service_status()
+}
+
+#[tauri::command]
+fn get_voice_service_progress() -> VoiceServiceProgress {
+    voice_service_progress()
+        .lock()
+        .map(|progress| progress.clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn install_voice_service() -> Result<VoiceServiceStatus, String> {
+    let started_at_ms = now_ms();
+    set_voice_service_progress(
+        "installing",
+        1,
+        "正在准备 Paseo 语音服务",
+        0,
+        None,
+        Some(started_at_ms),
+        None,
+    );
+    if let Err(error) = tauri::async_runtime::spawn_blocking(install_paseo_cli)
+        .await
+        .map_err(|error| format!("准备 Paseo CLI 任务失败: {error}"))?
+    {
+        set_voice_service_progress("error", 1, error.clone(), 0, None, None, Some(now_ms()));
+        return Err(error);
+    }
+    set_voice_service_progress("installing", 2, "Paseo CLI 已就绪", 0, None, None, None);
+    if let Err(error) = download_voice_model(&VOICE_STT_MODEL, 3).await {
+        set_voice_service_progress("error", 3, error.clone(), 0, None, None, Some(now_ms()));
+        return Err(error);
+    }
+    if let Err(error) = download_voice_model(&VOICE_TTS_MODEL, 5).await {
+        set_voice_service_progress("error", 5, error.clone(), 0, None, None, Some(now_ms()));
+        return Err(error);
+    }
+    set_voice_service_progress("starting", 6, "正在启动 Paseo daemon", 0, None, None, None);
+    let daemon_result = tauri::async_runtime::spawn_blocking(ensure_paseo_daemon)
+        .await
+        .map_err(|error| format!("启动 Paseo daemon 任务失败: {error}"))?;
+    if let Err(error) = daemon_result {
+        set_voice_service_progress("error", 6, error.clone(), 0, None, None, Some(now_ms()));
+        return Err(error);
+    }
+    set_voice_service_progress(
+        "ready",
+        6,
+        "本地语音服务已就绪",
+        0,
+        None,
+        None,
+        Some(now_ms()),
+    );
+    Ok(voice_service_status())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -6984,6 +7346,9 @@ pub fn run() {
             get_balance,
             get_cc_switch_provider_balances,
             get_codex_info,
+            get_voice_service_status,
+            get_voice_service_progress,
+            install_voice_service,
             get_mobile_bridge_config,
             configure_mobile_bridge,
             start_mobile_bridge_tunnel,

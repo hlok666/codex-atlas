@@ -885,7 +885,11 @@ html.floating-window #root {
   margin: 0 !important;
   padding: 0 !important;
   overflow: visible !important;
+  /* The native window is transparent; keep every page layer transparent too
+     so the CRT shell is the only visible surface. */
   background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
 }
 html.floating-window body { color: #171a17; }
 .desktop-ball-window {
@@ -1716,6 +1720,11 @@ html.floating-window body { color: #171a17; }
 .app-shell .mobile-bridge-pairing-link { display: block; max-width: 390px; margin-top: 6px; overflow: hidden; color: var(--app-secondary); font: 10px 'Cascadia Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
 .app-shell .connection-panel { border-radius: 12px; }
 .app-shell .connection-panel .connection-status { min-height: 58px; margin: 8px 0 14px; padding: 8px 10px; border: 1px solid var(--app-line); border-radius: 8px; background: var(--app-surface-soft); }
+.app-shell .connection-summary { display: flex; align-items: center; gap: 10px; min-height: 58px; margin: 8px 0 14px; padding: 8px 10px; border: 1px solid var(--app-line); border-radius: 8px; background: var(--app-surface-soft); }
+.app-shell .connection-summary > div { min-width: 0; display: grid; flex: 1; gap: 3px; }
+.app-shell .connection-summary strong { overflow: hidden; color: var(--app-ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .connection-summary small { overflow: hidden; color: var(--app-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .connection-summary .secondary-button { flex: 0 0 auto; min-height: 34px; }
 .app-shell .connection-status > div, .app-shell .server-tunnel-status > div { min-width: 0; display: grid; gap: 3px; }
 .app-shell .connection-status strong, .app-shell .server-tunnel-status strong { color: var(--app-ink); font-size: 13px; }
 .app-shell .connection-status small { color: var(--app-muted); font-size: 11px; }
@@ -1741,6 +1750,11 @@ html.floating-window body { color: #171a17; }
 .app-shell .server-tunnel-form { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .app-shell .server-tunnel-form .field-label:nth-child(5), .app-shell .server-tunnel-form .field-label:nth-child(6) { grid-column: span 1; }
 .app-shell .error-text { color: #b24a42 !important; }
+/* Setup is not failure: use a quiet amber state for disconnected services,
+   and keep the empty Bridge card compact until it has real connection data. */
+.app-shell .connection-panel .content-state { min-height: 104px; }
+.app-shell .connection-panel .content-state.error { color: var(--app-secondary); }
+.app-shell .connection-panel .content-state.error .content-state-icon { color: var(--app-warning); border-color: #ead7b7; background: var(--app-warning-soft); }
 @media (max-width: 900px) { .app-shell .mobile-bridge-route-grid, .app-shell .mobile-bridge-form, .app-shell .server-tunnel-form, .app-shell .mobile-bridge-preferences, .app-shell .server-quick-form { grid-template-columns: 1fr; } .app-shell .pairing-card { align-items: flex-start; flex-direction: column; } }
 
 @media (max-width: 1080px) {
@@ -1782,7 +1796,7 @@ html.floating-window #root {
   overflow: visible !important;
   background: transparent !important;
 }
-html.floating-window body { color: #172018; }
+html.floating-window body { color: #172018; background: transparent !important; }
 .desktop-mini-widget {
   position: relative;
   width: 188px;
@@ -1886,6 +1900,9 @@ html.floating-window #root {
   height: var(--floating-size, 252px) !important;
   min-height: var(--floating-size, 252px) !important;
   max-height: var(--floating-size, 252px) !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
 }
 .desktop-tv-widget {
   position: relative;
@@ -1948,8 +1965,8 @@ html.floating-window #root {
 .desktop-tv-approval-options button { min-width: 42px; min-height: 22px; flex: 1 1 42px; padding: 3px 6px; overflow-wrap: anywhere; border: 1px solid rgba(174,222,177,.6); border-radius: 6px; color: #17321c; background: #bfe7b8; font: 700 9px/1.2 'Geist Variable', 'Microsoft YaHei UI', sans-serif; text-align: center; white-space: normal; cursor: pointer; -webkit-app-region: no-drag; }
 .desktop-tv-approval-options button:hover:not(:disabled) { color: #112914; background: #d9f3d3; }
 .desktop-tv-approval-options button:disabled { opacity: .56; cursor: default; }
-.desktop-tv-footer { position: relative; z-index: 3; display: flex; flex: 0 0 clamp(34px, 13.5%, 62px); align-items: center; gap: clamp(4px, 2.4%, 10px); height: clamp(34px, 13.5%, 62px); padding: clamp(3px, 1.6%, 8px) clamp(8px, 4.4%, 24px); border-top: 1px solid rgba(201,210,198,.9); background: linear-gradient(180deg, rgba(239,243,237,.94), rgba(211,220,208,.96)); box-shadow: inset 0 1px rgba(255,255,255,.9), inset 0 -2px 4px rgba(108,124,105,.15); }
-.desktop-tv-footer::before { content: ''; width: 30px; height: 5px; flex: 0 0 30px; border: 1px solid #b7c4b4; border-radius: 5px; background: repeating-linear-gradient(90deg, #8e9d8b 0 2px, transparent 2px 5px); opacity: .65; }
+.desktop-tv-footer { position: relative; z-index: 3; display: flex; flex: 0 0 clamp(34px, 13.5%, 62px); align-items: center; gap: clamp(4px, 2.4%, 10px); height: clamp(34px, 13.5%, 62px); padding: clamp(3px, 1.6%, 8px) clamp(8px, 4.4%, 24px); border-top: 0; background: transparent; box-shadow: none; }
+.desktop-tv-footer::before { display: none; }
 .desktop-tv-drag-handle { min-width: 0; display: inline-flex; align-items: center; gap: 5px; flex: 1; overflow: hidden; color: #667364; cursor: grab; -webkit-app-region: drag; }
 .desktop-tv-drag-handle:active { cursor: grabbing; }
 .desktop-tv-drag-handle span { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
@@ -2017,9 +2034,14 @@ html.floating-window #root {
   --app-muted: #7b847e;
   --app-line: #e0e5e1;
   --app-line-strong: #cbd3cd;
+  /* Aliases shared by connection and integration surfaces. */
+  --app-border: #e0e5e1;
+  --app-surface-soft: #f7f8f7;
+  --app-muted-strong: #555e58;
   --app-accent: #2f6b4f;
   --app-accent-hover: #285d45;
   --app-accent-soft: #eaf3ed;
+  --app-success-soft: #eaf3ed;
   --app-danger: #a34242;
   --app-danger-soft: #faeeee;
   --app-warning: #9a6a20;
@@ -2357,6 +2379,23 @@ html.floating-window #root {
 .app-shell .text-input:hover { border-color: var(--app-line-strong); }
 .app-shell .field-label select:focus,
 .app-shell .text-input:focus { border-color: #8ab19c; }
+.app-shell .password-input { position: relative; display: block; width: 100%; }
+.app-shell .password-input .text-input { padding-right: 42px; }
+.app-shell .password-toggle {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--app-muted);
+  background: transparent;
+}
+.app-shell .password-toggle:hover:not(:disabled) { color: var(--app-secondary); background: var(--app-soft-active); }
 .app-shell .field-hint { color: var(--app-muted); font-size: 12px; font-weight: 500; }
 .app-shell .switch-row { min-height: 64px; gap: 16px; padding: 16px 0; border-color: var(--app-line); }
 .app-shell .switch-row strong,
@@ -2646,6 +2685,39 @@ html.floating-window #root {
 .app-shell .server-install-progress.error strong,
 .app-shell .server-install-progress.error small { color: var(--app-danger); }
 
+/* Local Paseo speech setup is an explicit runtime capability, with the same
+   restrained settings-card language as the surrounding controls. */
+.app-shell .voice-service-panel { grid-column: 1 / -1; min-height: 0; }
+.app-shell .voice-service-panel.has-error { border-color: #e9cccc; }
+.app-shell .voice-service-status { min-height: 64px; display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--app-line); border-radius: 8px; background: var(--app-soft); }
+.app-shell .voice-service-status .health-light { width: 9px; height: 9px; flex-basis: 9px; }
+.app-shell .voice-service-status-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
+.app-shell .voice-service-status-copy strong { overflow: hidden; color: var(--app-ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .voice-service-status-copy small { overflow: hidden; color: var(--app-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .voice-service-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.app-shell .voice-service-meta > span { min-width: 0; display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--app-line); border-radius: 8px; background: #fff; }
+.app-shell .voice-service-meta strong { overflow: hidden; color: var(--app-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .voice-service-meta small { overflow: hidden; color: var(--app-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .voice-install-progress { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid #cddfd3; border-radius: 8px; background: var(--app-accent-soft); }
+.app-shell .voice-install-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.app-shell .voice-install-progress strong { min-width: 0; overflow: hidden; color: var(--app-ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .voice-install-progress span,
+.app-shell .voice-install-progress small { color: var(--app-muted); font-size: 11px; }
+.app-shell .voice-install-progress progress { width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: 8px; accent-color: var(--app-accent); }
+.app-shell .voice-install-progress progress::-webkit-progress-bar { background: #e8ece8; }
+.app-shell .voice-install-progress progress::-webkit-progress-value { background: var(--app-accent); }
+.app-shell .voice-install-progress.error { border-color: #e9cccc; background: var(--app-danger-soft); }
+.app-shell .voice-install-progress.error strong,
+.app-shell .voice-install-progress.error small { color: var(--app-danger); }
+.app-shell .voice-service-panel .compact-button { flex: 0 0 auto; }
+
+@media (max-width: 560px) {
+  .app-shell .voice-service-status { align-items: flex-start; flex-wrap: wrap; }
+  .app-shell .voice-service-status-copy { padding-top: 1px; }
+  .app-shell .voice-service-status .compact-button { width: 100%; justify-content: center; margin-left: 21px; }
+  .app-shell .voice-service-meta { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 1120px) {
   .app-shell .table-head,
   .app-shell .session-row { grid-template-columns: minmax(220px, 1.3fr) minmax(144px, .8fr) 96px minmax(232px, auto); }
@@ -2679,3 +2751,125 @@ html.floating-window #root {
 .desktop-tv-approval-other input:focus { border-color: #bfe7b8; }
 .desktop-tv-approval-other button { flex: 0 0 auto; min-height: 24px; padding: 3px 7px; border: 1px solid rgba(174,222,177,.6); border-radius: 6px; color: #17321c; background: #bfe7b8; font: 700 9px/1.2 'Geist Variable', 'Microsoft YaHei UI', sans-serif; white-space: normal; -webkit-app-region: no-drag; }
 .desktop-tv-approval-other button:disabled { opacity: .56; cursor: default; }
+
+/* Feature-page coherence pass. Keep low-content, loading, and failure states
+   inside the same quiet white surface instead of turning whole sections red. */
+.app-shell .settings-panel,
+.app-shell .project-panel { min-height: 0; }
+.app-shell .runtime-grid { grid-auto-rows: max-content; }
+.app-shell .monitor-grid,
+.app-shell .integration-grid { align-items: stretch; }
+.app-shell .integration-card { min-height: 320px; }
+.app-shell .project-repository { border-color: var(--app-line); }
+
+.app-shell .content-state {
+  min-height: 136px;
+  flex-direction: row;
+  gap: 12px;
+  padding: 24px;
+  border: 0;
+  color: var(--app-secondary);
+  background: #fbfcfb;
+}
+.app-shell .content-state.error {
+  color: var(--app-secondary);
+  background: #fbfcfb;
+}
+.app-shell .content-state-icon {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--app-line);
+  border-radius: 8px;
+  color: var(--app-muted);
+  background: #fff;
+}
+.app-shell .content-state.error .content-state-icon {
+  color: #a9534d;
+  border-color: #ead8d5;
+  background: #fff8f7;
+}
+.app-shell .content-state.loading .content-state-icon { color: var(--app-accent); }
+.app-shell .content-state strong { color: var(--app-secondary); font-size: 13px; font-weight: 620; }
+.app-shell .content-state .secondary-button { min-height: 34px; margin-left: 4px; }
+.app-shell .skills-manager .content-state { min-height: 160px; }
+
+.app-shell .incidents-panel { display: flex; flex-direction: column; }
+.app-shell .incidents-panel .incident-list { flex: 0 0 auto; }
+.app-shell .incident-empty,
+.app-shell .provider-empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 8px;
+  color: var(--app-secondary);
+  background: var(--app-soft);
+}
+.app-shell .incident-empty { min-height: 144px; justify-content: center; flex-direction: column; }
+.app-shell .incident-empty strong,
+.app-shell .provider-empty strong { color: var(--app-ink); font-size: 13px; }
+.app-shell .incident-empty small,
+.app-shell .provider-empty small { color: var(--app-muted); font-size: 11px; }
+.app-shell .provider-empty { min-height: 64px; margin-top: 8px; padding: 0 12px; }
+.app-shell .provider-empty small { margin-left: auto; }
+
+/* Let the incident card keep its natural height when there is nothing to
+   review; a stretched empty column reads as a broken loading state. */
+.app-shell .monitor-grid { align-items: start; }
+
+/* Content-driven feature cards: an empty provider/skill state should remain a
+   compact status surface instead of inheriting the height of the viewport or
+   the tallest sibling card. */
+.app-shell .integration-grid { align-items: start; }
+.app-shell .integration-card { min-height: 0; }
+.app-shell .skills-workspace { min-height: 0; }
+.app-shell .skills-manager .content-state { min-height: 136px; }
+
+.app-shell .floating-control-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  border-bottom: 0;
+}
+.app-shell .floating-control-list .switch-row,
+.app-shell .floating-control-list .switch-row:first-child {
+  min-height: 76px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--app-line);
+  border-radius: 8px;
+  background: var(--app-soft);
+}
+.app-shell .floating-control-list .switch-row:last-child { grid-column: 1 / -1; }
+.app-shell .floating-control-list .switch-row strong { font-size: 13px; }
+.app-shell .floating-control-list .switch-row small { font-size: 11px; line-height: 1.4; }
+.app-shell .floating-appearance-grid { margin-top: 12px; padding-top: 12px; }
+.app-shell .floating-quick-actions { padding-top: 12px; }
+
+@media (max-width: 980px) {
+  .app-shell .floating-control-list { grid-template-columns: 1fr; }
+  .app-shell .floating-control-list .switch-row:last-child { grid-column: auto; }
+}
+
+@media (max-width: 1120px) and (min-width: 681px) {
+  /* Keep both explicit session actions available without forcing the row
+     wider than the content column at laptop widths. */
+  .app-shell .session-actions { gap: 8px; }
+  .app-shell .session-actions .resume-button {
+    width: 32px;
+    min-width: 32px;
+    padding: 0;
+    justify-content: center;
+    font-size: 0;
+  }
+  .app-shell .session-actions .resume-button svg { margin: 0; }
+}
+
+@media (max-width: 560px) {
+  .app-shell .content-state { min-height: 144px; flex-direction: column; }
+  .app-shell .content-state .secondary-button { margin-left: 0; }
+  .app-shell .provider-empty { align-items: flex-start; flex-direction: column; justify-content: center; }
+  .app-shell .provider-empty small { margin-left: 19px; }
+}

@@ -15,6 +15,8 @@ import {
   Command,
   Cpu,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   FileCode2,
   FileText,
@@ -53,8 +55,8 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, importAllPaseoSessions, inputCodexContinue, installCodexHook, installServerTunnel, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
-import type { CcSwitchProviderBalance, CodexHookStatus, DesktopCommandError, DesktopSessionRecord, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord } from './lib/atlasBridge'
+import { checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import type { CcSwitchProviderBalance, CodexHookStatus, DesktopCommandError, DesktopSessionRecord, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
 import '@fontsource-variable/geist'
 import './styles.css'
@@ -259,6 +261,7 @@ const uiText = {
     recoveryGuardrails: '恢复保护', pauseBalance: '暂停余额不足并在 3 次重试后停止', on: '开启', off: '关闭', desktopStatusObject: '桌面状态组件', keepObject: '保持小组件置顶显示',
     codexVersion: 'Codex 版本', detectedCli: '从已安装的 CLI 检测', installedBadge: '已安装', detecting: '检测中…', readyResume: '可执行 resume 命令', checkUpdates: '用 npm 更新', atlasProject: 'Codex Atlas', atlasProjectDescription: '项目主页与 GitHub Release', openProject: '打开项目', openRelease: '打开 Release',
     packageManager: 'npm install -g @openai/codex@latest', codexStatusHook: 'Codex 状态 Hook', officialEvents: '优先读取官方事件，再用进程与 rollout 兜底',
+    voiceService: '本地语音服务', voiceServiceDescription: 'Paseo 本地 STT / TTS', voiceServiceReady: '语音服务已就绪', voiceServiceMissing: '尚未安装本地语音', voiceServiceDaemonStopped: 'Paseo daemon 未运行', voiceServiceInstalling: '正在安装…', installVoiceService: '安装', repairVoiceService: '修复', voiceServiceDaemon: 'Paseo daemon', voiceServiceModels: '语音模型', voiceServiceProvider: '本地模型 · Parakeet + Kokoro', voiceServiceChecking: '检测中…', voiceServiceInstallFailed: '语音服务安装失败',
     connected: '状态正常', configuredWaiting: '等待首次事件', notConfigured: '未配置', sessionEvents: '个会话事件', refreshHook: '刷新 Hook 状态', recoverSession: '恢复监控', runningNow: '正在运行',
     repairHook: '重新安装 / 修复', installHook: '安装状态 Hook', browserWindowControls: '浏览器预览不支持窗口控制', desktopWindowUnavailable: '桌面窗口命令尚未连接',
     desktopNotificationsOn: '桌面通知已开启', desktopNotificationsOff: '桌面通知已关闭', browserPreviewSessions: '浏览器预览使用演示会话', noReadableSessions: '未找到可读的 Codex 会话',
@@ -307,6 +310,7 @@ const uiText = {
     recoveryGuardrails: 'Recovery guardrails', pauseBalance: 'Pause balance failures and stop after 3 retries', on: 'On', off: 'Off', desktopStatusObject: 'Desktop status object', keepObject: 'Keep the small status object above other apps',
     codexVersion: 'Codex version', detectedCli: 'Detected from the installed CLI', installedBadge: 'INSTALLED', detecting: 'Detecting…', readyResume: 'Ready for resume commands', checkUpdates: 'Update with npm', atlasProject: 'Codex Atlas', atlasProjectDescription: 'Project home and GitHub releases', openProject: 'Open project', openRelease: 'Open Release',
     packageManager: 'npm install -g @openai/codex@latest', codexStatusHook: 'Codex status hook', officialEvents: 'Official events first, with process and rollout fallbacks',
+    voiceService: 'Local voice service', voiceServiceDescription: 'Paseo local STT / TTS', voiceServiceReady: 'Voice service is ready', voiceServiceMissing: 'Local voice is not installed', voiceServiceDaemonStopped: 'Paseo daemon is not running', voiceServiceInstalling: 'Installing…', installVoiceService: 'Install', repairVoiceService: 'Repair', voiceServiceDaemon: 'Paseo daemon', voiceServiceModels: 'Voice models', voiceServiceProvider: 'Local models · Parakeet + Kokoro', voiceServiceChecking: 'Checking…', voiceServiceInstallFailed: 'Voice service installation failed',
     connected: 'Monitoring', configuredWaiting: 'Waiting for first event', notConfigured: 'Not configured', sessionEvents: 'session events', refreshHook: 'Refresh hook status', recoverSession: 'Recover monitor', runningNow: 'Running now',
     repairHook: 'Repair hook', installHook: 'Install status hook', browserWindowControls: 'Window controls are unavailable in browser preview', desktopWindowUnavailable: 'Desktop window command is unavailable',
     desktopNotificationsOn: 'Desktop notifications on', desktopNotificationsOff: 'Desktop notifications off', browserPreviewSessions: 'Browser preview uses demo sessions', noReadableSessions: 'No readable Codex sessions found',
@@ -646,6 +650,7 @@ function App() {
       'paseo_import_all_codex_sessions',
       'get_balance',
       'install_codex_hook',
+      'install_voice_service',
       'set_codex_defaults',
       'update_codex',
       'get_skill_detail',
@@ -1290,12 +1295,12 @@ type OverviewProps = {
 
 function ContentState({ language, state, emptyLabel, onRetry }: { language: UiLanguage; state: 'loading' | 'ready' | 'error'; emptyLabel: string; onRetry?: () => void }) {
   if (state === 'loading') {
-    return <div className="content-state loading" role="status"><LoaderCircle size={20} /><span>{language === 'zh' ? '正在读取…' : 'Loading…'}</span></div>
+    return <div className="content-state loading" role="status"><span className="content-state-icon"><LoaderCircle size={18} /></span><strong>{language === 'zh' ? '正在读取…' : 'Loading…'}</strong></div>
   }
   if (state === 'error') {
-    return <div className="content-state error" role="alert"><CircleAlert size={20} /><span>{language === 'zh' ? '读取失败' : 'Could not load'}</span>{onRetry && <button className="secondary-button" onClick={onRetry}><RefreshCw size={14} />{language === 'zh' ? '重试' : 'Retry'}</button>}</div>
+    return <div className="content-state error" role="alert"><span className="content-state-icon"><CircleAlert size={18} /></span><strong>{language === 'zh' ? '暂时无法读取' : 'Could not load'}</strong>{onRetry && <button className="secondary-button" onClick={onRetry}><RefreshCw size={14} />{language === 'zh' ? '重试' : 'Retry'}</button>}</div>
   }
-  return <div className="content-state empty"><Search size={20} /><span>{emptyLabel}</span></div>
+  return <div className="content-state empty"><span className="content-state-icon"><Search size={18} /></span><strong>{emptyLabel}</strong></div>
 }
 
 function NewSessionDialog({ language, defaultModel, defaultPermission, onClose, onCreate }: { language: UiLanguage; defaultModel: string; defaultPermission: string; onClose: () => void; onCreate: (request: NewCodexSessionRequest) => Promise<void> }) {
@@ -1389,7 +1394,7 @@ function SessionInspector({ language, session, onClose, onActivate, onInputConti
 }
 
 function SessionsView({ language, sessions: items, query, setQuery, selected, setSelected, activateSession, inputContinue, loadState }: { language: UiLanguage; sessions: Session[]; query: string; setQuery: (value: string) => void; selected: Session | null; setSelected: (value: Session) => void; activateSession: (value: Session) => void; inputContinue: (value: Session) => void; loadState: 'loading' | 'ready' | 'error' }) {
-  return <><section className="page-heading compact"><div><div className="eyebrow accent-text">{tr(language, 'sessionArchive')} <span className="heading-line" /></div><h1>{tr(language, 'allSessions')}</h1></div><button className="primary-button" disabled title={language === 'zh' ? '即将支持' : 'Coming soon'}><Download size={16} /> {tr(language, 'exportIndex')}</button></section><div className="archive-toolbar"><div className="search-box wide"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr(language, 'searchArchive')} /></div><div className="archive-stat"><span className="pulse-dot" /> {items.length} {tr(language, 'matchingRecords')}</div></div><div className="archive-list">{items.map((session, index) => <SessionRow key={session.id} language={language} session={session} index={index} selected={selected?.id === session.id} onSelect={() => setSelected(session)} onActivate={() => activateSession(session)} onInputContinue={() => inputContinue(session)} />)}{items.length === 0 && <ContentState language={language} state={loadState} emptyLabel={query.trim() ? tr(language, 'noSearchResults') : tr(language, 'noReadableSessions')} />}</div></>
+  return <><section className="page-heading compact"><div><div className="eyebrow accent-text">{tr(language, 'sessionArchive')} <span className="heading-line" /></div><h1>{tr(language, 'allSessions')}</h1></div></section><div className="archive-toolbar"><div className="search-box wide"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr(language, 'searchArchive')} /></div><div className="archive-stat"><span className="pulse-dot" /> {items.length} {tr(language, 'matchingRecords')}</div></div><div className="archive-list">{items.map((session, index) => <SessionRow key={session.id} language={language} session={session} index={index} selected={selected?.id === session.id} onSelect={() => setSelected(session)} onActivate={() => activateSession(session)} onInputContinue={() => inputContinue(session)} />)}{items.length === 0 && <ContentState language={language} state={loadState} emptyLabel={query.trim() ? tr(language, 'noSearchResults') : tr(language, 'noReadableSessions')} />}</div></>
 }
 
 function SkillsView({ language, skills, setSkills, loadState, setLoadState, showToast }: { language: UiLanguage; skills: SkillRecord[]; setSkills: React.Dispatch<React.SetStateAction<SkillRecord[]>>; loadState: 'loading' | 'ready' | 'error'; setLoadState: React.Dispatch<React.SetStateAction<'loading' | 'ready' | 'error'>>; showToast: (message: string) => void }) {
@@ -1571,7 +1576,7 @@ function MonitorView({ language, sessions: items, autoContinue, setAutoContinue,
         <div className="switch-row monitor-switch"><span><strong>{tr(language, 'autoResumeBalance')}</strong><small>{tr(language, 'autoResumeBalanceDescription')}</small></span><button className={`toggle ${autoResumeOnBalance ? 'on' : ''}`} onClick={() => setAutoResumeOnBalance(!autoResumeOnBalance)} aria-label={tr(language, 'autoResumeBalance')}><span /></button></div>
         <div className="switch-row monitor-switch"><span><strong>{tr(language, 'desktopNotifications')}</strong><small>{tr(language, 'notifyOnStop')}</small></span><button className={`toggle ${notifyEnabled ? 'on' : ''}`} onClick={() => setNotifyEnabled(!notifyEnabled)} aria-label={language === 'zh' ? '切换桌面通知' : 'Toggle desktop notifications'}><span /></button></div>
       </div>
-      <div className="settings-panel"><div className="panel-head"><div><div className="eyebrow">{tr(language, 'liveIncidents')}</div><h3>{incidentCount}</h3></div><BellRing size={17} className="orange-icon" /></div><div className="incident-list">{watched.map((item) => <div className="incident-row" key={item.id}><span className={`incident-light ${item.recovery}`} /><div><strong>{item.title}</strong><small>{item.lastError || tr(language, 'watchingRecoverable')}</small></div><span className={`incident-badge ${item.recovery}`}>{incidentBadge(item)}</span><button className="icon-button tiny" aria-label={tr(language, 'inspectIncident')} title={tr(language, 'inspectIncident')} onClick={() => showToast(`${item.title} · ${item.lastError || tr(language, 'watchingRecoverable')}`)}><ArrowUpRight size={14} /></button><div className="compact-session-actions"><button className="text-button incident-action" onClick={() => activateSession(item)}><Play size={12} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="text-button incident-action" onClick={() => inputContinue(item)}><TerminalSquare size={12} /> {tr(language, 'inputContinue')}</button></div></div>)}</div><div className="monitor-foot"><span>{tr(language, 'lastEvent')}</span><strong>{latestEvent}</strong><span className="monitor-foot-status"><span className="pulse-dot" /> {tr(language, 'watcherHealthy')}</span></div></div>
+      <div className="settings-panel incidents-panel"><div className="panel-head"><div><div className="eyebrow">{tr(language, 'liveIncidents')}</div><h3>{incidentCount}</h3></div><BellRing size={17} className="orange-icon" /></div><div className="incident-list">{watched.map((item) => <div className="incident-row" key={item.id}><span className={`incident-light ${item.recovery}`} /><div><strong>{item.title}</strong><small>{item.lastError || tr(language, 'watchingRecoverable')}</small></div><span className={`incident-badge ${item.recovery}`}>{incidentBadge(item)}</span><button className="icon-button tiny" aria-label={tr(language, 'inspectIncident')} title={tr(language, 'inspectIncident')} onClick={() => showToast(`${item.title} · ${item.lastError || tr(language, 'watchingRecoverable')}`)}><ArrowUpRight size={14} /></button><div className="compact-session-actions"><button className="text-button incident-action" onClick={() => activateSession(item)}><Play size={12} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="text-button incident-action" onClick={() => inputContinue(item)}><TerminalSquare size={12} /> {tr(language, 'inputContinue')}</button></div></div>)}{watched.length === 0 && <div className="incident-empty"><span className="health-light green" /><strong>{language === 'zh' ? '暂无异常' : 'No incidents'}</strong><small>{tr(language, 'watcherHealthy')}</small></div>}</div><div className="monitor-foot"><span>{tr(language, 'lastEvent')}</span><strong>{latestEvent}</strong><span className="monitor-foot-status"><span className="pulse-dot" /> {tr(language, 'watcherHealthy')}</span></div></div>
     </div>
   </>
 }
@@ -1626,7 +1631,7 @@ function IntegrationsView({ language, providerBalances, sessionTotal, ccSwitchCh
       <section className="settings-panel integration-card">
         <div className="integration-head"><div className="integration-logo cc">CC</div><div><h3>CC Switch</h3><span className="integration-status"><span className="pulse-dot" /> {tr(language, 'providerBalanceMonitor')}</span></div></div>
         <div className="connection-summary"><span className="health-light green" /><div><strong>{connectedLabel}</strong><small>{checkedLabel}</small></div><button className="secondary-button" onClick={() => void checkCcSwitchBalance()}><WalletCards size={14} /> {tr(language, 'check')}</button></div>
-        <div className="provider-list">{providerBalances.map((provider) => <div className="provider-row" key={provider.name}><span className={`provider-status ${provider.status}`} /><div><strong>{provider.name}</strong><small>{provider.model} · {provider.latency}</small></div><div className="provider-balance"><strong>{provider.balance}</strong><small>{language === 'zh' && provider.updated === 'just now' ? '刚刚' : provider.updated}</small></div><button className="icon-button tiny" aria-label={tr(language, 'refreshProviderBalance')} title={tr(language, 'refreshProviderBalance')} onClick={() => void checkCcSwitchBalance()}><RefreshCw size={13} /></button></div>)}</div>
+        <div className="provider-list">{providerBalances.map((provider) => <div className="provider-row" key={provider.name}><span className={`provider-status ${provider.status}`} /><div><strong>{provider.name}</strong><small>{provider.model} · {provider.latency}</small></div><div className="provider-balance"><strong>{provider.balance}</strong><small>{language === 'zh' && provider.updated === 'just now' ? '刚刚' : provider.updated}</small></div><button className="icon-button tiny" aria-label={tr(language, 'refreshProviderBalance')} title={tr(language, 'refreshProviderBalance')} onClick={() => void checkCcSwitchBalance()}><RefreshCw size={13} /></button></div>)}{providerBalances.length === 0 && <div className="provider-empty"><span className="provider-status warning" /><strong>{language === 'zh' ? '等待余额检查' : 'Waiting for balance check'}</strong><small>{tr(language, 'providerBalanceMonitor')}</small></div>}</div>
         {providerBalances.some((provider) => provider.status === 'warning' && provider.balanceValue <= 0) && <div className="balance-warning"><ShieldCheck size={15} /><span>{tr(language, 'insufficientBalance')}</span></div>}
       </section>
       <section className="settings-panel integration-card paseo-card">
@@ -1735,6 +1740,9 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
   const [serverPasswordVisible, setServerPasswordVisible] = useState(false)
   const [bridgeAdvanced, setBridgeAdvanced] = useState(false)
   const [serverAdvanced, setServerAdvanced] = useState(false)
+  const [voiceStatus, setVoiceStatus] = useState<VoiceServiceStatus | null>(null)
+  const [voiceProgress, setVoiceProgress] = useState<VoiceServiceProgress | null>(null)
+  const [voiceBusy, setVoiceBusy] = useState(false)
   useEffect(() => {
     if (!serverTunnel) return
     setServerDraft((current) => ({ ...current, host: serverTunnel.host || current.host, port: serverTunnel.port || current.port, username: serverTunnel.username || current.username, remotePort: serverTunnel.remotePort || current.remotePort, tunnelUrl: serverTunnel.tunnelUrl || current.tunnelUrl, autoStart: serverTunnel.autoStart, identityFile: serverTunnel.keyPath || current.identityFile }))
@@ -1748,6 +1756,33 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
       tunnelUrl: mobileBridge.tunnelUrl || current.tunnelUrl,
     }))
   }, [mobileBridge])
+  useEffect(() => {
+    let disposed = false
+    const refresh = async () => {
+      const status = await getVoiceServiceStatus()
+      if (!disposed && status) setVoiceStatus(status)
+    }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 5000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [])
+  useEffect(() => {
+    if (!voiceBusy) return
+    let disposed = false
+    const poll = async () => {
+      const progress = await getVoiceServiceProgress()
+      if (!disposed && progress) setVoiceProgress(progress)
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 350)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [voiceBusy])
   useEffect(() => {
     if (!serverBusy) return
     let disposed = false
@@ -1796,6 +1831,29 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
       return
     }
     showToast(language === 'zh' ? 'Codex 更新失败，请检查 npm 和网络' : 'Codex update failed; check npm and network')
+  }
+  const installVoice = async () => {
+    setVoiceBusy(true)
+    setVoiceProgress({ state: 'installing', step: 1, total: 6, message: tr(language, 'voiceServiceInstalling'), downloadedBytes: 0, startedAtMs: Date.now(), finishedAtMs: null })
+    try {
+      const status = await installVoiceService()
+      if (status) {
+        setVoiceStatus(status)
+        setVoiceProgress((current) => current ? { ...current, state: status.ready && status.daemonRunning ? 'ready' : 'error', step: status.ready && status.daemonRunning ? current.total : current.step, message: status.ready && status.daemonRunning ? tr(language, 'voiceServiceReady') : (status.error || tr(language, 'voiceServiceInstallFailed')), finishedAtMs: Date.now() } : current)
+        showToast(status.ready && status.daemonRunning ? tr(language, 'voiceServiceReady') : (status.error || tr(language, 'voiceServiceInstallFailed')))
+      } else {
+        showToast(tr(language, 'voiceServiceInstallFailed'))
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      setVoiceProgress((current) => current ? { ...current, state: 'error', message: detail, finishedAtMs: Date.now() } : current)
+      showToast(`${tr(language, 'voiceServiceInstallFailed')}: ${detail}`)
+    } finally {
+      setVoiceBusy(false)
+      const [status, progress] = await Promise.all([getVoiceServiceStatus(), getVoiceServiceProgress()])
+      if (status) setVoiceStatus(status)
+      if (progress) setVoiceProgress(progress)
+    }
   }
   const openProjectLink = async (url: string) => {
     const opened = await openExternalUrl(url)
@@ -1882,6 +1940,22 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
     }
     return labels[state]?.[language === 'zh' ? 0 : 1] || state
   }
+  const voiceReady = Boolean(voiceStatus?.ready && voiceStatus.daemonRunning)
+  const voiceConfigured = Boolean(voiceStatus?.paseoInstalled || voiceStatus?.sttReady || voiceStatus?.ttsReady)
+  const voiceTone = voiceReady ? 'green' : 'yellow'
+  const voiceHeadline = voiceBusy
+    ? tr(language, 'voiceServiceInstalling')
+    : voiceReady
+      ? tr(language, 'voiceServiceReady')
+      : !voiceStatus
+        ? tr(language, 'voiceServiceChecking')
+        : !voiceStatus.paseoInstalled || !voiceStatus.sttReady || !voiceStatus.ttsReady
+          ? tr(language, 'voiceServiceMissing')
+          : tr(language, 'voiceServiceDaemonStopped')
+  const voiceProgressStep = voiceProgress ? Math.min(voiceProgress.step, voiceProgress.total || 6) : 0
+  const voiceDownloadPercent = voiceProgress?.totalBytes && voiceProgress.totalBytes > 0
+    ? Math.min(100, Math.round((voiceProgress.downloadedBytes / voiceProgress.totalBytes) * 100))
+    : null
   return <>
     <section className="page-heading compact"><div><div className="eyebrow accent-text">{tr(language, 'settings')} <span className="heading-line" /></div><h1>{tr(language, 'runtimeTitle')}</h1></div><button className="primary-button" onClick={() => void saveDefaults()} disabled={saving || !defaultModel.trim()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />} {saving ? (language === 'zh' ? '保存中…' : 'Saving…') : tr(language, 'save')}</button></section>
     <div className="runtime-grid">
@@ -1907,8 +1981,18 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
       </section>
       <section className="settings-panel hook-panel">
         <div className="panel-head"><div><h3>{tr(language, 'codexStatusHook')}</h3><span className="panel-subtitle">{tr(language, 'officialEvents')}</span></div><RadioTower size={17} className="teal-icon" /></div>
-        <div className="hook-status-line"><span className={`health-light ${hookReady ? (hookStatus?.connected ? 'green' : 'yellow') : 'red'}`} /><div><strong>{hookReady ? (hookStatus?.connected ? tr(language, 'connected') : tr(language, 'configuredWaiting')) : tr(language, 'notConfigured')}</strong><small>{hookStatus?.sessionCount || 0} {tr(language, 'sessionEvents')}{hookStatus?.error ? ` · ${hookStatus.error}` : ''}</small></div><button className="icon-button tiny" aria-label={tr(language, 'refreshHook')} title={tr(language, 'refreshHook')} onClick={() => void refreshHookStatus()}><RefreshCw size={13} /></button></div>
+        <div className="hook-status-line"><span className={`health-light ${hookReady ? (hookStatus?.connected ? 'green' : 'yellow') : 'yellow'}`} /><div><strong>{hookReady ? (hookStatus?.connected ? tr(language, 'connected') : tr(language, 'configuredWaiting')) : tr(language, 'notConfigured')}</strong><small>{hookStatus?.sessionCount || 0} {tr(language, 'sessionEvents')}{hookStatus?.error ? ` · ${hookStatus.error}` : ''}</small></div><button className="icon-button tiny" aria-label={tr(language, 'refreshHook')} title={tr(language, 'refreshHook')} onClick={() => void refreshHookStatus()}><RefreshCw size={13} /></button></div>
         <button className="secondary-button version-help" onClick={() => void installHook()}>{hookReady ? <RefreshCw size={14} /> : <PlugZap size={14} />}{hookReady ? tr(language, 'repairHook') : tr(language, 'installHook')}</button>
+      </section>
+      <section className={`settings-panel voice-service-panel ${voiceProgress?.state === 'error' ? 'has-error' : ''}`}>
+        <div className="panel-head"><div><h3>{tr(language, 'voiceService')}</h3><span className="panel-subtitle">{tr(language, 'voiceServiceDescription')}</span></div><Activity size={17} className="teal-icon" /></div>
+        <div className="voice-service-status">
+          <span className={`health-light ${voiceTone}`} />
+          <div className="voice-service-status-copy"><strong>{voiceHeadline}</strong><small>{voiceStatus?.paseoVersion ? `Paseo ${voiceStatus.paseoVersion}` : tr(language, 'voiceServiceDaemon')} · {voiceStatus?.daemonRunning ? tr(language, 'connected') : tr(language, 'notConfigured')}</small></div>
+          <button className="secondary-button compact-button" onClick={() => void installVoice()} disabled={voiceBusy}>{voiceBusy ? <LoaderCircle className="spin" size={14} /> : voiceConfigured ? <RefreshCw size={14} /> : <Download size={14} />}{voiceBusy ? tr(language, 'voiceServiceInstalling') : voiceConfigured ? tr(language, 'repairVoiceService') : tr(language, 'installVoiceService')}</button>
+        </div>
+        <div className="voice-service-meta"><span><strong>{tr(language, 'voiceServiceModels')}</strong><small>{voiceStatus?.sttReady ? 'STT ✓' : 'STT —'} · {voiceStatus?.ttsReady ? 'TTS ✓' : 'TTS —'}</small></span><span><strong>{tr(language, 'voiceServiceProvider')}</strong><small>{tr(language, 'voiceServiceDaemon')}</small></span></div>
+        {voiceProgress && (voiceBusy || voiceProgress.state === 'error' || voiceProgress.state === 'ready') && <div className={`voice-install-progress ${voiceProgress.state}`} role="status" aria-live="polite"><div><strong>{voiceProgress.message}</strong><span>{voiceDownloadPercent !== null ? `${voiceDownloadPercent}%` : `${voiceProgressStep} / ${voiceProgress.total || 6}`}</span></div><progress max={voiceProgress.total || 6} value={voiceProgressStep} /><small>{voiceProgress.state === 'error' ? tr(language, 'voiceServiceInstallFailed') : voiceProgress.state === 'ready' ? tr(language, 'voiceServiceReady') : `${tr(language, 'voiceServiceModels')} · ${voiceProgressStep} / ${voiceProgress.total || 6}`}</small></div>}
       </section>
       <section className="settings-panel mobile-bridge-panel connection-panel">
         <div className="panel-head"><div><h3>{tr(language, 'mobileBridge')}</h3><span className="panel-subtitle">{language === 'zh' ? '扫描一次，手机卡片自动同步' : 'Scan once; the phone card stays in sync'}</span></div><PictureInPicture2 size={17} className="teal-icon" /></div>
@@ -1922,8 +2006,8 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
       </section>
       <section className="settings-panel mobile-bridge-panel server-tunnel-panel connection-panel">
         <div className="panel-head"><div><h3>{tr(language, 'serverTunnel')}</h3><span className="panel-subtitle">{language === 'zh' ? '可选：为离开局域网的手机提供固定入口' : 'Optional fixed route for phones outside your LAN'}</span></div><PlugZap size={17} className="teal-icon" /></div>
-        <div className="server-tunnel-status"><span className={`health-light ${serverTunnel?.running ? 'green' : serverTunnel?.configured ? 'yellow' : 'red'}`} /><div><strong>{serverTunnel?.running ? tr(language, 'serverRunning') : serverTunnel?.configured ? tr(language, 'serverStopped') : (language === 'zh' ? '尚未连接服务器' : 'No server connected')}</strong>{serverTunnel?.publicUrl && <code>{serverTunnel.publicUrl}</code>}{serverTunnel?.error && <small className="error-text">{serverTunnel.error}</small>}</div>{serverTunnel?.configured && <button className="secondary-button compact-button" onClick={() => void toggleServer()} disabled={serverBusy}>{serverBusy ? <LoaderCircle className="spin" size={13} /> : <Power size={13} />}{serverTunnel.running ? tr(language, 'stopTunnel') : tr(language, 'startTunnel')}</button>}</div>
-        {!serverTunnel?.configured && <div className="mobile-bridge-form server-tunnel-form server-quick-form"><label className="field-label">{tr(language, 'serverHost')}<input className="text-input" value={serverDraft.host} onChange={(event) => setServerDraft({ ...serverDraft, host: event.target.value })} placeholder="203.0.113.10" /></label><label className="field-label">{tr(language, 'serverUsername')}<input className="text-input" value={serverDraft.username} onChange={(event) => setServerDraft({ ...serverDraft, username: event.target.value })} placeholder="root" /></label><label className="field-label">{tr(language, 'serverPassword')}<input className="text-input" type={serverPasswordVisible ? 'text' : 'password'} value={serverDraft.password} onChange={(event) => setServerDraft({ ...serverDraft, password: event.target.value })} /></label></div>}
+        <div className="server-tunnel-status"><span className={`health-light ${serverTunnel?.running ? 'green' : serverTunnel?.configured ? 'yellow' : 'yellow'}`} /><div><strong>{serverTunnel?.running ? tr(language, 'serverRunning') : serverTunnel?.configured ? tr(language, 'serverStopped') : (language === 'zh' ? '尚未连接服务器' : 'No server connected')}</strong>{serverTunnel?.publicUrl && <code>{serverTunnel.publicUrl}</code>}{serverTunnel?.error && <small className="error-text">{serverTunnel.error}</small>}</div>{serverTunnel?.configured && <button className="secondary-button compact-button" onClick={() => void toggleServer()} disabled={serverBusy}>{serverBusy ? <LoaderCircle className="spin" size={13} /> : <Power size={13} />}{serverTunnel.running ? tr(language, 'stopTunnel') : tr(language, 'startTunnel')}</button>}</div>
+        {!serverTunnel?.configured && <div className="mobile-bridge-form server-tunnel-form server-quick-form"><label className="field-label">{tr(language, 'serverHost')}<input className="text-input" value={serverDraft.host} onChange={(event) => setServerDraft({ ...serverDraft, host: event.target.value })} placeholder="203.0.113.10" /></label><label className="field-label">{tr(language, 'serverUsername')}<input className="text-input" value={serverDraft.username} onChange={(event) => setServerDraft({ ...serverDraft, username: event.target.value })} placeholder="root" /></label><label className="field-label">{tr(language, 'serverPassword')}<span className="password-input"><input className="text-input" type={serverPasswordVisible ? 'text' : 'password'} value={serverDraft.password} onChange={(event) => setServerDraft({ ...serverDraft, password: event.target.value })} /><button type="button" className="password-toggle" onClick={() => setServerPasswordVisible((value) => !value)} aria-label={language === 'zh' ? (serverPasswordVisible ? '隐藏密码' : '显示密码') : (serverPasswordVisible ? 'Hide password' : 'Show password')} title={language === 'zh' ? (serverPasswordVisible ? '隐藏密码' : '显示密码') : (serverPasswordVisible ? 'Hide password' : 'Show password')}>{serverPasswordVisible ? <EyeOff size={15} /> : <Eye size={15} />}</button></span></label></div>}
         <button className="advanced-toggle" onClick={() => setServerAdvanced((value) => !value)} aria-expanded={serverAdvanced}><span>{language === 'zh' ? '高级服务器设置' : 'Advanced server settings'}</span><ChevronDown size={15} className={serverAdvanced ? 'rotated' : ''} /></button>
         {serverAdvanced && <div className="advanced-panel"><div className="mobile-bridge-form server-tunnel-form"><label className="field-label">{tr(language, 'serverPort')}<input className="text-input" type="number" min="1" value={serverDraft.port} onChange={(event) => setServerDraft({ ...serverDraft, port: Number(event.target.value) || 22 })} /></label><label className="field-label">{tr(language, 'cloudflareToken')}<input className="text-input" type="password" value={serverDraft.cloudflareToken} onChange={(event) => setServerDraft({ ...serverDraft, cloudflareToken: event.target.value })} /></label><label className="field-label">{language === 'zh' ? '固定访问地址（可选）' : 'Public URL (optional)'}<input className="text-input" value={serverDraft.tunnelUrl} onChange={(event) => setServerDraft({ ...serverDraft, tunnelUrl: event.target.value })} placeholder="https://atlas.example.com" /></label></div><div className="mobile-bridge-preferences"><label className="switch-row"><span>{tr(language, 'rememberPassword')}</span><button className={`toggle ${serverDraft.rememberPassword ? 'on' : ''}`} onClick={() => setServerDraft({ ...serverDraft, rememberPassword: !serverDraft.rememberPassword })} aria-label={tr(language, 'rememberPassword')}><span /></button></label><label className="switch-row"><span>{tr(language, 'tunnelAutoStart')}</span><button className={`toggle ${serverDraft.autoStart ? 'on' : ''}`} onClick={() => setServerDraft({ ...serverDraft, autoStart: !serverDraft.autoStart })} aria-label={tr(language, 'tunnelAutoStart')}><span /></button></label></div></div>}
         <div className="mobile-bridge-actions"><button className="primary-button" onClick={() => void installServer()} disabled={serverBusy || !serverDraft.host.trim() || !serverDraft.username.trim()}>{serverBusy ? <LoaderCircle className="spin" size={14} /> : <Power size={14} />}{serverBusy ? tr(language, 'serverInstalling') : tr(language, 'installAndConnect')}</button></div>
@@ -2501,5 +2585,11 @@ function FloatingMini() {
 
 const showPrototypes = new URLSearchParams(window.location.search).get('view') === 'prototypes'
 const showFloating = new URLSearchParams(window.location.search).get('view') === 'floating'
+// Apply the floating surface before React mounts so a slow/transparent WebView
+// cannot flash or remain on its platform default black background.
+if (showFloating) {
+  document.documentElement.classList.add('floating-window')
+  document.body.classList.add('floating-window')
+}
 document.title = showPrototypes ? 'Codex Atlas · Prototypes' : showFloating ? 'Atlas Mini' : 'Codex Atlas'
 createRoot(document.getElementById('root')!).render(<React.StrictMode>{showPrototypes ? <PrototypeGallery /> : showFloating ? <FloatingMini /> : <App />}</React.StrictMode>)

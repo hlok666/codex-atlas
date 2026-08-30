@@ -111,6 +111,29 @@ export type CodexHookStatus = {
   error?: string
 }
 
+export type VoiceServiceStatus = {
+  paseoInstalled: boolean
+  paseoVersion?: string
+  daemonRunning: boolean
+  sttReady: boolean
+  ttsReady: boolean
+  modelsDir: string
+  provider: string
+  ready: boolean
+  error?: string
+}
+
+export type VoiceServiceProgress = {
+  state: 'idle' | 'installing' | 'downloading' | 'extracting' | 'starting' | 'ready' | 'error' | string
+  step: number
+  total: number
+  message: string
+  downloadedBytes: number
+  totalBytes?: number
+  startedAtMs: number
+  finishedAtMs?: number | null
+}
+
 export type PaseoImportSummary = {
   total: number
   imported: number
@@ -440,6 +463,18 @@ export async function importAllPaseoSessions(): Promise<PaseoImportSummary | nul
 
 export async function getCodexInfo(): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string } | null> {
   return invokeDesktop('get_codex_info')
+}
+
+export async function getVoiceServiceStatus(): Promise<VoiceServiceStatus | null> {
+  return invokeDesktop<VoiceServiceStatus>('get_voice_service_status')
+}
+
+export async function getVoiceServiceProgress(): Promise<VoiceServiceProgress | null> {
+  return invokeDesktop<VoiceServiceProgress>('get_voice_service_progress')
+}
+
+export async function installVoiceService(): Promise<VoiceServiceStatus | null> {
+  return invokeDesktop<VoiceServiceStatus>('install_voice_service')
 }
 
 export async function getMobileBridgeConfig(): Promise<MobileBridgeConfig | null> {

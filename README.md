@@ -128,8 +128,8 @@ Codex Atlas 的公开项目地址：
 npm run build
 npm run tauri:build
 cd android && ./gradlew assembleDebug
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 正式 Android 发布建议配置签名密钥后，将 workflow 中的 `assembleDebug` 换成签名的 `assembleRelease`；当前 workflow 产出的 debug APK 方便预览和测试。
