@@ -98,6 +98,9 @@ seconds), so Android receives a state or message change immediately instead of
 using a fixed polling tick. Messages are read from the same Codex rollout JSONL
 used by the desktop monitor, so desktop and Android clients share the same
 conversation history without reloading the complete timeline on every request.
+Activating a closed session falls back to the exact workspace's `codex resume`;
+message requests first use `codex queue` and then retry after launching resume
+when no interactive process is available.
 Keep the token private and allow port `15730` through the Windows firewall only
 on a trusted network.
 

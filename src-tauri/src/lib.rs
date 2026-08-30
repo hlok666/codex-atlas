@@ -1923,24 +1923,55 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
     };
     let result = if url.ends_with("/activate") {
         if session.running {
-            focus_session_terminal(&session)
+            focus_session_terminal(&session).or_else(|_| launch_codex_resume_terminal(&session))
         } else {
             launch_codex_resume_terminal(&session)
         }
     } else {
-        if !session.running {
-            Err("session is not running".to_string())
-        } else {
-            let input = serde_json::from_str::<MobileSessionInputRequest>(&body)
-                .ok()
-                .map(|request| request.text)
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or_else(|| "继续".to_string());
+        let input = serde_json::from_str::<MobileSessionInputRequest>(&body)
+            .ok()
+            .map(|request| request.text)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "继续".to_string());
+        if session.running {
             if queue_codex_message(&session, &input) {
                 Ok(())
             } else {
                 send_text_to_terminal(&session, &input, true)
             }
+        } else if url.ends_with("/message") && queue_codex_message(&session, &input) {
+            // `codex queue` can persist a message while the interactive
+            // terminal is closed; the next resume consumes it.
+            Ok(())
+        } else if url.ends_with("/message") {
+            match launch_codex_resume_terminal(&session) {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    let mut queued = false;
+                    for delay in [250, 500, 750, 1_000] {
+                        thread::sleep(Duration::from_millis(delay));
+                        if let Some(refreshed) = find_session(session_id) {
+                            if refreshed.running && queue_codex_message(&refreshed, &input) {
+                                queued = true;
+                                break;
+                            }
+                        }
+                    }
+                    if queued {
+                        Ok(())
+                    } else {
+                        Err(
+                            "Codex resume window opened, but the message could not be queued"
+                                .to_string(),
+                        )
+                    }
+                }
+            }
+        } else {
+            Err(
+                "session is not running; activate the session before sending terminal input"
+                    .to_string(),
+            )
         }
     };
     let response = match result {
