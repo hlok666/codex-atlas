@@ -64,6 +64,13 @@ struct RuntimeSessionCache {
     refreshed_at_ms: i64,
 }
 
+#[derive(Default)]
+struct MobileSyncState {
+    fingerprints: HashMap<String, (String, i64)>,
+}
+
+static MOBILE_SYNC_STATE: OnceLock<Mutex<MobileSyncState>> = OnceLock::new();
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
@@ -1569,6 +1576,7 @@ fn query_parameter(url: &str, key: &str) -> Option<String> {
 
 fn mobile_sync_response(since_ms: i64) -> MobileSyncResponse {
     let sessions = list_sessions_sync().unwrap_or_default();
+    let _ = mobile_runtime_changed_since(&sessions, since_ms);
     let mut events = Vec::new();
     for session in &sessions {
         let messages = mobile_session_messages(session)
@@ -1594,6 +1602,9 @@ fn mobile_sync_has_changes(since_ms: i64) -> bool {
     let Ok(sessions) = list_sessions_sync() else {
         return false;
     };
+    if mobile_runtime_changed_since(&sessions, since_ms) {
+        return true;
+    }
     sessions.iter().any(|session| {
         session.updated_at_ms > since_ms
             || session.last_event_at_ms > since_ms
@@ -1601,6 +1612,53 @@ fn mobile_sync_has_changes(since_ms: i64) -> bool {
                 .iter()
                 .any(|message| message.timestamp_ms > since_ms)
     })
+}
+
+fn mobile_runtime_changed_since(sessions: &[SessionRecord], since_ms: i64) -> bool {
+    let store = MOBILE_SYNC_STATE.get_or_init(|| Mutex::new(MobileSyncState::default()));
+    let now = now_ms();
+    let mut state = match store.lock() {
+        Ok(state) => state,
+        Err(_) => return false,
+    };
+    let active_ids = sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    state
+        .fingerprints
+        .retain(|session_id, _| active_ids.contains(session_id.as_str()));
+    let mut changed = false;
+    for session in sessions {
+        let fingerprint = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            session.running,
+            session.live_state,
+            session.foreground,
+            session.requires_attention,
+            session
+                .process_ids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            session.last_event_at_ms,
+            session.last_error.as_deref().unwrap_or_default(),
+            session.last_output.as_deref().unwrap_or_default(),
+        );
+        let entry = state
+            .fingerprints
+            .entry(session.id.clone())
+            .or_insert_with(|| (String::new(), now));
+        if entry.0 != fingerprint {
+            entry.0 = fingerprint;
+            entry.1 = now;
+        }
+        if entry.1 > since_ms {
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn wait_for_mobile_sync(since_ms: i64, wait_ms: u64) {
