@@ -9,4 +9,4 @@ export const ATLAS_GITHUB_REPOSITORY = repository
 export const ATLAS_GITHUB_URL = `https://github.com/${repository}`
 export const ATLAS_RELEASES_URL = `${ATLAS_GITHUB_URL}/releases/latest`
 export const ATLAS_RELEASE_API_URL = `https://api.github.com/repos/${repository}/releases/latest`
-export const ATLAS_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0'
+export const ATLAS_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.1'
