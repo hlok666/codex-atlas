@@ -6,7 +6,7 @@ Windows-first Codex session control plane built as a native Tauri desktop app.
 
 - React + TypeScript + Vite for the renderer.
 - `lucide-react` for a consistent icon system.
-- Tauri 2 + Rust for native process discovery, window management, notifications, and local IPC. No localhost listener is required.
+- Tauri 2 + Rust for native process discovery, window management, notifications, and local IPC. Atlas owns its loopback Bridge and voice daemon; no Paseo runtime is required.
 
 ## Implemented product surface
 
@@ -18,6 +18,7 @@ Windows-first Codex session control plane built as a native Tauri desktop app.
 - CC Switch integration settings for local endpoint, credential-vault API key, provider balance checks, and last-check status.
 - Paseo integration settings for executable path, launch, full Codex session import, and recent-session repair.
 - Windows notification toggle and an Atlas Mini floating status window with red/yellow/green state lights and quick resume.
+- Atlas voice service lifecycle with local Parakeet/Kokoro model installation, progress reporting, health checks, and a persistent loopback daemon.
 - Runtime defaults, Codex versions, installed Skills, and local storage status.
 - Cross-platform window controls: minimize the main window and show/hide an always-on-top Atlas Mini window through the Tauri shell.
 - Native process-tree discovery for Codex sessions started outside Atlas, including `PowerShell -> node.exe -> codex.exe` chains.
@@ -35,7 +36,7 @@ Paseo's supported import flow is the daemon-backed command:
 paseo import --provider codex <provider-session-id> --cwd <workspace>
 ```
 
-The Atlas UI uses `paseo_import_agent` and `paseo_import_all_codex_sessions` IPC names so the Tauri shell can call Paseo's daemon/client implementation without coupling the renderer to shell commands.
+The Atlas UI uses `paseo_import_agent` and `paseo_import_all_codex_sessions` IPC names so the Tauri shell can call Paseo's daemon/client implementation without coupling the renderer to shell commands. Voice installation is separate: Atlas stores models under `$CODEX_HOME/atlas-voice/models` and starts its own `atlas-voice` daemon on loopback.
 
 ### Paseo capability boundary
 
@@ -44,9 +45,10 @@ control plane: Codex session discovery/import, recent-session repair, a shared
 conversation timeline over the authenticated bridge, session creation, text and
 voice input, approval choices, and desktop/mobile actions. It does not claim to
 be a full Paseo replacement yet. Paseo's daemon-owned PTY execution,
-long-lived WebSocket reconnection, local speech/TTS/VAD pipeline, and rich
-structured tool-rendering still need dedicated implementation before feature
-parity can be claimed.
+long-lived WebSocket reconnection, and rich structured tool-rendering still need
+dedicated implementation before feature parity can be claimed. Atlas now owns
+the local voice model lifecycle and loopback daemon; platform-specific STT/TTS
+workers attach through that Atlas contract instead of a Paseo process.
 
 ## Development
 
@@ -58,9 +60,24 @@ npm run build
 
 The browser preview safely falls back to explanatory toasts when the Tauri IPC bridge is unavailable. The desktop shell keeps provider credentials on the native side and maintains a process/session registry for writing `continue` to the correct Codex session.
 
+Android message delivery uses a durable outbox. Each queued submission carries a stable client
+message id; the desktop Bridge records accepted ids in
+`$CODEX_HOME/atlas-mobile-message-receipts.json`, so a timeout or reconnect retries the same
+submission without running `codex queue` twice. Queue items expose pending, sending and failed
+states and recover sending items after an app restart. The queue behavior and its Paseo rationale
+are documented in [PASEO_DEEP_RESEARCH.md](PASEO_DEEP_RESEARCH.md).
+
+Pairing links carry a stable desktop device identity. The Android companion can keep several
+Windows, macOS, Linux or cloud-server Bridge profiles and switches each profile's route,
+credentials and sync cursor independently.
+
+The bridge timeline uses a persisted `syncEpoch + sequence` cursor with explicit reset/gap
+recovery and structured tool/approval metadata. See
+[docs/mobile-sync-protocol.md](docs/mobile-sync-protocol.md).
+
 The renderer uses the same `minimize_window`, `set_floating_window_visible`, and `set_floating_window_size` IPC commands on Windows and macOS. The shell maps them to the native main window and an always-on-top, frameless Atlas Mini window respectively.
 
-The Tauri 2 shell in `src-tauri` reads `$CODEX_HOME/state_5.sqlite` (with a JSONL fallback), launches `codex resume`, keeps a writable stdin handle for guarded `continue` recovery, and exposes Paseo and CC Switch integrations. The standalone Atlas Mini window renders `/?view=floating`.
+The Tauri 2 shell in `src-tauri` reads `$CODEX_HOME/state_5.sqlite` (with a JSONL fallback), launches `codex resume`, keeps a writable stdin handle for guarded `continue` recovery, and exposes Paseo/CC Switch integrations plus the Atlas voice daemon. The standalone Atlas Mini window renders `/?view=floating`.
 
 ## Runtime detection
 

@@ -1909,7 +1909,9 @@ html.floating-window #root {
   position: relative;
   width: var(--floating-size, 252px);
   height: var(--floating-size, 252px);
-  padding: clamp(6px, 3.2%, 16px);
+  /* The native window is already sized to the widget. Keeping this at zero
+     prevents transparent hit-test padding from covering nearby applications. */
+  padding: 0;
   color: #28322d;
   background: transparent;
   font-family: 'Geist Variable', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
@@ -1942,6 +1944,7 @@ html.floating-window #root {
 .desktop-tv-leds .yellow { background: #dfb03d; }
 .desktop-tv-leds .green { background: #49bb70; }
 .desktop-tv-widget.active .desktop-tv-leds .green { opacity: 1; box-shadow: 0 0 0 3px rgba(73,187,112,.12); }
+.desktop-tv-widget.working .desktop-tv-leds .green { opacity: .7; animation: desktop-tv-led-breathe 1.7s ease-in-out infinite; }
 .desktop-tv-widget.warning .desktop-tv-leds .yellow { opacity: 1; box-shadow: 0 0 0 3px rgba(223,176,61,.13); }
 .desktop-tv-widget.blocked .desktop-tv-leds .red { opacity: 1; box-shadow: 0 0 0 3px rgba(217,84,80,.13); }
 .desktop-tv-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-height: 0; height: auto; padding: clamp(6px, 3.2%, 18px) clamp(8px, 4.4%, 24px) clamp(3px, 1.6%, 9px); }
@@ -1953,12 +1956,25 @@ html.floating-window #root {
 .desktop-tv-screen-head span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-tv-screen-head b { flex: 0 0 auto; color: #76bd80; font-size: 9px; font-weight: 500; }
 .desktop-tv-status-dot { width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%; background: #55c87a; box-shadow: 0 0 0 4px rgba(85,200,122,.15), 0 0 8px rgba(85,200,122,.55); }
+.desktop-tv-widget.working .desktop-tv-status-dot { animation: desktop-tv-led-breathe 1.7s ease-in-out infinite; }
+.desktop-tv-widget.idle .desktop-tv-status-dot { background: #aeb8ae; box-shadow: 0 0 0 3px rgba(174,184,174,.12); }
 .desktop-tv-widget.warning .desktop-tv-status-dot { background: #e1b74c; box-shadow: 0 0 0 3px rgba(225,183,76,.12); }
 .desktop-tv-widget.blocked .desktop-tv-status-dot { background: #e2615c; box-shadow: 0 0 0 3px rgba(226,97,92,.12); }
-.desktop-tv-session-meta { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 3px; margin-top: 10px; min-width: 0; }
+.desktop-tv-session-meta { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 3px; max-height: 0; min-width: 0; margin-top: 0; overflow: hidden; opacity: 0; transform: translateY(-3px); transition: opacity .16s ease, transform .16s ease, max-height .16s ease, margin-top .16s ease; pointer-events: none; }
+.desktop-tv-screen:hover .desktop-tv-session-meta,
+.desktop-tv-screen:focus-within .desktop-tv-session-meta { max-height: 42px; margin-top: 8px; opacity: 1; transform: translateY(0); }
 .desktop-tv-session-meta strong { overflow: hidden; color: #d7f8da; font-size: 12px; font-weight: 650; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 0 5px rgba(153,244,166,.35); }
 .desktop-tv-session-meta small { overflow: hidden; color: #8bd394; font-size: 9px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-tv-output { position: relative; z-index: 1; display: -webkit-box; overflow: hidden; margin-top: 8px; color: #d0f6d3; font-size: 11px; line-height: 1.5; text-shadow: 0 0 5px rgba(153,244,166,.35); -webkit-box-orient: vertical; -webkit-line-clamp: 3; word-break: break-word; }
+.desktop-tv-screen { cursor: text; -webkit-app-region: no-drag; }
+.desktop-tv-screen.is-inputting { cursor: default; }
+.desktop-tv-quick-input { position: relative; z-index: 2; display: flex; align-items: center; gap: 5px; margin-top: auto; padding-top: 8px; }
+.desktop-tv-quick-input input { min-width: 0; flex: 1 1 auto; height: 27px; padding: 4px 8px; border: 1px solid rgba(174,222,177,.55); border-radius: 7px; color: #d8f6da; background: rgba(9, 25, 13, .8); font: 500 10px/1.2 'Geist Variable', 'Microsoft YaHei UI', sans-serif; outline: none; -webkit-app-region: no-drag; }
+.desktop-tv-quick-input input::placeholder { color: rgba(183, 232, 187, .62); }
+.desktop-tv-quick-input input:focus { border-color: #c2efbd; box-shadow: 0 0 0 2px rgba(145, 220, 149, .14); }
+.desktop-tv-quick-input button { width: 27px; height: 27px; display: grid; place-items: center; flex: 0 0 27px; padding: 0; border: 1px solid rgba(174,222,177,.7); border-radius: 7px; color: #17321c; background: #bfe7b8; cursor: pointer; -webkit-app-region: no-drag; }
+.desktop-tv-quick-input button:hover:not(:disabled) { background: #d9f3d3; }
+.desktop-tv-quick-input button:disabled { opacity: .48; cursor: default; }
 .desktop-tv-approval { position: relative; z-index: 2; display: flex; flex: 1 1 auto; flex-direction: column; gap: 5px; min-height: 0; margin-top: 6px; color: #d5f5d8; }
 .desktop-tv-approval > strong { color: #f3d77a; font-size: 10px; font-weight: 700; }
 .desktop-tv-approval > p { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; margin: 0; padding-right: 3px; color: #d0f6d3; font-size: 9px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: rgba(170,226,174,.55) transparent; }
@@ -1977,10 +1993,162 @@ html.floating-window #root {
 .desktop-tv-action.resume { color: #3f8f43; }
 .desktop-tv-action:disabled { color: #afb8ad; background: #eff2ee; cursor: default; transform: none; }
 .desktop-tv-message { position: absolute; left: 50%; top: calc(100% - 1px); z-index: 10; max-width: 285px; padding: 5px 9px; overflow: hidden; border: 1px solid #d3ddd1; border-radius: 8px; color: #546453; background: rgba(255,255,255,.98); box-shadow: 0 5px 14px rgba(38,55,38,.16); font-size: 9px; text-align: center; text-overflow: ellipsis; transform: translateX(-50%); white-space: nowrap; pointer-events: none; }
-.desktop-tv-context-menu { position: fixed; z-index: 40; min-width: 174px; padding: 5px; border: 1px solid #d2dbd0; border-radius: 10px; background: rgba(255,255,255,.98); box-shadow: 0 8px 22px rgba(37,52,37,.18); backdrop-filter: blur(10px); }
+.desktop-tv-context-menu { position: fixed; z-index: 40; min-width: 232px; max-width: min(280px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: 6px; border: 1px solid #d2dbd0; border-radius: 10px; background: rgba(255,255,255,.98); box-shadow: 0 8px 22px rgba(37,52,37,.18); backdrop-filter: blur(10px); }
 .desktop-tv-context-menu button { width: 100%; min-height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 9px; border: 0; border-radius: 7px; color: #475546; background: transparent; font: 600 10px 'Geist Variable', 'Microsoft YaHei UI', sans-serif; text-align: left; cursor: pointer; }
 .desktop-tv-context-menu button:hover:not(:disabled) { color: #244b2b; background: #edf7ec; }
 .desktop-tv-context-menu button:disabled { color: #a5aea4; cursor: default; }
+.desktop-tv-context-label { display: block; padding: 7px 9px 3px; color: #8a9488; font-size: 9px; font-weight: 700; letter-spacing: .04em; }
+.desktop-tv-context-divider { height: 1px; margin: 5px 3px; background: #e5ebe3; }
+.desktop-tv-context-empty { display: block; padding: 5px 9px 7px; color: #98a298; font-size: 10px; }
+.desktop-tv-context-choice { justify-content: space-between; gap: 10px !important; }
+.desktop-tv-context-choice > span { min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-tv-context-choice small { flex: 0 0 auto; color: #97a397; font-size: 9px; font-weight: 500; }
+.desktop-tv-context-choice svg.is-hidden { visibility: hidden; }
+.desktop-tv-context-choice svg.is-selected { color: #3f994c; }
+@keyframes desktop-tv-led-breathe {
+  0%, 100% { opacity: .55; box-shadow: 0 0 0 2px rgba(73,187,112,.1), 0 0 3px rgba(73,187,112,.18); }
+  50% { opacity: 1; box-shadow: 0 0 0 4px rgba(73,187,112,.16), 0 0 12px rgba(73,187,112,.58); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .desktop-tv-widget.working .desktop-tv-leds .green,
+  .desktop-tv-widget.working .desktop-tv-status-dot { animation: none; opacity: 1; }
+}
+
+/* CRT presets share the same responsive bounds; each preset can shape its
+   bezel and control panel without changing the native window dimensions. */
+.desktop-tv-widget.skin-macintosh .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-macintosh { border-color: #c6bda9; border-radius: 17px 17px 10px 10px; background: linear-gradient(145deg, #f7f2e7, #d7cfbf); }
+.desktop-tv-widget.skin-macintosh .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-top { height: 25px; border-color: #d0c7b5; color: #796f5d; }
+.desktop-tv-widget.skin-macintosh .desktop-tv-brand,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-top strong { font-family: 'Geneva', 'Chicago', 'Geist Variable', sans-serif; letter-spacing: .12em; }
+.desktop-tv-widget.skin-macintosh .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-body { border-color: #b4aa96; border-radius: 8px; background: linear-gradient(145deg, #e1dacb, #c8bfae); }
+.desktop-tv-widget.skin-macintosh .desktop-tv-screen,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-screen { border-color: #5d625e; border-radius: 3px; color: #d9e8ce; background: radial-gradient(circle at 48% 40%, #35443b 0%, #17231e 78%); box-shadow: inset 0 0 12px rgba(146,193,126,.18), inset 0 0 3px rgba(0,0,0,.72); }
+.desktop-tv-widget.skin-macintosh .desktop-tv-scanlines,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-screen::after { opacity: .16; }
+.desktop-tv-widget.skin-macintosh .desktop-tv-screen-head,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-screen > div { color: #a7c08f; }
+.desktop-tv-widget.skin-macintosh .desktop-tv-screen-head b,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-screen > div b { color: #89a676; }
+.desktop-tv-widget.skin-macintosh .desktop-tv-session-meta strong,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-screen > strong { color: #e3f0d7; text-shadow: 0 0 4px rgba(161,205,136,.24); }
+.desktop-tv-widget.skin-macintosh .desktop-tv-session-meta small,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-screen > small { color: #a2b996; }
+.desktop-tv-widget.skin-macintosh .desktop-tv-output,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-screen > p { color: #d3e5c9; text-shadow: 0 0 4px rgba(161,205,136,.2); }
+.desktop-tv-widget.skin-macintosh .desktop-tv-footer,
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-footer { min-height: 38px; border-top: 1px solid #c5bba7; background: linear-gradient(180deg, #e9e2d5, #d5ccbc); color: #756a57; }
+.desktop-tv-widget.skin-macintosh .desktop-tv-action { width: 24px; height: 22px; border-radius: 5px; border-color: #b5aa96; color: #6e6556; background: #eee8dd; }
+.app-shell .floating-crt-preview.skin-macintosh .floating-crt-preview-footer button { width: 24px; height: 22px; border-radius: 5px; border-color: #b5aa96; color: #6e6556; background: #eee8dd; }
+
+.desktop-tv-widget.skin-mono .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-mono { border-color: #b7bec4; border-radius: 9px; background: linear-gradient(145deg, #f2f4f5, #cfd5d9); }
+.desktop-tv-widget.skin-mono .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-top { border-color: #c4cbd0; color: #59636b; }
+.desktop-tv-widget.skin-mono .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-body { border-color: #aeb7bd; border-radius: 4px; background: linear-gradient(145deg, #dfe4e7, #c0c8cd); }
+.desktop-tv-widget.skin-mono .desktop-tv-screen,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-screen { border-color: #73828d; border-radius: 2px; color: #d8e2e8; background: radial-gradient(circle at 48% 40%, #2b3b47 0%, #121a20 78%); box-shadow: inset 0 0 17px rgba(190,214,226,.16), inset 0 0 3px rgba(0,0,0,.72); }
+.desktop-tv-widget.skin-mono .desktop-tv-scanlines,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-screen::after { background: repeating-linear-gradient(to bottom, transparent 0, transparent 3px, rgba(211,225,234,.2) 4px); }
+.desktop-tv-widget.skin-mono .desktop-tv-screen-head,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-screen > div { color: #b8cad4; }
+.desktop-tv-widget.skin-mono .desktop-tv-screen-head b,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-screen > div b { color: #96aeba; }
+.desktop-tv-widget.skin-mono .desktop-tv-session-meta strong,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-screen > strong { color: #e0ebf0; text-shadow: none; }
+.desktop-tv-widget.skin-mono .desktop-tv-session-meta small,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-screen > small { color: #aabcc5; }
+.desktop-tv-widget.skin-mono .desktop-tv-output,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-screen > p { color: #d2e0e7; text-shadow: none; }
+.desktop-tv-widget.skin-mono .desktop-tv-footer,
+.app-shell .floating-crt-preview.skin-mono .floating-crt-preview-footer { border-color: #c4cbd0; background: linear-gradient(180deg, #e8ecee, #d1d8dc); color: #59636b; }
+.desktop-tv-widget.skin-mono .desktop-tv-action { border-color: #aeb8be; color: #596a73; background: linear-gradient(145deg, #f6f7f8, #d7dde0); }
+
+.desktop-tv-widget.skin-mint .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-mint { border-color: #a8d0c1; border-radius: 28px 28px 22px 22px; background: linear-gradient(145deg, #fcfffd, #d5eee3); }
+.desktop-tv-widget.skin-mint .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-top { border-color: #b9dacd; color: #4e7d6e; }
+.desktop-tv-widget.skin-mint .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-body { border-color: #94c7b3; border-radius: 20px; background: linear-gradient(145deg, #d8f0e5, #b9ddcb); }
+.desktop-tv-widget.skin-mint .desktop-tv-screen,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-screen { border-color: #6eae96; border-radius: 18px; color: #c7f8df; background: radial-gradient(circle at 48% 40%, #235348 0%, #0d2b26 78%); box-shadow: inset 0 0 17px rgba(100,232,183,.2), inset 0 0 3px rgba(0,0,0,.72); }
+.desktop-tv-widget.skin-mint .desktop-tv-screen-head,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-screen > div { color: #94e1bd; }
+.desktop-tv-widget.skin-mint .desktop-tv-screen-head b,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-screen > div b { color: #79cba6; }
+.desktop-tv-widget.skin-mint .desktop-tv-session-meta strong,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-screen > strong { color: #d9ffea; }
+.desktop-tv-widget.skin-mint .desktop-tv-session-meta small,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-screen > small { color: #91d6b3; }
+.desktop-tv-widget.skin-mint .desktop-tv-output,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-screen > p { color: #c8f3dc; }
+.desktop-tv-widget.skin-mint .desktop-tv-footer,
+.app-shell .floating-crt-preview.skin-mint .floating-crt-preview-footer { border-color: #b4dacc; background: linear-gradient(180deg, #e6f6ef, #cde9dc); color: #4f796a; }
+
+.desktop-tv-widget.skin-amber .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-amber { border-color: #d9c1a0; border-radius: 5px; background: linear-gradient(145deg, #fffdf8, #ead9c2); }
+.desktop-tv-widget.skin-amber .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-top { border-color: #e0cdb2; color: #866a48; }
+.desktop-tv-widget.skin-amber .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-body { border-color: #c9ae87; border-radius: 5px; background: linear-gradient(145deg, #eedfc9, #dbc19d); }
+.desktop-tv-widget.skin-amber .desktop-tv-screen,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-screen { border-color: #b88445; border-radius: 2px; color: #ffe1ad; background: radial-gradient(circle at 48% 40%, #5b3d1f 0%, #2c1b0f 78%); box-shadow: inset 0 0 17px rgba(255,194,91,.2), inset 0 0 3px rgba(0,0,0,.72); }
+.desktop-tv-widget.skin-amber .desktop-tv-screen-head,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-screen > div { color: #f4bc67; }
+.desktop-tv-widget.skin-amber .desktop-tv-screen-head b,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-screen > div b { color: #d89849; }
+.desktop-tv-widget.skin-amber .desktop-tv-session-meta strong,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-screen > strong { color: #ffe9c2; text-shadow: 0 0 5px rgba(255,188,93,.28); }
+.desktop-tv-widget.skin-amber .desktop-tv-session-meta small,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-screen > small { color: #e8b96f; }
+.desktop-tv-widget.skin-amber .desktop-tv-output,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-screen > p { color: #ffdfaa; text-shadow: 0 0 5px rgba(255,188,93,.25); }
+.desktop-tv-widget.skin-amber .desktop-tv-footer,
+.app-shell .floating-crt-preview.skin-amber .floating-crt-preview-footer { border-color: #d7c09f; background: linear-gradient(180deg, #f3e8d6, #e5d1b5); color: #806444; }
+
+.desktop-tv-widget.skin-blue .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-blue { border-color: #b3c8d9; border-radius: 30px 30px 24px 24px; background: linear-gradient(145deg, #fbfdff, #d7e3ed); }
+.desktop-tv-widget.skin-blue .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-top { border-color: #c1d2df; color: #5d7385; }
+.desktop-tv-widget.skin-blue .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-body { border-color: #9db8cc; border-radius: 22px; background: linear-gradient(145deg, #dce9f2, #bfd2e0); }
+.desktop-tv-widget.skin-blue .desktop-tv-screen,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-screen { border-color: #6f9ab7; border-radius: 22px; color: #c5e5fb; background: radial-gradient(circle at 48% 40%, #254963 0%, #11283a 78%); box-shadow: inset 0 0 17px rgba(114,190,231,.2), inset 0 0 3px rgba(0,0,0,.72); }
+.desktop-tv-widget.skin-blue .desktop-tv-screen-head,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-screen > div { color: #9ed4f0; }
+.desktop-tv-widget.skin-blue .desktop-tv-screen-head b,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-screen > div b { color: #7cb3d2; }
+.desktop-tv-widget.skin-blue .desktop-tv-session-meta strong,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-screen > strong { color: #d9efff; }
+.desktop-tv-widget.skin-blue .desktop-tv-session-meta small,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-screen > small { color: #9bc4db; }
+.desktop-tv-widget.skin-blue .desktop-tv-output,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-screen > p { color: #c8e7fa; }
+.desktop-tv-widget.skin-blue .desktop-tv-footer,
+.app-shell .floating-crt-preview.skin-blue .floating-crt-preview-footer { border-color: #bfd2df; background: linear-gradient(180deg, #edf4f8, #d9e6ee); color: #5c7385; }
+
+.app-shell .floating-skin-picker { display: grid; gap: 10px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--app-line); }
+.app-shell .floating-skin-picker > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.app-shell .floating-skin-picker strong { color: var(--app-secondary); font-size: 12px; }
+.app-shell .floating-skin-picker small { color: var(--app-muted); font-size: 10px; }
+.app-shell .floating-skin-options { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.app-shell .floating-skin-option { min-width: 0; display: grid; justify-items: center; gap: 6px; padding: 8px 4px; border: 1px solid var(--app-line); border-radius: 8px; color: var(--app-muted); background: #fff; }
+.app-shell .floating-skin-option:hover:not(:disabled) { border-color: var(--app-line-strong); background: var(--app-soft); }
+.app-shell .floating-skin-option.selected { border-color: var(--app-accent); color: var(--app-accent); background: var(--app-accent-soft); }
+.app-shell .floating-skin-option i { width: 22px; height: 22px; display: block; border: 1px solid rgba(44,58,48,.18); border-radius: 50%; background: #f7f8f5; }
+.app-shell .floating-skin-option span { overflow: hidden; width: 100%; font-size: 10px; line-height: 1.15; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .floating-skin-option.skin-classic i { background: linear-gradient(135deg, #fff, #dce3da); }
+.app-shell .floating-skin-option.skin-macintosh i { background: linear-gradient(135deg, #f8f1e3, #c9bda7); }
+.app-shell .floating-skin-option.skin-mono i { background: linear-gradient(135deg, #edf1f3, #9ca8b0); }
+.app-shell .floating-skin-option.skin-mint i { background: linear-gradient(135deg, #effcf6, #9bd2b9); }
+.app-shell .floating-skin-option.skin-amber i { background: linear-gradient(135deg, #fff8e9, #d4a769); }
+.app-shell .floating-skin-option.skin-blue i { background: linear-gradient(135deg, #eef7fc, #8eb4cf); }
+@media (max-width: 720px) {
+  .app-shell .floating-skin-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 
 /* Shared production scale: readable at native desktop density and consistent
    across overview, monitor, integrations, skills, and runtime pages. */
@@ -2700,6 +2868,7 @@ html.floating-window #root {
 .app-shell .voice-service-meta strong { overflow: hidden; color: var(--app-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .app-shell .voice-service-meta small { overflow: hidden; color: var(--app-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .app-shell .voice-install-progress { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid #cddfd3; border-radius: 8px; background: var(--app-accent-soft); }
+
 .app-shell .voice-install-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .app-shell .voice-install-progress strong { min-width: 0; overflow: hidden; color: var(--app-ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .app-shell .voice-install-progress span,
@@ -2873,4 +3042,34 @@ html.floating-window #root {
   .app-shell .content-state .secondary-button { margin-left: 0; }
   .app-shell .provider-empty { align-items: flex-start; flex-direction: column; justify-content: center; }
   .app-shell .provider-empty small { margin-left: 19px; }
+}
+
+/* Final session/skill readability overrides. */
+.app-shell .session-main small { display: -webkit-box; overflow: hidden; white-space: normal; text-overflow: clip; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.app-shell .workspace-path-row strong { max-width: none; overflow-x: auto; text-overflow: clip; white-space: nowrap; }
+.app-shell .skill-copy small { display: -webkit-box; overflow: hidden; white-space: normal; text-overflow: clip; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.app-shell .skill-detail-description-block { display: grid; gap: 6px; margin: 20px 0 24px; }
+.app-shell .skill-detail-description-block .detail-label { color: var(--app-muted); font-size: 11px; font-weight: 650; }
+.app-shell .skill-detail-description-block .skill-detail-description { margin: 0; color: var(--app-ink); font-size: 14px; line-height: 1.6; }
+.app-shell .skill-detail-description-block .skill-detail-description.original { color: var(--app-secondary); font-size: 12px; }
+.app-shell .skill-repository-panel { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-top: 16px; padding: 12px; border: 1px solid var(--app-line); border-radius: 8px; background: var(--app-soft); }
+.app-shell .skill-repository-panel > div { min-width: 0; display: grid; gap: 6px; }
+.app-shell .skill-repository-panel strong { overflow-x: auto; color: var(--app-secondary); font: 12px/1.5 'Cascadia Mono', monospace; white-space: nowrap; scrollbar-width: thin; }
+.app-shell .skill-repository-panel .secondary-button { flex: 0 0 auto; min-height: 32px; }
+.app-shell .parsed-skill-section { display: grid; gap: 12px; }
+.app-shell .parsed-skill-section article { padding: 12px; border: 1px solid var(--app-line); border-radius: 8px; background: #fff; }
+.app-shell .parsed-skill-section h4 { margin: 0 0 6px; color: var(--app-ink); font-size: 13px; font-weight: 680; }
+.app-shell .parsed-skill-section p { margin: 0; color: var(--app-secondary); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.app-shell .skill-source-details { border: 1px solid var(--app-line); border-radius: 8px; background: var(--app-soft); }
+.app-shell .skill-source-details summary { display: flex; align-items: center; gap: 8px; padding: 12px 16px; color: var(--app-secondary); cursor: pointer; font-size: 13px; font-weight: 650; list-style: none; }
+.app-shell .skill-source-details summary::-webkit-details-marker { display: none; }
+.app-shell .skill-source-details summary:hover { color: var(--app-ink); background: var(--app-soft-active); }
+.app-shell .skill-source-details pre { max-height: 420px; margin: 0 12px 12px; }
+
+@media (max-width: 680px) {
+  .app-shell .session-actions { min-width: 0; align-items: stretch; flex-direction: column; }
+  .app-shell .session-actions .resume-button { width: 32px; min-width: 32px; height: 32px; padding: 0; justify-content: center; font-size: 0; }
+  .app-shell .session-actions .resume-button svg { margin: 0; }
+  .app-shell .skill-repository-panel { align-items: stretch; flex-direction: column; }
+  .app-shell .skill-repository-panel .secondary-button { width: 100%; justify-content: center; }
 }

@@ -18,7 +18,13 @@ import kotlinx.coroutines.withContext
 
 /** Native AppWidget implementation for launchers that expose widgets as "cards" (including ColorOS). */
 class AtlasWidgetReceiver : AppWidgetProvider() {
+    override fun onEnabled(context: Context) {
+        AtlasSyncService.start(context)
+        updateAll(context)
+    }
+
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+        AtlasSyncService.start(context)
         updateWidgets(context, ids, goAsync())
     }
 
@@ -28,7 +34,7 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
 
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
-            ACTION_REFRESH -> updateAll(context)
+            ACTION_REFRESH -> updateAll(context, goAsync())
             ACTION_ACTIVATE, ACTION_CONTINUE -> performSessionAction(context, intent.action == ACTION_CONTINUE, goAsync())
             ACTION_REPLY -> openConversation(context, goAsync())
             else -> super.onReceive(context, intent)
@@ -45,13 +51,16 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
         private const val REQUEST_CONTINUE = 7003
         private const val REQUEST_REPLY = 7004
 
-        fun updateAll(context: Context) {
+        fun updateAll(context: Context, pending: BroadcastReceiver.PendingResult? = null) {
+            if (BridgePreferences.token(context).isNotBlank()) AtlasSyncService.start(context)
             val manager = AppWidgetManager.getInstance(context)
             val ids = manager.getAppWidgetIds(ComponentName(context, AtlasWidgetReceiver::class.java))
-            if (ids.isNotEmpty()) updateWidgets(context, ids, null)
+            if (ids.isNotEmpty()) updateWidgets(context, ids, pending)
+            else pending?.finish()
         }
 
         fun requestRefresh(context: Context) {
+            if (BridgePreferences.token(context).isNotBlank()) AtlasSyncService.start(context)
             context.sendBroadcast(Intent(context, AtlasWidgetReceiver::class.java).setAction(ACTION_REFRESH))
         }
 
@@ -72,6 +81,7 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
         private fun performSessionAction(context: Context, continueInput: Boolean, pending: BroadcastReceiver.PendingResult?) {
             widgetScope.launch(Dispatchers.IO) {
                 try {
+                    renderActionPending(context)
                     runCatching {
                         val snapshot = loadSnapshot(context)
                         if (snapshot.sessionId.isNotBlank()) {
@@ -104,10 +114,22 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
             }
         }
 
+        private fun renderActionPending(context: Context) {
+            val snapshot = BridgePreferences.cachedSnapshot(context) ?: return
+            val manager = AppWidgetManager.getInstance(context)
+            val ids = manager.getAppWidgetIds(ComponentName(context, AtlasWidgetReceiver::class.java))
+            if (ids.isEmpty()) return
+            ids.forEach { id ->
+                val views = render(context, snapshot.copy(lastOutput = "正在发送操作…"), id)
+                manager.updateAppWidget(id, views)
+            }
+        }
+
         private fun loadSnapshot(context: Context): AtlasSnapshot = runCatching {
             AtlasBridgeClient(preferredUrl(context), BridgePreferences.token(context))
                 .snapshotAny(fallbackUrl(context))
-        }.getOrDefault(AtlasSnapshot())
+        }.onSuccess { BridgePreferences.saveCachedSnapshot(context, it) }
+            .getOrElse { BridgePreferences.cachedSnapshot(context) ?: AtlasSnapshot() }
 
         private fun preferredUrl(context: Context): String =
             if (BridgePreferences.connectionRoute(context) == "server") BridgePreferences.tunnelUrl(context)
@@ -131,12 +153,19 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
             val views = RemoteViews(context.packageName, layout)
             val state = snapshot.state.lowercase()
             val stateColor = when (state) {
-                "working", "active" -> Color.rgb(88, 190, 112)
+                "working", "active", "completed", "done" -> Color.rgb(88, 190, 112)
                 "failed", "blocked", "error" -> Color.rgb(216, 93, 89)
-                else -> Color.rgb(211, 169, 65)
+                "waiting", "approval", "attention" -> Color.rgb(211, 169, 65)
+                else -> Color.rgb(143, 157, 145)
             }
             views.setTextViewText(R.id.atlas_widget_title, snapshot.title.ifBlank { "No active session" })
-            views.setTextViewText(R.id.atlas_widget_meta, listOf(snapshot.folder, snapshot.state).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "idle" })
+            views.setTextViewText(
+                R.id.atlas_widget_meta,
+                listOf(snapshot.deviceName, snapshot.folder, snapshot.state)
+                    .filter { it.isNotBlank() }
+                    .joinToString(" · ")
+                    .ifBlank { "idle" },
+            )
             views.setTextViewText(R.id.atlas_widget_output, snapshot.lastOutput.ifBlank { "Waiting for Codex output" })
             val balanceText = if (snapshot.balanceRemaining == null) {
                 if (snapshot.balanceProvider.isBlank()) "Balance unavailable" else "${snapshot.balanceProvider} · unavailable"
@@ -152,7 +181,9 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
             views.setOnClickPendingIntent(R.id.atlas_widget_activate, pendingIntent(context, ACTION_ACTIVATE, REQUEST_ACTIVATE + widgetId))
             views.setOnClickPendingIntent(R.id.atlas_widget_continue, pendingIntent(context, ACTION_CONTINUE, REQUEST_CONTINUE + widgetId))
             views.setOnClickPendingIntent(R.id.atlas_widget_reply, pendingIntent(context, ACTION_REPLY, REQUEST_REPLY + widgetId))
-            views.setOnClickPendingIntent(R.id.atlas_widget_root, pendingIntent(context, ACTION_REFRESH, REQUEST_REFRESH + widgetId))
+            // Tapping the card opens the selected conversation; action buttons
+            // keep their own explicit PendingIntents below.
+            views.setOnClickPendingIntent(R.id.atlas_widget_root, pendingIntent(context, ACTION_REPLY, REQUEST_REPLY + widgetId))
             return views
         }
 

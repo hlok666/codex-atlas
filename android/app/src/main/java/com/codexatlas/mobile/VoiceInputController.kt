@@ -13,7 +13,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Paseo-style speech lifecycle for the mobile companion.
+ * Atlas speech lifecycle for the mobile companion.
  *
  * Android's SpeechRecognizer owns the microphone and produces partial/final
  * hypotheses. This controller keeps that lifecycle out of Compose so a

@@ -111,9 +111,16 @@ export type CodexHookStatus = {
   error?: string
 }
 
+export type CodexModelOption = {
+  slug: string
+  displayName: string
+  official: boolean
+  source: 'codex-cache' | 'current-config'
+}
+
 export type VoiceServiceStatus = {
-  paseoInstalled: boolean
-  paseoVersion?: string
+  serviceInstalled: boolean
+  serviceVersion?: string
   daemonRunning: boolean
   sttReady: boolean
   ttsReady: boolean
@@ -142,6 +149,9 @@ export type PaseoImportSummary = {
 }
 
 export type MobileBridgeConfig = {
+  deviceId: string
+  deviceName: string
+  deviceKind: string
   url: string
   lanUrl: string
   tunnelUrl?: string
@@ -207,6 +217,7 @@ export type SkillRecord = {
   name: string
   version: string
   description: string
+  descriptionZh?: string
   source: string
   path: string
   enabled: boolean
@@ -221,6 +232,7 @@ export type SkillDetail = {
   skill: SkillRecord
   content: string
   files: string[]
+  sections?: Array<{ heading: string; content: string }>
 }
 
 export type SkillActionResult = {
@@ -457,12 +469,24 @@ export async function openExternalUrl(url: string): Promise<boolean> {
   return (await invokeDesktop<boolean>('open_url', { url: normalized })) ?? false
 }
 
+/** Opens a local workspace folder in the platform file manager. */
+export async function openWorkspace(path: string): Promise<boolean> {
+  const normalized = path.trim()
+  if (!normalized) return false
+  return (await invokeDesktop<boolean>('open_workspace', { path: normalized })) ?? false
+}
+
 export async function importAllPaseoSessions(): Promise<PaseoImportSummary | null> {
   return invokeDesktop<PaseoImportSummary>('paseo_import_all_codex_sessions')
 }
 
 export async function getCodexInfo(): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string } | null> {
   return invokeDesktop('get_codex_info')
+}
+
+/** Returns the model catalog exposed by the installed Codex CLI. */
+export async function getCodexModels(): Promise<CodexModelOption[] | null> {
+  return invokeDesktop<CodexModelOption[]>('get_codex_models')
 }
 
 export async function getVoiceServiceStatus(): Promise<VoiceServiceStatus | null> {
@@ -557,9 +581,9 @@ export async function sendSessionInput(sessionId: string, input: string, focusTe
   return result ?? false
 }
 
-/** Focuses the session terminal, types Chinese `继续`, and presses Enter. */
+/** Queues Chinese `继续` without focusing or raising the session terminal. */
 export async function inputCodexContinue(sessionId: string): Promise<boolean> {
-  const result = await invokeDesktop<boolean>('send_terminal_input', { sessionId, input: '继续', focusTerminal: true })
+  const result = await invokeDesktop<boolean>('send_session_input', { sessionId, input: '继续', focusTerminal: false })
   return result ?? false
 }
 
