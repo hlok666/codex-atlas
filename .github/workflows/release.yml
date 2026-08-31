@@ -77,19 +77,25 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
+          merge-multiple: true
       - name: Flatten release assets
         shell: bash
         run: |
-          find release-assets -type f \( -name '*.exe' -o -name '*.apk' \) -print0 | while IFS= read -r -d '' file; do
-            case "$file" in
-              release-assets/*.exe|release-assets/*.apk) ;;
-              *) cp "$file" release-assets/ ;;
-            esac
+          set -euo pipefail
+          mkdir -p release-assets/publish
+          mapfile -d '' files < <(find release-assets -type f \( -name '*.exe' -o -name '*.apk' \) -print0)
+          if (( ${#files[@]} == 0 )); then
+            echo 'No Windows installer or Android APK was downloaded' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            cp "$file" "release-assets/publish/$(basename "$file")"
           done
+          find release-assets/publish -maxdepth 1 -type f -print
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body_path: RELEASE_NOTES.md
           files: |
-            release-assets/*.exe
-            release-assets/*.apk
+            release-assets/publish/*.exe
+            release-assets/publish/*.apk
