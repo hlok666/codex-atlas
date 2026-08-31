@@ -34,6 +34,8 @@ import {
   MoreHorizontal,
   Palette,
   PackageCheck,
+  Paperclip,
+  Image as ImageIcon,
   Pause,
   PictureInPicture2,
   Play,
@@ -56,8 +58,9 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendSessionInput, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
-import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
+import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import type { DesktopUpdateInfo } from './lib/atlasBridge'
+import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
 import '@fontsource-variable/geist'
 import './styles.css'
@@ -231,7 +234,7 @@ const navItems = [
 
 type UiLanguage = 'zh' | 'en'
 
-type FloatingSkin = 'classic' | 'macintosh' | 'mono' | 'mint' | 'amber' | 'blue'
+type FloatingSkin = 'classic' | 'macintosh' | 'mono' | 'mint' | 'amber' | 'blue' | 'imac' | 'workstation' | 'pocket' | 'television' | 'arcade' | 'terminal' | 'tower' | 'console' | 'portable'
 
 const floatingSkinOptions: Array<{ id: FloatingSkin; labelZh: string; labelEn: string }> = [
   { id: 'classic', labelZh: '经典白', labelEn: 'Classic' },
@@ -240,6 +243,15 @@ const floatingSkinOptions: Array<{ id: FloatingSkin; labelZh: string; labelEn: s
   { id: 'mint', labelZh: '薄荷绿', labelEn: 'Mint' },
   { id: 'amber', labelZh: '琥珀屏', labelEn: 'Amber' },
   { id: 'blue', labelZh: '蓝灰屏', labelEn: 'Blue' },
+  { id: 'imac', labelZh: '彩虹一体机', labelEn: 'iMac all-in-one' },
+  { id: 'workstation', labelZh: '工作站', labelEn: 'Workstation' },
+  { id: 'pocket', labelZh: '便携终端', labelEn: 'Pocket terminal' },
+  { id: 'television', labelZh: '电视侧控', labelEn: 'Television set' },
+  { id: 'arcade', labelZh: '街机控制台', labelEn: 'Arcade cabinet' },
+  { id: 'terminal', labelZh: '终端键盘', labelEn: 'Terminal keyboard' },
+  { id: 'tower', labelZh: '塔式工作站', labelEn: 'Tower workstation' },
+  { id: 'console', labelZh: '宽屏控制台', labelEn: 'Wide console' },
+  { id: 'portable', labelZh: '便携横屏', labelEn: 'Portable wide' },
 ]
 
 function normalizeFloatingSkin(value: unknown): FloatingSkin {
@@ -383,6 +395,36 @@ type DesktopOutputEvent = {
   sessionId: string
   line?: string
   lastOutput?: string
+}
+
+type CodexAppServerEvent = {
+  method: string
+  params?: {
+    threadId?: string
+    turnId?: string
+    delta?: string
+    status?: { type?: string; activeFlags?: string[] }
+    turn?: { id?: string; status?: string; error?: { message?: string } | null }
+  }
+}
+
+function appServerSessionPatch(event: CodexAppServerEvent): Partial<Session> | null {
+  const params = event.params || {}
+  const method = event.method || ''
+  const sessionId = params.threadId
+  if (!sessionId) return null
+  if (method === 'thread/status/changed') {
+    const status = params.status?.type || 'idle'
+    const active = status === 'active'
+    const flags = params.status?.activeFlags || []
+    return { status: active ? 'active' : 'done', liveState: flags.join(',') || status === 'active' ? (flags.includes('waitingOnApproval') ? 'waiting' : 'working') : 'idle', processIds: active ? [1] : [], lastEventAtMs: Date.now(), timestamp: Date.now(), updated: relativeUpdated(Date.now()), statusSource: 'app-server' }
+  }
+  if (method === 'turn/started') return { status: 'active', liveState: 'working', processIds: [1], lastEventAtMs: Date.now(), timestamp: Date.now(), updated: relativeUpdated(Date.now()), statusSource: 'app-server' }
+  if (method === 'turn/completed') return { status: 'active', liveState: 'idle', lastEventAtMs: Date.now(), timestamp: Date.now(), updated: relativeUpdated(Date.now()), statusSource: 'app-server', lastError: params.turn?.error?.message || undefined }
+  if (method === 'item/agentMessage/delta' || method === 'item/reasoning/summaryTextDelta' || method === 'item/commandExecution/outputDelta') {
+    return { status: 'active', liveState: method.includes('commandExecution') ? 'tool' : 'working', lastOutput: params.delta || '', lastEventAtMs: Date.now(), timestamp: Date.now(), updated: relativeUpdated(Date.now()), statusSource: 'app-server' }
+  }
+  return null
 }
 
 type ApprovalOption = {
@@ -599,6 +641,7 @@ function App() {
   const storedDefaultModelRef = useRef(readStored('defaultModel', ''))
   const [defaultModel, setDefaultModel] = useState(() => storedDefaultModelRef.current || 'model not detected')
   const [defaultPermission, setDefaultPermission] = useState(() => readStored('defaultPermission', 'Workspace write'))
+  const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(() => readStored('defaultReasoningEffort', 'medium'))
   const [autoScan, setAutoScan] = useState(() => readStored('autoScan', true))
   const [autoContinue, setAutoContinue] = useState(() => readStored('autoContinue', true))
   const autoContinueRef = useRef(autoContinue)
@@ -666,6 +709,7 @@ function App() {
       'resume_codex_session',
       'create_codex_session',
       'send_session_input',
+      'send_floating_message',
       'send_terminal_input',
       'launch_paseo',
       'paseo_import_all_codex_sessions',
@@ -674,6 +718,9 @@ function App() {
       'install_voice_service',
       'set_codex_defaults',
       'update_codex',
+      'check_desktop_update',
+      'download_desktop_update',
+      'install_desktop_update',
       'get_skill_detail',
       'check_skill_updates',
       'set_skills_enabled',
@@ -717,12 +764,13 @@ function App() {
     writeStored('language', language)
     writeStored('defaultModel', defaultModel)
     writeStored('defaultPermission', defaultPermission)
+    writeStored('defaultReasoningEffort', defaultReasoningEffort)
     writeStored('autoScan', autoScan)
     writeStored('autoContinue', autoContinue)
     writeStored('autoResumeOnBalance', autoResumeOnBalance)
     writeStored('notifyEnabled', notifyEnabled)
     writeStored('floatingLaunchOnStart', floatingLaunchOnStart)
-  }, [language, defaultModel, defaultPermission, autoScan, autoContinue, autoResumeOnBalance, notifyEnabled, floatingLaunchOnStart])
+  }, [language, defaultModel, defaultPermission, defaultReasoningEffort, autoScan, autoContinue, autoResumeOnBalance, notifyEnabled, floatingLaunchOnStart])
 
   useEffect(() => {
     void setDesktopAutoContinue(autoContinue)
@@ -982,6 +1030,7 @@ function App() {
       if (info?.model && legacyDefaults.has(storedDefaultModelRef.current)) {
         setDefaultModel(info.model)
       }
+      if (info?.reasoningEffort) setDefaultReasoningEffort(info.reasoningEffort)
     })
     void getMobileBridgeConfig().then((config) => setMobileBridge(config))
     void getServerTunnelStatus().then((status) => setServerTunnel(status))
@@ -1110,6 +1159,7 @@ function App() {
     let unlisten: (() => void) | null = null
     let unlistenOutput: (() => void) | null = null
     let unlistenRuntime: (() => void) | null = null
+    let unlistenAppServer: (() => void) | null = null
     void listenDesktopEvent<RunningCodexSession[]>('codex_runtime', (records) => {
       if (disposed || !Array.isArray(records)) return
       runtimeSyncRef.current?.(records)
@@ -1151,11 +1201,19 @@ function App() {
         ? { ...item, lastOutput: output, status: item.status === 'done' ? 'active' : item.status, liveState: item.liveState === 'idle' ? 'working' : item.liveState }
         : item))
     }).then((cleanup) => { unlistenOutput = cleanup })
+    void listenDesktopEvent<CodexAppServerEvent>('codex_app_server', (event) => {
+      if (disposed) return
+      const patch = appServerSessionPatch(event)
+      const sessionId = event.params?.threadId
+      if (!patch || !sessionId) return
+      setSessionItems((current) => current.map((item) => item.id === sessionId ? { ...item, ...patch } : item))
+    }).then((cleanup) => { unlistenAppServer = cleanup })
     return () => {
       disposed = true
       unlisten?.()
       unlistenOutput?.()
       unlistenRuntime?.()
+      unlistenAppServer?.()
     }
   }, [])
 
@@ -1293,7 +1351,7 @@ function App() {
           {activeNav === 'integrations' && <IntegrationsView language={language} providerBalances={providerBalances} sessionTotal={sessionItems.length} ccSwitchCheckedAt={ccSwitchCheckedAt} setCcSwitchCheckedAt={setCcSwitchCheckedAt} paseoImportedCount={paseoImportedCount} setPaseoImportedCount={setPaseoImportedCount} showToast={showToast} openExternalTool={openExternalTool} />}
           {activeNav === 'skills' && <SkillsView language={language} skills={installedSkills} setSkills={setInstalledSkills} loadState={skillsLoadState} setLoadState={setSkillsLoadState} showToast={showToast} />}
           {activeNav === 'floating' && <FloatingView language={language} sessions={sessionItems} providerBalances={providerBalances} floatingEnabled={floatingEnabled} onToggleFloating={() => void toggleFloatingWindow()} floatingLaunchOnStart={floatingLaunchOnStart} setFloatingLaunchOnStart={setFloatingLaunchOnStart} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} activateSession={activateSession} inputContinue={inputContinue} showToast={showToast} />}
-          {activeNav === 'runtime' && <RuntimeView language={language} codexVersion={codexVersion} setCodexVersion={setCodexVersion} codexProvider={codexProvider} defaultModel={defaultModel} setDefaultModel={setDefaultModel} setDefaultPermission={setDefaultPermission} defaultPermission={defaultPermission} autoScan={autoScan} setAutoScan={setAutoScan} hookStatus={hookStatus} setHookStatus={setHookStatus} mobileBridge={mobileBridge} setMobileBridge={setMobileBridge} serverTunnel={serverTunnel} setServerTunnel={setServerTunnel} showToast={showToast} />}
+          {activeNav === 'runtime' && <RuntimeView language={language} codexVersion={codexVersion} setCodexVersion={setCodexVersion} codexProvider={codexProvider} defaultModel={defaultModel} setDefaultModel={setDefaultModel} setDefaultPermission={setDefaultPermission} defaultPermission={defaultPermission} defaultReasoningEffort={defaultReasoningEffort} setDefaultReasoningEffort={setDefaultReasoningEffort} autoScan={autoScan} setAutoScan={setAutoScan} hookStatus={hookStatus} setHookStatus={setHookStatus} mobileBridge={mobileBridge} setMobileBridge={setMobileBridge} serverTunnel={serverTunnel} setServerTunnel={setServerTunnel} showToast={showToast} />}
           </main>
         </div>
 
@@ -1687,6 +1745,10 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
     const stored = Number(readStored('floatingSize', 252))
     return Number.isFinite(stored) ? Math.max(180, Math.min(720, stored)) : 252
   })
+  const [floatingFontScale, setFloatingFontScale] = useState(() => {
+    const stored = Number(readStored('floatingFontScale', 100))
+    return Number.isFinite(stored) ? Math.max(75, Math.min(160, stored)) : 100
+  })
   const [floatingOpacity, setFloatingOpacity] = useState(() => readStored('floatingOpacity', 100))
   const active = items.filter((item) => item.status === 'active').length
   const waiting = items.filter((item) => item.recovery === 'watching' || item.recovery === 'retrying').length
@@ -1728,6 +1790,11 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
     setFloatingOpacity(value)
     writeStored('floatingOpacity', value)
   }
+  const updateFloatingFontScale = (value: number) => {
+    const next = Math.max(75, Math.min(160, Math.round(value)))
+    setFloatingFontScale(next)
+    writeStored('floatingFontScale', next)
+  }
   const updateFloatingSkin = (skin: FloatingSkin) => {
     setFloatingSkin(skin)
     writeStored('floatingSkin', skin)
@@ -1741,7 +1808,7 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
       <section className="floating-preview-panel">
         <div className="floating-preview-head"><div><span className="eyebrow">{tr(language, 'widgetPreview')}</span><strong>{tr(language, floatingEnabled ? 'widgetVisible' : 'widgetHidden')}</strong><small>{tr(language, 'widgetPreviewDescription')}</small></div><span className={`floating-visibility-state ${floatingEnabled ? 'visible' : ''}`}><i />{tr(language, floatingEnabled ? 'on' : 'off')}</span></div>
         <div className="floating-preview-stage">
-          <div className={`floating-crt-preview ${state} skin-${floatingSkin}`} aria-label={tr(language, 'floatingCrtPreview')}>
+          <div className={`floating-crt-preview ${state} skin-${floatingSkin}`} style={{ '--floating-font-scale': String(floatingSize / 252 * floatingFontScale / 100) } as React.CSSProperties} aria-label={tr(language, 'floatingCrtPreview')}>
             <div className="floating-crt-preview-top"><strong>ATLAS</strong><span><i className="red" /><i className="yellow" /><i className="green" /></span></div>
              <div className="floating-crt-preview-body"><div className="floating-crt-preview-screen"><div><i className="floating-crt-preview-dot" />{active > 0 ? (language === 'zh' ? '执行中' : 'Working') : (language === 'zh' ? '空闲' : 'Idle')}<b>{count || 0}</b></div><strong>{activeSession?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{activeSession ? `${activeSession.folder} · ${activeSession.model}` : tr(language, 'floatingCrtPreviewDescription')}</small><div className="floating-crt-preview-balance">{balance ? `${balance.name} · ${balance.balance}` : (language === 'zh' ? '余额未检查' : 'Balance not checked')}</div><p>{showOutput ? (activeSession?.lastOutput || activeSession?.lastError || (language === 'zh' ? '暂无最新输出' : 'No recent output')) : (language === 'zh' ? '输出已隐藏' : 'Output hidden')}</p></div></div>
             <div className="floating-crt-preview-footer"><button aria-label={language === 'zh' ? '上一个会话' : 'Previous session'}><ChevronLeft size={13} /></button><span>{count > 0 ? `${count} ${language === 'zh' ? '个会话' : 'sessions'}` : tr(language, 'floatingIdle')}</span><button aria-label={tr(language, 'activateSession')}><Play size={11} fill="currentColor" /></button><button aria-label={tr(language, 'inputContinue')}><TerminalSquare size={11} /></button><button aria-label={language === 'zh' ? '下一个会话' : 'Next session'}><ChevronRight size={13} /></button></div>
@@ -1766,16 +1833,18 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
             {floatingSkinOptions.map((option) => <button key={option.id} type="button" role="radio" aria-checked={floatingSkin === option.id} className={`floating-skin-option skin-${option.id} ${floatingSkin === option.id ? 'selected' : ''}`} onClick={() => updateFloatingSkin(option.id)} title={language === 'zh' ? option.labelZh : option.labelEn}><i aria-hidden="true" /><span>{language === 'zh' ? option.labelZh : option.labelEn}</span></button>)}
           </div>
         </div>
-        <div className="floating-appearance-grid"><label><span>{tr(language, 'floatingScale')} · {floatingSize}px</span><input type="range" min="180" max="720" step="1" value={floatingSize} onChange={(event) => updateFloatingSize(Number(event.target.value))} /></label><label><span>{tr(language, 'floatingOpacity')} · {floatingOpacity}%</span><input type="range" min="65" max="100" step="5" value={floatingOpacity} onChange={(event) => updateFloatingOpacity(Number(event.target.value))} /></label></div>
+        <div className="floating-appearance-grid"><label><span>{tr(language, 'floatingScale')} · {floatingSize}px</span><input type="range" min="180" max="720" step="1" value={floatingSize} onChange={(event) => updateFloatingSize(Number(event.target.value))} /></label><label><span>{language === 'zh' ? '悬浮窗字号' : 'Widget font size'} · {floatingFontScale}%</span><input type="range" min="75" max="160" step="1" value={floatingFontScale} onChange={(event) => updateFloatingFontScale(Number(event.target.value))} /></label><label><span>{tr(language, 'floatingOpacity')} · {floatingOpacity}%</span><input type="range" min="65" max="100" step="5" value={floatingOpacity} onChange={(event) => updateFloatingOpacity(Number(event.target.value))} /></label></div>
         <div className="floating-quick-actions"><span className="eyebrow">{tr(language, 'quickActions')}</span><div className="floating-action-pair"><button className="secondary-button" onClick={() => activeSession && activateSession(activeSession)} disabled={!activeSession}><Play size={14} fill="currentColor" />{activeSession ? tr(language, 'activateSession') : tr(language, 'noActiveSession')}</button><button className="secondary-button" onClick={() => activeSession && inputContinue(activeSession)} disabled={!activeSession}><TerminalSquare size={14} />{tr(language, 'inputContinue')}</button></div></div>
       </section>
     </div>
   </>
 }
 
-function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, defaultModel, setDefaultModel, defaultPermission, setDefaultPermission, autoScan, setAutoScan, hookStatus, setHookStatus, mobileBridge, setMobileBridge, serverTunnel, setServerTunnel, showToast }: { language: 'zh' | 'en'; codexVersion: string; setCodexVersion: (value: string) => void; codexProvider: string; defaultModel: string; setDefaultModel: (value: string) => void; defaultPermission: string; setDefaultPermission: (value: string) => void; autoScan: boolean; setAutoScan: (value: boolean) => void; hookStatus: CodexHookStatus | null; setHookStatus: (value: CodexHookStatus | null) => void; mobileBridge: MobileBridgeConfig | null; setMobileBridge: (value: MobileBridgeConfig | null) => void; serverTunnel: ServerTunnelStatus | null; setServerTunnel: (value: ServerTunnelStatus | null) => void; showToast: (message: string) => void }) {
+function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, defaultModel, setDefaultModel, defaultPermission, setDefaultPermission, defaultReasoningEffort, setDefaultReasoningEffort, autoScan, setAutoScan, hookStatus, setHookStatus, mobileBridge, setMobileBridge, serverTunnel, setServerTunnel, showToast }: { language: 'zh' | 'en'; codexVersion: string; setCodexVersion: (value: string) => void; codexProvider: string; defaultModel: string; setDefaultModel: (value: string) => void; defaultPermission: string; setDefaultPermission: (value: string) => void; defaultReasoningEffort: string; setDefaultReasoningEffort: (value: string) => void; autoScan: boolean; setAutoScan: (value: boolean) => void; hookStatus: CodexHookStatus | null; setHookStatus: (value: CodexHookStatus | null) => void; mobileBridge: MobileBridgeConfig | null; setMobileBridge: (value: MobileBridgeConfig | null) => void; serverTunnel: ServerTunnelStatus | null; setServerTunnel: (value: ServerTunnelStatus | null) => void; showToast: (message: string) => void }) {
   const [saving, setSaving] = useState(false)
   const [updatingCodex, setUpdatingCodex] = useState(false)
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateInfo | null>(null)
+  const [desktopUpdateBusy, setDesktopUpdateBusy] = useState<'check' | 'download' | 'install' | null>(null)
   const [bridgeSaving, setBridgeSaving] = useState(false)
   const [tunnelBusy, setTunnelBusy] = useState(false)
   const [bridgeDraft, setBridgeDraft] = useState<MobileBridgeSettings>({ tunnelUrl: '', cloudflaredPath: '', tunnelToken: '', tunnelName: '', preferTunnel: false, autoStartTunnel: false })
@@ -1788,6 +1857,11 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
   const [voiceStatus, setVoiceStatus] = useState<VoiceServiceStatus | null>(null)
   const [voiceProgress, setVoiceProgress] = useState<VoiceServiceProgress | null>(null)
   const [voiceBusy, setVoiceBusy] = useState(false)
+  useEffect(() => {
+    let disposed = false
+    void checkDesktopUpdate().then((result) => { if (!disposed && result) setDesktopUpdate(result) })
+    return () => { disposed = true }
+  }, [])
   useEffect(() => {
     if (!serverTunnel) return
     setServerDraft((current) => ({ ...current, host: serverTunnel.host || current.host, port: serverTunnel.port || current.port, username: serverTunnel.username || current.username, remotePort: serverTunnel.remotePort || current.remotePort, tunnelUrl: serverTunnel.tunnelUrl || current.tunnelUrl, autoStart: serverTunnel.autoStart, identityFile: serverTunnel.keyPath || current.identityFile }))
@@ -1859,12 +1933,22 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
   const hookReady = hookStatus?.configured && hookStatus.enabled
   const saveDefaults = async () => {
     setSaving(true)
-    const info = await setCodexDefaults(defaultModel, defaultPermission)
+    const info = await setCodexDefaults(defaultModel, defaultPermission, defaultReasoningEffort)
     setSaving(false)
     if (info?.model) {
       setDefaultModel(info.model)
       showToast(language === 'zh' ? '已写入 Codex 配置' : 'Saved to Codex configuration')
     }
+  }
+  const applyDefaultsImmediately = (model: string, permission: string, reasoning: string) => {
+    if (!model.trim()) return
+    void setCodexDefaults(model, permission, reasoning).then((info) => {
+      if (info?.model) setDefaultModel(info.model)
+      if (info?.reasoningEffort) setDefaultReasoningEffort(info.reasoningEffort)
+      writeStored('defaultModel', info?.model || model)
+      writeStored('defaultPermission', permission)
+      writeStored('defaultReasoningEffort', info?.reasoningEffort || reasoning)
+    })
   }
   const updateInstalledCodex = async () => {
     setUpdatingCodex(true)
@@ -1876,6 +1960,32 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
       return
     }
     showToast(language === 'zh' ? 'Codex 更新失败，请检查 npm 和网络' : 'Codex update failed; check npm and network')
+  }
+  const checkAtlasUpdate = async () => {
+    setDesktopUpdateBusy('check')
+    const result = await checkDesktopUpdate()
+    if (result) setDesktopUpdate(result)
+    setDesktopUpdateBusy(null)
+    showToast(result?.available ? (language === 'zh' ? `发现 Atlas ${result.latestVersion}` : `Atlas ${result.latestVersion} is available`) : (language === 'zh' ? '当前已是最新版本' : 'Atlas is up to date'))
+  }
+  const downloadAtlasUpdate = async () => {
+    if (!desktopUpdate?.available) return
+    setDesktopUpdateBusy('download')
+    try {
+      const result = await downloadDesktopUpdate(desktopUpdate)
+      if (result) setDesktopUpdate(result)
+      showToast(result?.downloaded ? (language === 'zh' ? '安装包已下载，可立即安装' : 'Installer downloaded and ready to install') : (language === 'zh' ? '下载失败' : 'Download failed'))
+    } finally {
+      setDesktopUpdateBusy(null)
+    }
+  }
+  const installAtlasUpdate = async () => {
+    const path = desktopUpdate?.downloadedPath
+    if (!path) return
+    setDesktopUpdateBusy('install')
+    const ok = await installDesktopUpdate(path)
+    setDesktopUpdateBusy(null)
+    if (!ok) showToast(language === 'zh' ? '无法启动安装程序' : 'Could not launch installer')
   }
   const installVoice = async () => {
     setVoiceBusy(true)
@@ -2006,8 +2116,9 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
     <div className="runtime-grid">
       <section className="settings-panel">
         <div className="panel-head"><div><h3>{tr(language, 'sessionDefaults')}</h3><span className="panel-subtitle">{tr(language, 'appliedNewResumes')}</span></div><Wrench size={17} className="teal-icon" /></div>
-        <label className="field-label">{tr(language, 'model')}<input className="text-input" value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)} spellCheck={false} /><span className="field-hint">{codexProvider ? `${language === 'zh' ? '当前供应商' : 'Provider'} · ${codexProvider}` : (language === 'zh' ? '读取自 Codex 配置' : 'Read from Codex configuration')}</span></label>
-        <label className="field-label">{tr(language, 'permissionField')}<select value={defaultPermission} onChange={(event) => setDefaultPermission(event.target.value)}><option value="Workspace write">{language === 'zh' ? '工作区写入' : 'Workspace write'}</option><option value="Read only">{language === 'zh' ? '只读' : 'Read only'}</option><option value="Full access">{language === 'zh' ? '完全访问' : 'Full access'}</option></select></label>
+        <label className="field-label">{tr(language, 'model')}<input className="text-input" value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)} onBlur={() => applyDefaultsImmediately(defaultModel, defaultPermission, defaultReasoningEffort)} spellCheck={false} /><span className="field-hint">{codexProvider ? `${language === 'zh' ? '当前供应商' : 'Provider'} · ${codexProvider}` : (language === 'zh' ? '读取自 Codex 配置' : 'Read from Codex configuration')}</span></label>
+        <label className="field-label">{tr(language, 'permissionField')}<select value={defaultPermission} onChange={(event) => { const next = event.target.value; setDefaultPermission(next); applyDefaultsImmediately(defaultModel, next, defaultReasoningEffort) }}><option value="Workspace write">{language === 'zh' ? '工作区写入' : 'Workspace write'}</option><option value="Read only">{language === 'zh' ? '只读' : 'Read only'}</option><option value="Full access">{language === 'zh' ? '完全访问' : 'Full access'}</option></select></label>
+        <label className="field-label">{language === 'zh' ? '思考程度' : 'Reasoning effort'}<select value={defaultReasoningEffort} onChange={(event) => { const next = event.target.value; setDefaultReasoningEffort(next); applyDefaultsImmediately(defaultModel, defaultPermission, next) }}><option value="low">{language === 'zh' ? '低' : 'Low'}</option><option value="medium">{language === 'zh' ? '中' : 'Medium'}</option><option value="high">{language === 'zh' ? '高' : 'High'}</option><option value="xhigh">{language === 'zh' ? '极高' : 'Extra high'}</option></select></label>
         <label className="switch-row"><span><strong>{tr(language, 'scanOnLaunch')}</strong><small>{tr(language, 'refreshOnLaunch')}</small></span><button className={`toggle ${autoScan ? 'on' : ''}`} onClick={() => setAutoScan(!autoScan)} aria-label={tr(language, 'scanOnLaunch')}><span /></button></label>
         <label className="switch-row"><span><strong>{tr(language, 'recoveryGuardrails')}</strong><small>{tr(language, 'pauseBalance')}</small></span><span className="guardrail-chip"><ShieldCheck size={13} /> {tr(language, 'on')}</span></label>
       </section>
@@ -2015,6 +2126,7 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
         <div className="panel-head"><div><h3>{tr(language, 'codexVersion')}</h3><span className="panel-subtitle">{tr(language, 'detectedCli')}</span></div><GitBranch size={17} className="violet-icon" /></div>
         <div className="version-card current"><div><span className="version-badge">{tr(language, 'installedBadge')}</span><strong>Codex {codexVersion}</strong><small>{codexVersion === 'detecting…' ? tr(language, 'detecting') : tr(language, 'readyResume')}</small></div><Check size={17} /></div>
         <button className="secondary-button version-help" onClick={() => void updateInstalledCodex()} disabled={updatingCodex}>{updatingCodex ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />} {updatingCodex ? (language === 'zh' ? '更新中…' : 'Updating…') : tr(language, 'checkUpdates')}</button>
+        <div className="desktop-update-row"><div><strong>{language === 'zh' ? 'Atlas 桌面版本' : 'Atlas desktop version'}</strong><small>{desktopUpdate ? (desktopUpdate.available ? `${language === 'zh' ? '可更新至' : 'Available'} ${desktopUpdate.latestVersion}` : (language === 'zh' ? '已是最新' : 'Up to date')) : (language === 'zh' ? '检查中…' : 'Checking…')}</small></div><div className="desktop-update-actions"><button className="icon-button tiny" onClick={() => void checkAtlasUpdate()} disabled={desktopUpdateBusy !== null} aria-label={language === 'zh' ? '检查 Atlas 更新' : 'Check Atlas updates'} title={language === 'zh' ? '检查 Atlas 更新' : 'Check Atlas updates'}>{desktopUpdateBusy === 'check' ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}</button>{desktopUpdate?.downloadedPath ? <button className="primary-button compact-button" onClick={() => void installAtlasUpdate()} disabled={desktopUpdateBusy !== null}>{desktopUpdateBusy === 'install' ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}{language === 'zh' ? '安装' : 'Install'}</button> : desktopUpdate?.available ? <button className="primary-button compact-button" onClick={() => void downloadAtlasUpdate()} disabled={desktopUpdateBusy !== null}>{desktopUpdateBusy === 'download' ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}{language === 'zh' ? '下载' : 'Download'}</button> : null}</div></div>
       </section>
       <section className="settings-panel project-panel">
         <div className="panel-head"><div><h3>{tr(language, 'atlasProject')}</h3><span className="panel-subtitle">{tr(language, 'atlasProjectDescription')}</span></div><ExternalLink size={17} className="teal-icon" /></div>
@@ -2283,11 +2395,16 @@ function FloatingMini() {
     const stored = Number(readStored('floatingSize', 252))
     return Number.isFinite(stored) ? Math.max(180, Math.min(720, stored)) : 252
   })
+  const [floatingFontScale, setFloatingFontScale] = useState(() => {
+    const stored = Number(readStored('floatingFontScale', 100))
+    return Number.isFinite(stored) ? Math.max(75, Math.min(160, stored)) : 100
+  })
   const [showOutput, setShowOutput] = useState(() => readStored('floatingShowOutput', true))
   const [autoPickSession, setAutoPickSession] = useState(() => readStored('floatingAutoPickSession', true))
   const [rightClickMenu, setRightClickMenu] = useState(() => readStored('floatingRightClickMenu', true))
   const [defaultModel, setDefaultModel] = useState(() => readStored('defaultModel', ''))
   const [defaultPermission, setDefaultPermission] = useState(() => readStored('defaultPermission', 'Workspace write'))
+  const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(() => readStored('defaultReasoningEffort', 'medium'))
   const t = (key: string) => tr(language, key)
   const [items, setItems] = useState<Session[]>([])
   const [codexModels, setCodexModels] = useState<CodexModelOption[]>([])
@@ -2299,7 +2416,10 @@ function FloatingMini() {
   const [actionBusy, setActionBusy] = useState<'activate' | 'input' | null>(null)
   const [quickInputOpen, setQuickInputOpen] = useState(false)
   const [quickInput, setQuickInput] = useState('')
-  const quickInputRef = useRef<HTMLInputElement | null>(null)
+  const [quickInputMode, setQuickInputMode] = useState<FloatingInputMode>('queue')
+  const [quickAttachments, setQuickAttachments] = useState<FloatingAttachment[]>([])
+  const quickFileInputRef = useRef<HTMLInputElement | null>(null)
+  const quickInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null)
   const [approvalOther, setApprovalOther] = useState('')
   const approvalOtherInputRef = useRef<HTMLInputElement | null>(null)
@@ -2384,8 +2504,9 @@ function FloatingMini() {
     syncModels()
     const modelTimer = window.setInterval(syncModels, 60_000)
     void getCodexInfo().then((info) => {
-      if (disposed || !info?.model || defaultModel.trim()) return
-      setDefaultModel(info.model)
+      if (disposed || !info) return
+      if (info.model && !defaultModel.trim()) setDefaultModel(info.model)
+      if (info.reasoningEffort) setDefaultReasoningEffort(info.reasoningEffort)
     })
     return () => { disposed = true; window.clearInterval(modelTimer) }
   }, [])
@@ -2412,11 +2533,16 @@ function FloatingMini() {
       if (event.key === 'codex-atlas:floatingOpacity') setFloatingOpacity(readStored('floatingOpacity', 100))
       if (event.key === 'codex-atlas:floatingSkin') setFloatingSkin(normalizeFloatingSkin(readStored('floatingSkin', 'classic')))
       if (event.key === 'codex-atlas:floatingSize') setFloatingSize(Math.max(180, Math.min(720, Number(readStored('floatingSize', 252)) || 252)))
+      if (event.key === 'codex-atlas:floatingFontScale') {
+        const next = Number(readStored('floatingFontScale', 100))
+        setFloatingFontScale(Number.isFinite(next) ? Math.max(75, Math.min(160, next)) : 100)
+      }
       if (event.key === 'codex-atlas:floatingShowOutput') setShowOutput(readStored('floatingShowOutput', true))
       if (event.key === 'codex-atlas:floatingAutoPickSession') setAutoPickSession(readStored('floatingAutoPickSession', true))
       if (event.key === 'codex-atlas:floatingRightClickMenu') setRightClickMenu(readStored('floatingRightClickMenu', true))
       if (event.key === 'codex-atlas:defaultModel') setDefaultModel(readStored('defaultModel', ''))
       if (event.key === 'codex-atlas:defaultPermission') setDefaultPermission(readStored('defaultPermission', 'Workspace write'))
+      if (event.key === 'codex-atlas:defaultReasoningEffort') setDefaultReasoningEffort(readStored('defaultReasoningEffort', 'medium'))
     }
     window.addEventListener('storage', syncSettings)
     return () => window.removeEventListener('storage', syncSettings)
@@ -2425,17 +2551,20 @@ function FloatingMini() {
     document.documentElement.classList.add('floating-window')
     document.body.classList.add('floating-window')
     document.documentElement.style.setProperty('--floating-size', `${floatingSize}px`)
+    document.documentElement.style.setProperty('--floating-font-scale', String(floatingSize / 252 * floatingFontScale / 100))
     return () => {
       document.documentElement.classList.remove('floating-window')
       document.body.classList.remove('floating-window')
       document.documentElement.style.removeProperty('--floating-size')
+      document.documentElement.style.removeProperty('--floating-font-scale')
     }
-  }, [floatingSize])
+  }, [floatingSize, floatingFontScale])
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | null = null
     let unlistenOutput: (() => void) | null = null
     let unlistenRuntime: (() => void) | null = null
+    let unlistenAppServer: (() => void) | null = null
     const syncIndex = () => listCodexSessions().then((records) => {
       if (disposed || !records) return
       const mapped = records.map(mapDesktopSession)
@@ -2476,6 +2605,13 @@ function FloatingMini() {
         ? { ...item, lastOutput: output, liveState: 'working', status: 'active', lastEventAtMs: now, timestamp: now, updated: relativeUpdated(now) }
         : item))
     }).then((cleanup) => { unlistenOutput = cleanup })
+    void listenDesktopEvent<CodexAppServerEvent>('codex_app_server', (event) => {
+      if (disposed) return
+      const patch = appServerSessionPatch(event)
+      const sessionId = event.params?.threadId
+      if (!patch || !sessionId) return
+      setItems((current) => current.map((item) => item.id === sessionId ? { ...item, ...patch } : item))
+    }).then((cleanup) => { unlistenAppServer = cleanup })
     return () => {
       disposed = true
       window.clearInterval(runtimeTimer)
@@ -2483,6 +2619,7 @@ function FloatingMini() {
       unlisten?.()
       unlistenOutput?.()
       unlistenRuntime?.()
+      unlistenAppServer?.()
     }
   }, [])
   const orderedItems = useMemo(() => [...items]
@@ -2566,14 +2703,17 @@ function FloatingMini() {
   const submitQuickInput = (event?: React.FormEvent) => {
     event?.preventDefault()
     const value = quickInput.trim()
-    if (!selectedItem || !value || actionBusy || modelBusy) return
+    if (!selectedItem || (!value && quickAttachments.length === 0) || actionBusy || modelBusy) return
     setActionBusy('input')
-    void sendSessionInput(selectedItem.id, value, false).then((ok) => {
+    void sendFloatingMessage(selectedItem.id, value, quickInputMode, quickAttachments).then((ok) => {
       setMessage(ok
-        ? (language === 'zh' ? '已在后台提交消息' : 'Message queued in the background')
-        : (language === 'zh' ? '消息提交失败' : 'Message could not be queued'))
+        ? (quickInputMode === 'queue'
+          ? (language === 'zh' ? '消息已加入队列' : 'Message added to queue')
+          : (language === 'zh' ? '已打断思考并发送' : 'Thinking interrupted and message sent'))
+        : (language === 'zh' ? '消息提交失败，请检查会话终端' : 'Message could not be delivered; check the session terminal'))
       if (ok) {
         setQuickInput('')
+        setQuickAttachments([])
         setQuickInputOpen(false)
       }
       setActionBusy(null)
@@ -2584,19 +2724,30 @@ function FloatingMini() {
       window.setTimeout(() => setMessage(''), 2200)
     })
   }
-  const saveRuntimeSetting = (nextModel: string, nextPermission: string) => {
+  const addQuickFiles = (files: FileList | null) => {
+    if (!files) return
+    const next = Array.from(files).map((file) => {
+      const candidate = file as File & { path?: string }
+      const path = candidate.path || file.webkitRelativePath || ''
+      return { kind: file.type.startsWith('image/') ? 'image' : 'file', name: file.name, path } satisfies FloatingAttachment
+    })
+    setQuickAttachments((current) => [...current, ...next].slice(0, 8))
+  }
+  const saveRuntimeSetting = (nextModel: string, nextPermission: string, nextReasoningEffort = defaultReasoningEffort) => {
     if (!nextModel.trim()) {
       setMessage(language === 'zh' ? '尚未读取 Codex 模型' : 'Codex model is not available yet')
       window.setTimeout(() => setMessage(''), 2200)
       return
     }
     setModelBusy(true)
-    void setCodexDefaults(nextModel, nextPermission).then((info) => {
+    void setCodexDefaults(nextModel, nextPermission, nextReasoningEffort).then((info) => {
       if (info?.model) {
         setDefaultModel(info.model)
         setDefaultPermission(nextPermission)
+        setDefaultReasoningEffort(info.reasoningEffort || nextReasoningEffort)
         writeStored('defaultModel', info.model)
         writeStored('defaultPermission', nextPermission)
+        writeStored('defaultReasoningEffort', info.reasoningEffort || nextReasoningEffort)
         setMessage(language === 'zh' ? `已切换模型：${info.model}` : `Model switched to ${info.model}`)
       } else {
         setMessage(language === 'zh' ? '模型设置失败' : 'Model setting failed')
@@ -2679,7 +2830,7 @@ function FloatingMini() {
   const beginFloatingDragWithKeyboard = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === 'Enter' || event.key === ' ') void startDesktopWindowDrag()
   }
-  return <main className={`desktop-tv-widget ${state} skin-${floatingSkin}`} style={{ opacity: floatingOpacity / 100 }} aria-label={`${t('statusPrefix')}: ${statusLabel}`} title={statusLabel} onContextMenu={openContextMenu}>
+  return <main className={`desktop-tv-widget ${state} skin-${floatingSkin}`} style={{ opacity: floatingOpacity / 100, '--floating-font-scale': String(floatingSize / 252 * floatingFontScale / 100) } as React.CSSProperties} aria-label={`${t('statusPrefix')}: ${statusLabel}`} title={statusLabel} onContextMenu={openContextMenu}>
     <div className="desktop-tv-shell">
        <div className="desktop-tv-top">
         <span className="desktop-tv-brand">ATLAS</span>
@@ -2691,7 +2842,12 @@ function FloatingMini() {
             <div className="desktop-tv-scanlines" aria-hidden="true" />
             <div className="desktop-tv-screen-head"><span><i className="desktop-tv-status-dot" />{phaseLabel}</span><b>{sessionLabel}</b></div>
               <div className="desktop-tv-session-meta" aria-hidden="true"><strong>{selectedItem?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{selectedItem ? `${selectedItem.folder} · ${selectedItem.model}` : ''}</small></div>
-             {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite" onClick={(event) => event.stopPropagation()}><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input ref={approvalOtherInputRef} value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : quickInputOpen ? <form className="desktop-tv-quick-input" onSubmit={submitQuickInput} onClick={(event) => event.stopPropagation()}><input ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuickInputOpen(false); setQuickInput('') } }} placeholder={t('quickInputPlaceholder')} disabled={!selectedItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} /><button type="submit" disabled={!quickInput.trim() || !selectedItem || actionBusy !== null} aria-label={t('quickInputSubmit')} title={t('quickInputSubmit')}>{actionBusy === 'input' ? <LoaderCircle className="spin" size={12} /> : <ArrowUpRight size={12} />}</button></form> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
+             {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite" onClick={(event) => event.stopPropagation()}><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input ref={approvalOtherInputRef} value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : quickInputOpen ? <form className="desktop-tv-quick-input" onSubmit={submitQuickInput} onClick={(event) => event.stopPropagation()}>
+                <div className="desktop-tv-quick-modes" role="group" aria-label={language === 'zh' ? '发送方式' : 'Send mode'}><button type="button" className={quickInputMode === 'queue' ? 'selected' : ''} onClick={() => setQuickInputMode('queue')}>{language === 'zh' ? '排队' : 'Queue'}</button><button type="button" className={quickInputMode === 'interrupt' ? 'selected' : ''} onClick={() => setQuickInputMode('interrupt')}>{language === 'zh' ? '打断' : 'Interrupt'}</button></div>
+                <textarea ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuickInputOpen(false); setQuickInput(''); setQuickAttachments([]) } if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={t('quickInputPlaceholder')} disabled={!selectedItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} rows={2} />
+                <div className="desktop-tv-quick-attachments">{quickAttachments.map((attachment, index) => <span key={`${attachment.name}:${index}`} title={attachment.path || attachment.name}><i>{attachment.kind === 'image' ? <ImageIcon size={10} /> : <FileText size={10} />}</i>{attachment.name}<button type="button" onClick={() => setQuickAttachments((current) => current.filter((_, currentIndex) => currentIndex !== index))} aria-label={language === 'zh' ? `移除 ${attachment.name}` : `Remove ${attachment.name}`}><X size={10} /></button></span>)}</div>
+                <div className="desktop-tv-quick-tools"><label className="desktop-tv-file-button" title={language === 'zh' ? '添加文档或图片' : 'Attach a document or image'}><Paperclip size={12} /><input ref={quickFileInputRef} type="file" multiple accept="image/*,.txt,.md,.pdf,.json,.csv,.doc,.docx,.xls,.xlsx" onChange={(event) => { addQuickFiles(event.target.files); event.currentTarget.value = '' }} /></label><span>{quickInputMode === 'queue' ? (language === 'zh' ? '等待当前任务完成' : 'Wait for current task') : (language === 'zh' ? '立即打断并提交' : 'Interrupt and submit')}</span><button type="submit" disabled={(!quickInput.trim() && quickAttachments.length === 0) || !selectedItem || actionBusy !== null} aria-label={t('quickInputSubmit')} title={t('quickInputSubmit')}>{actionBusy === 'input' ? <LoaderCircle className="spin" size={12} /> : <ArrowUpRight size={12} />}</button></div>
+              </form> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
           </div>
         </div>
       </div>
@@ -2711,7 +2867,10 @@ function FloatingMini() {
       <div className="desktop-tv-context-divider" />
       <span className="desktop-tv-context-label">{t('modelMenu')}</span>
       {codexModels.length === 0 && <span className="desktop-tv-context-empty">{language === 'zh' ? '正在读取 Codex 模型…' : 'Reading Codex models…'}</span>}
-      {codexModels.map((model) => <button key={model.slug} role="menuitem" className="desktop-tv-context-choice" onClick={() => { setContextMenu(null); saveRuntimeSetting(model.slug, defaultPermission) }} disabled={modelBusy}><span><Check size={12} className={defaultModel === model.slug ? 'is-selected' : 'is-hidden'} />{model.displayName}</span><small>{model.official ? t('officialModel') : t('configuredModel')}</small></button>)}
+      {codexModels.map((model) => <button key={model.slug} role="menuitem" className="desktop-tv-context-choice" onClick={() => { setContextMenu(null); saveRuntimeSetting(model.slug, defaultPermission) }} disabled={modelBusy}><span><Check size={12} className={defaultModel === model.slug ? 'is-selected' : 'is-hidden'} />{model.displayName}</span><small>{model.official ? t('officialModel') : model.source === 'provider-api' ? (language === 'zh' ? '中转站' : 'Provider') : model.source === 'cc-switch' ? 'CC Switch' : t('configuredModel')}</small></button>)}
+      <div className="desktop-tv-context-divider" />
+      <span className="desktop-tv-context-label">{language === 'zh' ? '思考程度' : 'Reasoning effort'}</span>
+      {(['low', 'medium', 'high', 'xhigh'] as const).map((effort) => <button key={effort} role="menuitem" className="desktop-tv-context-choice" onClick={() => { setContextMenu(null); saveRuntimeSetting(defaultModel || selectedItem?.model || codexModels[0]?.slug || '', defaultPermission, effort) }} disabled={modelBusy}><span><Check size={12} className={defaultReasoningEffort === effort ? 'is-selected' : 'is-hidden'} />{language === 'zh' ? (effort === 'low' ? '低' : effort === 'medium' ? '中' : effort === 'high' ? '高' : '极高') : (effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1))}</span></button>)}
       <div className="desktop-tv-context-divider" />
       <span className="desktop-tv-context-label">{t('permissionMenu')}</span>
       {['Workspace write', 'Read only', 'Full access'].map((permission) => <button key={permission} role="menuitem" className="desktop-tv-context-choice" onClick={() => { setContextMenu(null); saveRuntimeSetting(defaultModel || selectedItem?.model || codexModels[0]?.slug || '', permission) }} disabled={modelBusy}><span><Check size={12} className={defaultPermission === permission ? 'is-selected' : 'is-hidden'} />{language === 'zh' ? (permission === 'Workspace write' ? '工作区写入' : permission === 'Read only' ? '只读' : '完全访问') : permission}</span></button>)}

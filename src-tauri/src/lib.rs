@@ -25,6 +25,7 @@ use tauri_plugin_notification::NotificationExt;
 use tiny_http::{Header, Method, Response, Server};
 use url::Url;
 use walkdir::WalkDir;
+use tungstenite::{connect, Message, WebSocket};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
@@ -47,6 +48,7 @@ pub struct AppState {
     failure_counts: Arc<Mutex<HashMap<String, u8>>>,
     auto_continue: Arc<Mutex<bool>>,
     runtime_cache: Arc<Mutex<RuntimeSessionCache>>,
+    app_server: Arc<Mutex<Option<AppServerHandle>>>,
 }
 
 impl Default for AppState {
@@ -55,8 +57,24 @@ impl Default for AppState {
             failure_counts: Arc::new(Mutex::new(HashMap::new())),
             auto_continue: Arc::new(Mutex::new(true)),
             runtime_cache: Arc::new(Mutex::new(RuntimeSessionCache::default())),
+            app_server: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+#[derive(Clone)]
+struct AppServerHandle {
+    endpoint: String,
+    tx: std::sync::mpsc::Sender<AppServerCommand>,
+    active_turns: Arc<Mutex<HashMap<String, String>>>,
+}
+
+enum AppServerCommand {
+    Request {
+        method: String,
+        params: Value,
+        reply: std::sync::mpsc::Sender<Result<Value, String>>,
+    },
 }
 
 #[derive(Default)]
@@ -563,6 +581,20 @@ pub struct CodexInfo {
     pub model: Option<String>,
     pub model_provider: Option<String>,
     pub provider_name: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub available: bool,
+    pub asset_name: Option<String>,
+    pub download_url: Option<String>,
+    pub downloaded_path: Option<String>,
+    pub downloaded: bool,
+    pub release_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -621,6 +653,28 @@ pub struct NewCodexSessionRequest {
     pub model: String,
     #[serde(default)]
     pub permission: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct FloatingAttachment {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct FloatingMessageRequest {
+    session_id: String,
+    #[serde(default)]
+    input: String,
+    mode: String,
+    #[serde(default)]
+    attachments: Vec<FloatingAttachment>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1063,14 +1117,12 @@ fn server_tunnel_running() -> bool {
 }
 
 fn cleanup_stale_server_listener(settings: &ServerTunnelSettings, key_path: &Path) {
-    if server_reverse_bind_host(settings) != "0.0.0.0" {
-        return;
-    }
     // A previous Atlas process can leave an orphaned reverse-forwarding sshd
-    // child on the configured port. Remove only an sshd process that owns
-    // this exact listening port; unrelated services are left untouched.
+    // child on the configured port. This also applies to private (127.0.0.1)
+    // reverse binds used with a proxy URL. Remove only an sshd process that
+    // owns this exact listening port; unrelated services are left untouched.
     let command = format!(
-        "if command -v ss >/dev/null 2>&1; then for pid in $(ss -ltnp 2>/dev/null | sed -n 's/.*:{port}[^0-9].*pid=\\([0-9][0-9]*\\).*/\\1/p'); do case \"$(tr -d '\\0' </proc/$pid/cmdline 2>/dev/null)\" in *sshd*) kill \"$pid\" 2>/dev/null || true;; esac; done; fi",
+        "set +e\nport={port}\nif command -v ss >/dev/null 2>&1; then\n  for pid in $(ss -ltnp 2>/dev/null | sed -n \"s/.*:${{port}}[^0-9].*pid=\\\\([0-9][0-9]*\\\\).*/\\\\1/p\" | sort -u); do\n    cmd=$(tr -d '\\0' </proc/$pid/cmdline 2>/dev/null)\n    case \"$cmd\" in *sshd*) kill \"$pid\" 2>/dev/null || true;; esac\n  done\nfi\nif command -v lsof >/dev/null 2>&1; then\n  for pid in $(lsof -nP -t -iTCP:$port -sTCP:LISTEN 2>/dev/null | sort -u); do\n    cmd=$(tr -d '\\0' </proc/$pid/cmdline 2>/dev/null)\n    case \"$cmd\" in *sshd*) kill \"$pid\" 2>/dev/null || true;; esac\n  done\nfi\nif command -v fuser >/dev/null 2>&1; then\n  for pid in $(fuser -n tcp $port 2>/dev/null); do\n    cmd=$(tr -d '\\0' </proc/$pid/cmdline 2>/dev/null)\n    case \"$cmd\" in *sshd*) kill \"$pid\" 2>/dev/null || true;; esac\n  done\nfi",
         port = settings.remote_port
     );
     let _ = ssh_exec_with_password(settings, "", Some(key_path), &command, None);
@@ -2511,7 +2563,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
                 return;
             }
         };
-        let response = match create_codex_session_sync(request_body) {
+        let response = match create_codex_session_sync(request_body, None) {
             Ok(true) => bridge_json_response(&serde_json::json!({"ok": true}), 201),
             Ok(false) => bridge_json_response(&serde_json::json!({"ok": false}), 409),
             Err(error) => {
@@ -2604,7 +2656,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         } else if session.running {
             send_text_to_terminal(&session, &chunk.text, true)
         } else {
-            match launch_codex_resume_terminal(&session) {
+            match launch_codex_resume_terminal(&session, None) {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -2674,9 +2726,9 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
     }
     let result = if url.ends_with("/activate") {
         if session.running {
-            focus_session_terminal(&session).or_else(|_| launch_codex_resume_terminal(&session))
+            focus_session_terminal(&session).or_else(|_| launch_codex_resume_terminal(&session, None))
         } else {
-            launch_codex_resume_terminal(&session)
+            launch_codex_resume_terminal(&session, None)
         }
     } else {
         let input = request_body
@@ -2695,7 +2747,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             // terminal is closed; the next resume consumes it.
             Ok(())
         } else if url.ends_with("/message") {
-            match launch_codex_resume_terminal(&session) {
+            match launch_codex_resume_terminal(&session, None) {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -5266,6 +5318,84 @@ fn add_atlas_toml_hooks(config: &str, command: &str) -> Result<String, String> {
     Ok(output)
 }
 
+fn remove_atlas_hooks(root: &mut Value) -> bool {
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for entries in hooks.values_mut() {
+        let Some(entries) = entries.as_array_mut() else { continue };
+        let mut kept_entries = Vec::with_capacity(entries.len());
+        for mut entry in entries.drain(..) {
+            if !value_contains_text(&entry, "atlas-hook") {
+                kept_entries.push(entry);
+                continue;
+            }
+            if let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+                handlers.retain(|handler| !value_contains_text(handler, "atlas-hook"));
+                if !handlers.is_empty() {
+                    kept_entries.push(entry);
+                }
+            }
+            changed = true;
+        }
+        *entries = kept_entries;
+    }
+    changed
+}
+
+fn remove_atlas_toml_hooks(config: &str) -> String {
+    let mut output = String::new();
+    let mut block = Vec::<String>::new();
+    let flush = |output: &mut String, block: &mut Vec<String>| {
+        if !block.iter().any(|line| line.to_ascii_lowercase().contains("atlas-hook")) {
+            output.push_str(&block.concat());
+        }
+        block.clear();
+    };
+    for line in config.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("[[hooks.") && !block.is_empty() {
+            flush(&mut output, &mut block);
+        }
+        block.push(line.to_string());
+    }
+    if !block.is_empty() {
+        flush(&mut output, &mut block);
+    }
+    output
+}
+
+pub fn remove_codex_hook_now() -> Result<CodexHookStatus, String> {
+    let hooks_path = codex_hooks_path();
+    if hooks_path.exists() {
+        let text = fs::read_to_string(&hooks_path)
+            .map_err(|error| format!("read {}: {error}", hooks_path.display()))?;
+        if let Ok(mut root) = serde_json::from_str::<Value>(&text) {
+            if remove_atlas_hooks(&mut root) {
+                let _ = backup_file(&hooks_path)?;
+                let serialized = serde_json::to_string_pretty(&root)
+                    .map_err(|error| format!("serialize hooks.json: {error}"))?;
+                write_text_atomically(&hooks_path, &format!("{serialized}\n"))?;
+            }
+        }
+    }
+    let config_path = codex_config_path();
+    if config_path.exists() {
+        let config = fs::read_to_string(&config_path)
+            .map_err(|error| format!("read {}: {error}", config_path.display()))?;
+        let updated = remove_atlas_toml_hooks(&config);
+        if updated != config {
+            let _ = backup_file(&config_path)?;
+            write_text_atomically(&config_path, &updated)?;
+        }
+    }
+    for path in [codex_home().join("atlas-hook.ps1"), codex_home().join("atlas-hook.cmd"), codex_home().join("atlas-hook.sh")] {
+        let _ = fs::remove_file(path);
+    }
+    Ok(codex_hook_status())
+}
+
 fn codex_hook_status() -> CodexHookStatus {
     let hooks_path = codex_hooks_path();
     let config_path = codex_config_path();
@@ -5391,7 +5521,9 @@ pub fn install_codex_hook_now() -> Result<CodexHookStatus, String> {
 
 #[tauri::command(rename_all = "camelCase")]
 fn install_codex_hook() -> Result<CodexHookStatus, String> {
-    install_codex_hook_now()
+    // Atlas status is now sourced from app-server notifications. Removing the
+    // legacy per-tool hook prevents the 5-second PostToolUse timeout.
+    remove_codex_hook_now()
 }
 
 fn hook_observation_for_session<'a>(
@@ -6077,14 +6209,262 @@ fn codex_executable() -> String {
         .unwrap_or_else(|| "codex".to_string())
 }
 
+fn app_server_endpoint(handle: &AppState) -> Option<String> {
+    handle
+        .app_server
+        .lock()
+        .ok()
+        .and_then(|server| server.as_ref().map(|server| server.endpoint.clone()))
+}
+
+fn emit_app_server_notification(app: &AppHandle, value: &Value, active_turns: &Arc<Mutex<HashMap<String, String>>>) {
+    let method = value.get("method").and_then(Value::as_str).unwrap_or_default();
+    let params = value.get("params").cloned().unwrap_or(Value::Null);
+    if method == "turn/started" {
+        if let (Some(thread_id), Some(turn_id)) = (
+            params.get("threadId").and_then(Value::as_str),
+            params.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str),
+        ) {
+            if let Ok(mut turns) = active_turns.lock() {
+                turns.insert(thread_id.to_string(), turn_id.to_string());
+            }
+        }
+    } else if method == "turn/completed" {
+        if let Some(thread_id) = params.get("threadId").and_then(Value::as_str) {
+            if let Ok(mut turns) = active_turns.lock() {
+                turns.remove(thread_id);
+            }
+        }
+    }
+    let _ = app.emit("codex_app_server", serde_json::json!({"method": method, "params": params}));
+}
+
+fn app_server_read_until<S: Read + Write>(
+    socket: &mut WebSocket<S>,
+    app: &AppHandle,
+    active_turns: &Arc<Mutex<HashMap<String, String>>>,
+    request_id: u64,
+    deadline: Instant,
+) -> Result<Value, String> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err("Codex app-server request timed out".to_string());
+        }
+        match socket.read() {
+            Ok(Message::Text(text)) => {
+                let value: Value = serde_json::from_str(text.as_ref())
+                    .map_err(|error| format!("invalid app-server JSON: {error}"))?;
+                if value.get("method").is_some() {
+                    emit_app_server_notification(app, &value, active_turns);
+                    continue;
+                }
+                if value.get("id").and_then(Value::as_u64) != Some(request_id) {
+                    continue;
+                }
+                if let Some(error) = value.get("error") {
+                    return Err(error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| error.to_string()));
+                }
+                return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+            }
+            Ok(Message::Binary(bytes)) => {
+                let value: Value = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("invalid app-server binary JSON: {error}"))?;
+                if value.get("method").is_some() {
+                    emit_app_server_notification(app, &value, active_turns);
+                } else if value.get("id").and_then(Value::as_u64) == Some(request_id) {
+                    if let Some(error) = value.get("error") {
+                        return Err(error.to_string());
+                    }
+                    return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+                }
+            }
+            Ok(Message::Ping(payload)) => {
+                let _ = socket.send(Message::Pong(payload));
+            }
+            Ok(Message::Close(_)) => return Err("Codex app-server closed the connection".to_string()),
+            Ok(_) => {}
+            Err(error) if matches!(error, tungstenite::Error::Io(ref io) if io.kind() == std::io::ErrorKind::WouldBlock || io.kind() == std::io::ErrorKind::TimedOut) => {}
+            Err(error) => return Err(format!("Codex app-server connection failed: {error}")),
+        }
+    }
+}
+
+fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+    let port = listener.local_addr().ok()?.port();
+    drop(listener);
+    let endpoint = format!("ws://127.0.0.1:{port}");
+    let server_args = vec!["app-server".to_string(), "--listen".to_string(), endpoint.clone()];
+    let mut command = command_for(&codex_executable(), &server_args).ok()?;
+    command.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let child = command.spawn().ok()?;
+    let (tx, rx) = std::sync::mpsc::channel::<AppServerCommand>();
+    let active_turns = Arc::new(Mutex::new(HashMap::new()));
+    let turns_for_thread = active_turns.clone();
+    let endpoint_for_thread = endpoint.clone();
+    let app_for_thread = app.clone();
+    thread::spawn(move || {
+        let mut child = child;
+        let mut connected = None;
+        for _ in 0..80 {
+            match connect(endpoint_for_thread.as_str()) {
+                Ok((socket, _)) => {
+                    connected = Some(socket);
+                    break;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        let Some(mut socket) = connected else {
+            let _ = child.kill();
+            return;
+        };
+        if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        }
+        let mut request_id = 1u64;
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "codex-atlas", "title": "Codex Atlas", "version": env!("CARGO_PKG_VERSION")}, "capabilities": {"experimentalApi": true}}
+        });
+        if socket.send(Message::Text(initialize.to_string().into())).is_err()
+            || app_server_read_until(&mut socket, &app_for_thread, &turns_for_thread, request_id, Instant::now() + Duration::from_secs(10)).is_err()
+        {
+            let _ = child.kill();
+            return;
+        }
+        request_id += 1;
+        let _ = app_for_thread.emit("codex_app_server_ready", endpoint_for_thread.clone());
+        loop {
+            match rx.recv_timeout(Duration::from_millis(80)) {
+                Ok(AppServerCommand::Request { method, params, reply }) => {
+                    let id = request_id;
+                    request_id += 1;
+                    let message = serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+                    let result = if socket.send(Message::Text(message.to_string().into())).is_ok() {
+                        app_server_read_until(&mut socket, &app_for_thread, &turns_for_thread, id, Instant::now() + Duration::from_secs(30))
+                    } else {
+                        Err("Codex app-server request could not be sent".to_string())
+                    };
+                    let _ = reply.send(result);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    match socket.read() {
+                        Ok(Message::Text(text)) => {
+                            if let Ok(value) = serde_json::from_str::<Value>(text.as_ref()) {
+                                if value.get("method").is_some() {
+                                    emit_app_server_notification(&app_for_thread, &value, &turns_for_thread);
+                                }
+                            }
+                        }
+                        Ok(Message::Ping(payload)) => { let _ = socket.send(Message::Pong(payload)); }
+                        Err(tungstenite::Error::Io(ref io)) if io.kind() == std::io::ErrorKind::WouldBlock || io.kind() == std::io::ErrorKind::TimedOut => {}
+                        Err(_) => break,
+                        _ => {}
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+        }
+        // The app-server is intentionally left alive when Atlas exits. Codex
+        // TUI clients launched with `--remote` depend on it and must continue
+        // running independently of the desktop controller.
+    });
+    Some(AppServerHandle { endpoint, tx, active_turns })
+}
+
+fn app_server_request(state: &AppState, method: &str, params: Value) -> Result<Value, String> {
+    let server = state
+        .app_server
+        .lock()
+        .map_err(|_| "app-server state unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "Codex app-server is not available".to_string())?;
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    server.tx.send(AppServerCommand::Request {
+        method: method.to_string(),
+        params,
+        reply: reply_tx,
+    }).map_err(|_| "Codex app-server is disconnected".to_string())?;
+    reply_rx.recv_timeout(Duration::from_secs(35)).map_err(|_| "Codex app-server request timed out".to_string())?
+}
+
+fn app_server_user_input(input: &str, attachments: &[FloatingAttachment]) -> Vec<Value> {
+    let mut items = Vec::new();
+    if !input.trim().is_empty() {
+        items.push(serde_json::json!({"type":"text","text":input}));
+    }
+    for attachment in attachments {
+        if attachment.kind.eq_ignore_ascii_case("image") && !attachment.path.trim().is_empty() {
+            items.push(serde_json::json!({"type":"localImage","path":attachment.path.trim()}));
+        } else if !attachment.path.trim().is_empty() {
+            items.push(serde_json::json!({"type":"text","text":format!("[附件路径] {}", attachment.path.trim())}));
+        }
+    }
+    items
+}
+
+fn app_server_send_message(state: &AppState, session: &SessionRecord, input: &str, mode: &str, attachments: &[FloatingAttachment]) -> Result<bool, String> {
+    let items = app_server_user_input(input, attachments);
+    if items.is_empty() { return Ok(false); }
+    if mode.eq_ignore_ascii_case("interrupt") {
+        if let Some(turn_id) = state.app_server.lock().ok().and_then(|server| server.as_ref().and_then(|server| server.active_turns.lock().ok().and_then(|turns| turns.get(&session.id).cloned()))) {
+            let _ = app_server_request(state, "turn/interrupt", serde_json::json!({"threadId":session.id,"turnId":turn_id}));
+        }
+        let result = app_server_request(state, "turn/start", serde_json::json!({"threadId":session.id,"input":items}))?;
+        return Ok(!result.is_null());
+    }
+    let result = app_server_request(state, "thread/queue/add", serde_json::json!({"threadId":session.id,"clientUserMessageId":format!("atlas-{}", now_ms()),"input":items}))?;
+    if !session.running {
+        let _ = app_server_request(state, "thread/queue/start", serde_json::json!({"threadId":session.id,"queuedSubmissionId":result.get("queuedSubmissionId").cloned().unwrap_or(Value::Null)}));
+    }
+    Ok(!result.is_null())
+}
+
 fn queue_codex_message(session: &SessionRecord, input: &str) -> bool {
-    let args = vec![
+    queue_codex_message_with_attachments(session, input, &[])
+}
+
+fn queue_codex_message_with_attachments(
+    session: &SessionRecord,
+    input: &str,
+    attachments: &[FloatingAttachment],
+) -> bool {
+    let mut args = vec![
         "queue".to_string(),
         "--thread".to_string(),
         session.id.clone(),
         "--message".to_string(),
         input.to_string(),
     ];
+    // Codex queue accepts image files through its native --image option. Text
+    // documents and arbitrary paths are represented in the prompt below so
+    // the model can inspect them from the workspace without uploading data.
+    for attachment in attachments {
+        if attachment.kind.eq_ignore_ascii_case("image")
+            && !attachment.path.trim().is_empty()
+            && Path::new(&attachment.path).is_file()
+        {
+            args.push("--image".to_string());
+            args.push(attachment.path.trim().to_string());
+        }
+    }
     let mut command = match command_for(&codex_executable(), &args) {
         Ok(command) => command,
         Err(_) => return false,
@@ -6107,24 +6487,23 @@ fn is_continue_prompt(input: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn powershell_resume_command(session: &SessionRecord) -> String {
+fn powershell_resume_command(session: &SessionRecord, remote: Option<&str>) -> String {
     let codex = powershell_single_quote(&codex_executable());
     let session_id = powershell_single_quote(&session.id);
     let cwd = powershell_single_quote(&session.cwd);
-    format!(
-        "$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}' resume '{session_id}' -C '{cwd}'"
-    )
+    let remote_arg = remote.map(|value| format!(" --remote '{}'", powershell_single_quote(value))).unwrap_or_default();
+    format!("$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} resume '{session_id}' -C '{cwd}'")
 }
 
 #[cfg(target_os = "windows")]
-fn launch_codex_resume_terminal(session: &SessionRecord) -> Result<(), String> {
+fn launch_codex_resume_terminal(session: &SessionRecord, remote: Option<&str>) -> Result<(), String> {
     if session.cwd.trim().is_empty() || !Path::new(&session.cwd).is_dir() {
         return Err(format!(
             "session working directory is unavailable: {}",
             session.cwd
         ));
     }
-    let script = powershell_resume_command(session);
+    let script = powershell_resume_command(session, remote);
     let mut errors = Vec::new();
     for shell in ["pwsh.exe", "powershell.exe"] {
         let mut command = Command::new(shell);
@@ -6165,17 +6544,19 @@ fn launch_codex_resume_terminal(session: &SessionRecord) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn launch_codex_resume_terminal(session: &SessionRecord) -> Result<(), String> {
+fn launch_codex_resume_terminal(session: &SessionRecord, remote: Option<&str>) -> Result<(), String> {
     if session.cwd.trim().is_empty() || !Path::new(&session.cwd).is_dir() {
         return Err(format!(
             "session working directory is unavailable: {}",
             session.cwd
         ));
     }
+    let remote_arg = remote.map(|value| format!(" --remote '{}'", shell_single_quote(value))).unwrap_or_default();
     let command = format!(
-        "cd -- '{}' && export TERM=xterm-256color && '{}' resume '{}' -C '{}'",
+        "cd -- '{}' && export TERM=xterm-256color && '{}'{} resume '{}' -C '{}'",
         shell_single_quote(&session.cwd),
         shell_single_quote(&codex_executable()),
+        remote_arg,
         shell_single_quote(&session.id),
         shell_single_quote(&session.cwd)
     );
@@ -6191,17 +6572,19 @@ fn launch_codex_resume_terminal(session: &SessionRecord) -> Result<(), String> {
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn launch_codex_resume_terminal(session: &SessionRecord) -> Result<(), String> {
+fn launch_codex_resume_terminal(session: &SessionRecord, remote: Option<&str>) -> Result<(), String> {
     if session.cwd.trim().is_empty() || !Path::new(&session.cwd).is_dir() {
         return Err(format!(
             "session working directory is unavailable: {}",
             session.cwd
         ));
     }
+    let remote_arg = remote.map(|value| format!(" --remote '{}'", shell_single_quote(value))).unwrap_or_default();
     let command = format!(
-        "cd -- '{}' && exec '{}' resume '{}' -C '{}'",
+        "cd -- '{}' && exec '{}'{} resume '{}' -C '{}'",
         shell_single_quote(&session.cwd),
         shell_single_quote(&codex_executable()),
+        remote_arg,
         shell_single_quote(&session.id),
         shell_single_quote(&session.cwd)
     );
@@ -6231,7 +6614,7 @@ fn codex_permission_overrides(permission: &str) -> (&'static str, &'static str) 
 }
 
 #[cfg(target_os = "windows")]
-fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), String> {
+fn launch_codex_new_terminal(request: &NewCodexSessionRequest, remote: Option<&str>) -> Result<(), String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
             "session working directory is unavailable: {}",
@@ -6241,8 +6624,9 @@ fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), Str
     let codex = powershell_single_quote(&codex_executable());
     let cwd = powershell_single_quote(&request.cwd);
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
+    let remote_arg = remote.map(|value| format!(" --remote '{}'", powershell_single_quote(value))).unwrap_or_default();
     let mut script = format!(
-        "$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}' -c 'approval_policy=\"{approval}\"' -c 'sandbox_mode=\"{sandbox}\"'",
+        "$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} -c 'approval_policy=\"{approval}\"' -c 'sandbox_mode=\"{sandbox}\"'",
     );
     if !request.model.trim().is_empty() {
         script.push_str(&format!(
@@ -6290,7 +6674,7 @@ fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), Str
 }
 
 #[cfg(target_os = "macos")]
-fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), String> {
+fn launch_codex_new_terminal(request: &NewCodexSessionRequest, remote: Option<&str>) -> Result<(), String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
             "session working directory is unavailable: {}",
@@ -6298,10 +6682,12 @@ fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), Str
         ));
     }
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
+    let remote_arg = remote.map(|value| format!(" --remote '{}'", shell_single_quote(value))).unwrap_or_default();
     let mut command = format!(
-        "cd -- '{}' && export TERM=xterm-256color && '{}' -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"'",
+        "cd -- '{}' && export TERM=xterm-256color && '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"'",
         shell_single_quote(&request.cwd),
         shell_single_quote(&codex_executable()),
+        remote_arg,
         approval,
         sandbox
     );
@@ -6326,7 +6712,7 @@ fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), Str
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), String> {
+fn launch_codex_new_terminal(request: &NewCodexSessionRequest, remote: Option<&str>) -> Result<(), String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
             "session working directory is unavailable: {}",
@@ -6334,10 +6720,12 @@ fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), Str
         ));
     }
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
+    let remote_arg = remote.map(|value| format!(" --remote '{}'", shell_single_quote(value))).unwrap_or_default();
     let mut command = format!(
-        "cd -- '{}' && exec '{}' -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"'",
+        "cd -- '{}' && exec '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"'",
         shell_single_quote(&request.cwd),
         shell_single_quote(&codex_executable()),
+        remote_arg,
         approval,
         sandbox
     );
@@ -6367,7 +6755,7 @@ fn launch_codex_new_terminal(request: &NewCodexSessionRequest) -> Result<(), Str
     Err("no supported terminal application was found".to_string())
 }
 
-fn create_codex_session_sync(request: NewCodexSessionRequest) -> Result<bool, String> {
+fn create_codex_session_sync(request: NewCodexSessionRequest, remote: Option<&str>) -> Result<bool, String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
             "session working directory is unavailable: {}",
@@ -6377,12 +6765,13 @@ fn create_codex_session_sync(request: NewCodexSessionRequest) -> Result<bool, St
     if request.prompt.chars().count() > 32_000 {
         return Err("new session prompt is too long (maximum 32000 characters)".to_string());
     }
-    launch_codex_new_terminal(&request).map(|_| true)
+    launch_codex_new_terminal(&request, remote).map(|_| true)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn create_codex_session(request: NewCodexSessionRequest) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || create_codex_session_sync(request))
+async fn create_codex_session(state: State<'_, AppState>, request: NewCodexSessionRequest) -> Result<bool, String> {
+    let remote = app_server_endpoint(&state);
+    tauri::async_runtime::spawn_blocking(move || create_codex_session_sync(request, remote.as_deref()))
         .await
         .map_err(|error| format!("create Codex session task failed: {error}"))?
 }
@@ -6391,12 +6780,23 @@ async fn create_codex_session(request: NewCodexSessionRequest) -> Result<bool, S
 fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Result<bool, String> {
     let session =
         find_session(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
+    let remote = app_server_endpoint(&state);
+    if remote.is_some()
+        && app_server_request(
+            &state,
+            "thread/resume",
+            serde_json::json!({"threadId": session.id, "cwd": session.cwd, "excludeTurns": false}),
+        )
+        .is_ok()
+    {
+        return Ok(true);
+    }
     if session.running {
         // Prefer the already-running terminal. If it is hosted by a terminal
         // tab that Windows no longer exposes, start an exact resume in the
         // recorded workspace so activation remains a useful user action.
         if focus_session_terminal(&session).is_err() {
-            launch_codex_resume_terminal(&session)?;
+            launch_codex_resume_terminal(&session, remote.as_deref())?;
         }
         return Ok(true);
     }
@@ -6405,12 +6805,13 @@ fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Resul
         .lock()
         .map_err(|_| "process state unavailable".to_string())?
         .remove(&session_id);
-    launch_codex_resume_terminal(&session)?;
+    launch_codex_resume_terminal(&session, remote.as_deref())?;
     Ok(true)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 fn send_session_input(
+    state: State<'_, AppState>,
     session_id: String,
     input: String,
     focus_terminal: Option<bool>,
@@ -6421,6 +6822,9 @@ fn send_session_input(
     let Some(session) = find_session(&session_id) else {
         return Ok(false);
     };
+    if app_server_send_message(&state, &session, &input, "queue", &[]).unwrap_or(false) {
+        return Ok(true);
+    }
     // `codex queue` is deliberately allowed for an exited thread too. This
     // persists the prompt without opening or focusing a terminal; the user
     // can activate the queued thread separately when needed.
@@ -6432,6 +6836,60 @@ fn send_session_input(
             .map(|_| true);
     }
     Ok(false)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn send_floating_message(state: State<'_, AppState>, request: FloatingMessageRequest) -> Result<bool, String> {
+    let Some(session) = find_session(&request.session_id) else {
+        return Ok(false);
+    };
+    let mut input = request.input.trim().to_string();
+    if input.chars().count() > 32_000 {
+        return Err("floating message is too long (maximum 32000 characters)".to_string());
+    }
+    let attachment_lines = request
+        .attachments
+        .iter()
+        .filter_map(|attachment| {
+            let path = attachment.path.trim();
+            let name = attachment.name.trim();
+            if path.is_empty() && name.is_empty() {
+                return None;
+            }
+            let label = if name.is_empty() { path } else { name };
+            let location = if path.is_empty() { "" } else { path };
+            Some(if location.is_empty() {
+                format!("[附件] {label}")
+            } else {
+                format!("[附件] {label}\n路径: {location}")
+            })
+        })
+        .collect::<Vec<_>>();
+    if !attachment_lines.is_empty() {
+        if !input.is_empty() {
+            input.push_str("\n\n");
+        }
+        input.push_str(&attachment_lines.join("\n\n"));
+    }
+    if input.trim().is_empty() && request.attachments.is_empty() {
+        return Ok(false);
+    }
+    if app_server_send_message(&state, &session, &input, &request.mode, &request.attachments).unwrap_or(false) {
+        return Ok(true);
+    }
+    match request.mode.trim().to_ascii_lowercase().as_str() {
+        "interrupt" => {
+            if !session.running && terminal_window_for_session(&session).is_none() {
+                return Err("the session is not running and no matching terminal was found".to_string());
+            }
+            send_text_to_terminal(&session, &input, true).map(|_| true)
+        }
+        _ => Ok(queue_codex_message_with_attachments(
+            &session,
+            &input,
+            &request.attachments,
+        )),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -7733,6 +8191,41 @@ fn provider_credentials(
     )
 }
 
+fn current_cc_switch_provider_data() -> Option<(String, String, Option<String>, Value, Value)> {
+    let db_path = home_dir().join(".cc-switch").join("cc-switch.db");
+    if !db_path.exists() {
+        return None;
+    }
+    let selected_provider = fs::read_to_string(home_dir().join(".cc-switch").join("settings.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|settings| settings.get("currentProviderCodex").and_then(Value::as_str).map(str::to_string))
+        .filter(|value| !value.trim().is_empty());
+    let connection = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    ).ok()?;
+    let mut statement = connection.prepare(
+        "SELECT id, name, settings_config, meta, is_current FROM providers WHERE app_type = 'codex' ORDER BY sort_index ASC, name ASC",
+    ).ok()?;
+    let rows = statement.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let settings: String = row.get(2)?;
+        let meta: String = row.get(3)?;
+        let is_current: i64 = row.get(4)?;
+        Ok((id, name, settings, meta, is_current != 0))
+    }).ok()?;
+    let provider_rows = rows.collect::<Result<Vec<_>, _>>().ok()?;
+    let selected = selected_provider.as_deref().and_then(|selector| {
+        provider_rows.iter().find(|row| row.0 == selector || row.1 == selector).cloned()
+    }).or_else(|| provider_rows.iter().find(|row| row.4).cloned())?;
+    let settings = serde_json::from_str::<Value>(&selected.2).unwrap_or(Value::Null);
+    let meta = serde_json::from_str::<Value>(&selected.3).unwrap_or(Value::Null);
+    let (base_url, api_key, model, _) = provider_credentials(&settings, &meta);
+    Some((base_url, api_key, model, settings, meta))
+}
+
 #[tauri::command]
 async fn get_cc_switch_provider_balances() -> Result<Vec<CcSwitchProviderBalance>, String> {
     let db_path = home_dir().join(".cc-switch").join("cc-switch.db");
@@ -7874,11 +8367,17 @@ fn get_codex_info() -> CodexInfo {
         }
     }
     let config = fs::read_to_string(codex_config_path()).unwrap_or_default();
-    let model = parse_toml_string(&config, "model");
+    let mut model = parse_toml_string(&config, "model");
+    if let Some((_, _, provider_model, _, _)) = current_cc_switch_provider_data() {
+        if provider_model.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+            model = provider_model;
+        }
+    }
     let model_provider = parse_toml_string(&config, "model_provider");
     let provider_name = model_provider.as_deref().and_then(|provider| {
         parse_toml_section_string(&config, &format!("model_providers.{provider}"), "name")
     });
+    let reasoning_effort = parse_toml_string(&config, "model_reasoning_effort");
     CodexInfo {
         installed: !version.is_empty() || executable != "codex",
         version: version.trim().trim_start_matches("codex-cli ").to_string(),
@@ -7886,7 +8385,127 @@ fn get_codex_info() -> CodexInfo {
         model,
         model_provider,
         provider_name,
+        reasoning_effort,
     }
+}
+
+fn desktop_update_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("codex-atlas")
+        .join("updates")
+}
+
+fn version_key(value: &str) -> Vec<u64> {
+    value
+        .trim()
+        .trim_start_matches(|character: char| !character.is_ascii_digit())
+        .split('.')
+        .map(|part| part.chars().take_while(|character| character.is_ascii_digit()).collect::<String>().parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+fn desktop_asset_is_supported(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    #[cfg(target_os = "windows")]
+    { lower.ends_with(".exe") && (lower.contains("setup") || lower.contains("installer")) }
+    #[cfg(target_os = "macos")]
+    { lower.ends_with(".dmg") || lower.ends_with(".app.tar.gz") }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    { lower.ends_with(".appimage") || lower.ends_with(".deb") }
+}
+
+#[tauri::command]
+async fn check_desktop_update() -> Result<DesktopUpdateInfo, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let release_url = "https://github.com/hlok666/codex-atlas/releases/latest".to_string();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|error| format!("build update client: {error}"))?;
+    let value = client
+        .get("https://api.github.com/repos/hlok666/codex-atlas/releases/latest")
+        .header("User-Agent", "Codex-Atlas-Desktop")
+        .send()
+        .await
+        .map_err(|error| format!("check GitHub Release: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("GitHub Release returned an error: {error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("parse GitHub Release: {error}"))?;
+    let latest_version = value
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim_start_matches('v')
+        .to_string();
+    if latest_version.is_empty() {
+        return Err("GitHub Release did not include a version tag".to_string());
+    }
+    let asset = value
+        .get("assets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|asset| {
+            let name = asset.get("name").and_then(Value::as_str)?;
+            let url = asset.get("browser_download_url").and_then(Value::as_str)?;
+            desktop_asset_is_supported(name).then(|| (name.to_string(), url.to_string()))
+        })
+        .next();
+    let (asset_name, download_url) = asset.map_or((None, None), |(name, url)| (Some(name), Some(url)));
+    let downloaded_path = asset_name.as_deref().map(|name| desktop_update_cache_dir().join(name)).filter(|path| path.is_file()).map(|path| path.to_string_lossy().to_string());
+    Ok(DesktopUpdateInfo {
+        current_version: current_version.clone(),
+        latest_version: latest_version.clone(),
+        available: version_key(&latest_version) > version_key(&current_version) && download_url.is_some(),
+        asset_name,
+        download_url,
+        downloaded: downloaded_path.is_some(),
+        downloaded_path,
+        release_url,
+    })
+}
+
+#[tauri::command]
+async fn download_desktop_update(app: AppHandle, update: DesktopUpdateInfo) -> Result<DesktopUpdateInfo, String> {
+    let url = update.download_url.clone().filter(|url| url.starts_with("https://github.com/"))
+        .ok_or_else(|| "no trusted GitHub desktop installer is available".to_string())?;
+    let name = update.asset_name.clone().filter(|name| desktop_asset_is_supported(name) && !name.contains(['/', '\\']))
+        .ok_or_else(|| "unsupported desktop installer name".to_string())?;
+    let directory = desktop_update_cache_dir();
+    fs::create_dir_all(&directory).map_err(|error| format!("create update cache: {error}"))?;
+    let path = directory.join(&name);
+    if path.is_file() && fs::metadata(&path).map(|metadata| metadata.len() > 0).unwrap_or(false) {
+        let _ = app.emit("desktop_update_progress", serde_json::json!({"downloadedBytes": fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0), "totalBytes": fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0), "complete": true}));
+        return Ok(DesktopUpdateInfo { downloaded_path: Some(path.to_string_lossy().to_string()), downloaded: true, ..update });
+    }
+    let client = Client::builder().timeout(Duration::from_secs(120)).build().map_err(|error| format!("build update client: {error}"))?;
+    let bytes = client.get(&url).header("User-Agent", "Codex-Atlas-Desktop").send().await.map_err(|error| format!("download desktop update: {error}"))?.error_for_status().map_err(|error| format!("download returned an error: {error}"))?.bytes().await.map_err(|error| format!("read desktop update: {error}"))?;
+    let temporary = path.with_extension(format!("download-{}", now_ms()));
+    fs::write(&temporary, &bytes).map_err(|error| format!("write desktop update: {error}"))?;
+    if path.exists() { let _ = fs::remove_file(&path); }
+    fs::rename(&temporary, &path).map_err(|error| format!("finalize desktop update: {error}"))?;
+    let _ = app.emit("desktop_update_progress", serde_json::json!({"downloadedBytes": bytes.len(), "totalBytes": bytes.len(), "complete": true}));
+    Ok(DesktopUpdateInfo { downloaded_path: Some(path.to_string_lossy().to_string()), downloaded: true, ..update })
+}
+
+#[tauri::command]
+fn install_desktop_update(app: AppHandle, path: String) -> Result<bool, String> {
+    let path = PathBuf::from(path);
+    if !path.starts_with(desktop_update_cache_dir()) {
+        return Err("desktop installer must come from the Atlas update cache".to_string());
+    }
+    if !path.is_file() || !desktop_asset_is_supported(path.file_name().and_then(|name| name.to_str()).unwrap_or_default()) {
+        return Err("desktop installer is missing or unsupported".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    Command::new("open").arg(&path).spawn().map_err(|error| format!("open desktop installer: {error}"))?;
+    #[cfg(not(target_os = "macos"))]
+    Command::new(&path).spawn().map_err(|error| format!("launch desktop installer: {error}"))?;
+    app.exit(0);
+    Ok(true)
 }
 
 /// Reads the catalog maintained by Codex itself instead of shipping a stale
@@ -7894,12 +8513,26 @@ fn get_codex_info() -> CodexInfo {
 /// A configured custom model is retained as a non-official option so users of
 /// CC Switch or another provider can still switch back to it.
 #[tauri::command]
-fn get_codex_models() -> Vec<CodexModelOption> {
+async fn get_codex_models() -> Vec<CodexModelOption> {
     let config = fs::read_to_string(codex_config_path()).unwrap_or_default();
     let current_model = parse_toml_string(&config, "model")
         .filter(|model| !model.trim().is_empty());
     let mut models = Vec::new();
     let mut seen = HashSet::new();
+
+    let add_model = |models: &mut Vec<CodexModelOption>, seen: &mut HashSet<String>, slug: &str, display_name: Option<&str>, official: bool, source: &str| {
+        let slug = slug.trim();
+        if slug.is_empty() || !seen.insert(slug.to_string()) {
+            return;
+        }
+        models.push(CodexModelOption {
+            slug: slug.to_string(),
+            display_name: display_name.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(slug).to_string(),
+            official,
+            source: source.to_string(),
+        });
+    };
+
     let cache_path = codex_home().join("models_cache.json");
     if let Ok(raw) = fs::read_to_string(cache_path) {
         if let Ok(value) = serde_json::from_str::<Value>(&raw) {
@@ -7916,34 +8549,92 @@ fn get_codex_models() -> Vec<CodexModelOption> {
                     let supported = entry.get("supported_in_api")
                         .and_then(Value::as_bool)
                         .unwrap_or(true);
-                    if !visible || !supported || !seen.insert(slug.to_string()) {
+                    if !visible || !supported {
                         continue;
                     }
-                    let display_name = entry.get("display_name")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or(slug)
-                        .to_string();
-                    models.push(CodexModelOption {
-                        slug: slug.to_string(),
-                        display_name,
-                        official: true,
-                        source: "codex-cache".to_string(),
-                    });
+                    add_model(
+                        &mut models,
+                        &mut seen,
+                        slug,
+                        entry.get("display_name").and_then(Value::as_str),
+                        true,
+                        "codex-cache",
+                    );
                 }
             }
         }
     }
-    if let Some(model) = current_model {
-        if seen.insert(model.clone()) {
-            models.push(CodexModelOption {
-                display_name: model.clone(),
-                slug: model,
-                official: false,
-                source: "current-config".to_string(),
-            });
+
+    // CC Switch is the source of truth for users running a custom relay. Its
+    // selected Codex provider can expose a model in settings or in its API.
+    let provider_data = current_cc_switch_provider_data();
+    if let Some((base_url, api_key, provider_model, settings, meta)) = provider_data.as_ref() {
+        if let Some(model) = provider_model.as_deref() {
+            add_model(&mut models, &mut seen, model, None, false, "cc-switch");
         }
+        for source in [settings, meta] {
+            for key in ["models", "model_list", "modelList", "supported_models", "supportedModels"] {
+                if let Some(entries) = source.get(key).and_then(Value::as_array) {
+                    for entry in entries {
+                        let (slug, display) = match entry {
+                            Value::String(value) => (value.as_str(), None),
+                            Value::Object(_) => (
+                                entry.get("id").or_else(|| entry.get("slug")).or_else(|| entry.get("name")).and_then(Value::as_str).unwrap_or_default(),
+                                entry.get("display_name").or_else(|| entry.get("displayName")).or_else(|| entry.get("name")).and_then(Value::as_str),
+                            ),
+                            _ => ("", None),
+                        };
+                        add_model(&mut models, &mut seen, slug, display, false, "cc-switch");
+                    }
+                }
+            }
+        }
+        if !base_url.trim().is_empty() && !api_key.trim().is_empty() {
+            let normalized = base_url.trim().trim_end_matches('/');
+            let mut endpoints = vec![format!("{normalized}/models")];
+            if !normalized.ends_with("/v1") {
+                endpoints.push(format!("{normalized}/v1/models"));
+            } else if let Some(root) = normalized.strip_suffix("/v1") {
+                endpoints.push(format!("{root}/models"));
+            }
+            let client = Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(4))
+                .build()
+                .unwrap_or_else(|_| Client::new());
+            for endpoint in endpoints {
+                let response = client
+                    .get(&endpoint)
+                    .bearer_auth(api_key.trim())
+                    .header("X-API-Key", api_key.trim())
+                    .send()
+                    .await;
+                let Ok(response) = response else { continue };
+                if !response.status().is_success() { continue }
+                let Ok(value) = response.json::<Value>().await else { continue };
+                let entries = value.get("data").or_else(|| value.get("models")).and_then(Value::as_array);
+                if let Some(entries) = entries {
+                    for entry in entries {
+                        let (slug, display) = match entry {
+                            Value::String(value) => (value.as_str(), None),
+                            Value::Object(_) => (
+                                entry.get("id").or_else(|| entry.get("slug")).or_else(|| entry.get("name")).and_then(Value::as_str).unwrap_or_default(),
+                                entry.get("display_name").or_else(|| entry.get("displayName")).or_else(|| entry.get("name")).and_then(Value::as_str),
+                            ),
+                            _ => ("", None),
+                        };
+                        add_model(&mut models, &mut seen, slug, display, false, "provider-api");
+                    }
+                }
+                if models.iter().any(|model| model.source == "provider-api") {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(model) = current_model {
+        add_model(&mut models, &mut seen, &model, None, false, "current-config");
     }
     models.sort_by(|left, right| {
         right.official.cmp(&left.official)
@@ -8067,7 +8758,7 @@ fn update_codex() -> Result<CodexInfo, String> {
 }
 
 #[tauri::command]
-fn set_codex_defaults(model: String, permission: String) -> Result<CodexInfo, String> {
+fn set_codex_defaults(model: String, permission: String, reasoning_effort: String) -> Result<CodexInfo, String> {
     let model = model.trim();
     if model.is_empty() || model.len() > 160 || model.contains(['\r', '\n']) {
         return Err("model name is invalid".to_string());
@@ -8082,6 +8773,13 @@ fn set_codex_defaults(model: String, permission: String) -> Result<CodexInfo, St
     let updated = upsert_root_toml_string(&original, "model", model);
     let updated = upsert_root_toml_string(&updated, "approval_policy", approval_policy);
     let updated = upsert_root_toml_string(&updated, "sandbox_mode", sandbox_mode);
+    let reasoning_effort = match reasoning_effort.trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "high" => "high",
+        "xhigh" => "xhigh",
+        _ => "medium",
+    };
+    let updated = upsert_root_toml_string(&updated, "model_reasoning_effort", reasoning_effort);
     if path.exists() {
         let _ = backup_file(&path)?;
     }
@@ -8601,9 +9299,15 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage((*state).clone())
         .setup(|app| {
-            // Keep the monitoring bridge self-healing across Codex and Paseo
-            // upgrades. Installation is atomic and idempotent.
-            let _ = install_codex_hook_now();
+            // Runtime state comes from one persistent app-server connection;
+            // the old per-tool Atlas hook caused frequent PostToolUse timeouts.
+            let app_state = app.state::<AppState>().inner().clone();
+            let _ = remove_codex_hook_now();
+            if let Some(server) = spawn_app_server_bridge(app.handle().clone()) {
+                if let Ok(mut slot) = app_state.app_server.lock() {
+                    *slot = Some(server);
+                }
+            }
             let _ = build_tray(app.handle());
             spawn_mobile_bridge();
             // Tunnel startup performs network handshakes and must never block
@@ -8646,6 +9350,7 @@ pub fn run() {
             create_codex_session,
             resume_codex_session,
             send_session_input,
+            send_floating_message,
             send_terminal_input,
             set_auto_continue,
             launch_external_app,
@@ -8671,6 +9376,9 @@ pub fn run() {
             start_server_tunnel,
             stop_server_tunnel,
             update_codex,
+            check_desktop_update,
+            download_desktop_update,
+            install_desktop_update,
             set_codex_defaults,
             list_installed_skills,
             get_skill_detail,
@@ -8849,7 +9557,7 @@ mod runtime_probe_tests {
             foreground: false,
             approval: None,
         };
-        let command = powershell_resume_command(&session);
+        let command = powershell_resume_command(&session, None);
         assert!(command.contains("Set-Location -LiteralPath 'C:\\work folder\\project''s files'"));
         assert!(command.contains("resume '01a04645-5ce2-7e92-a076-cf4302ed2492'"));
         assert!(command.contains("-C 'C:\\work folder\\project''s files'"));
@@ -8878,6 +9586,26 @@ mod runtime_probe_tests {
         assert!(!add_atlas_hooks(&mut hooks, "new-atlas-hook-command")
             .expect("idempotent Atlas hook repair"));
         assert!(!harden_paseo_hooks(&mut hooks, wrapper));
+    }
+
+    #[test]
+    fn hook_cleanup_removes_only_atlas_handlers() {
+        let mut hooks = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [
+                    {"hooks": [{"type": "command", "command": "old-atlas-hook.ps1"}]},
+                    {"hooks": [{"type": "command", "command": "agent-light-codex-signal.cmd"}]}
+                ]
+            }
+        });
+        assert!(remove_atlas_hooks(&mut hooks));
+        let serialized = hooks.to_string();
+        assert!(!serialized.contains("atlas-hook"));
+        assert!(serialized.contains("agent-light-codex-signal.cmd"));
+        let inline = "[[hooks.PostToolUse]]\ncommand = \"agent-light\"\n\n[[hooks.PostToolUse]]\ncommand = \"powershell atlas-hook.ps1\"\n";
+        let cleaned = remove_atlas_toml_hooks(inline);
+        assert!(cleaned.contains("agent-light"));
+        assert!(!cleaned.contains("atlas-hook"));
     }
 
     #[test]

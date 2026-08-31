@@ -1,135 +1,123 @@
 # Codex Atlas
 
-Windows-first Codex session control plane built as a native Tauri desktop app.
+Codex Atlas 是一个面向 Codex CLI 的原生会话控制中心：扫描本机已有会话，按状态和工作区整理，在一个窗口内搜索、恢复、监控和切换 Codex。桌面端使用 Tauri 2 + Rust，Android 端通过 Atlas Bridge 与桌面或服务器保持同步。
 
-## Stack
+[English](#english) · [项目主页](https://github.com/hlok666/codex-atlas) · [Releases](https://github.com/hlok666/codex-atlas/releases)
 
-- React + TypeScript + Vite for the renderer.
-- `lucide-react` for a consistent icon system.
-- Tauri 2 + Rust for native process discovery, window management, notifications, and local IPC. Atlas owns its loopback Bridge and voice daemon; no Paseo runtime is required.
+## 能力概览
 
-## Implemented product surface
+- 首页展示最近 5 个会话；全部会话支持标题、提示词、分支、工作区和 rollout 内容搜索。
+- 原生进程树扫描：识别从 Atlas 外启动的 PowerShell、`node.exe`、`codex.exe` 会话，并融合 rollout、writer lock、app-server 事件。
+- Codex `app-server` WebSocket 优先：新建会话、恢复会话、消息队列、立即打断、工具输出和审批事件使用同一条会话通道。
+- 外部旧 CLI 会话保留兼容回退：没有 app-server 时使用 `codex queue` 或对应终端的标准输入。
+- 异常恢复保护：403 只有在 CC Switch 当前启用供应商余额确认不足时才暂停；临时 5xx/超时最多自动继续 3 次，连续失败后停止并通知。
+- CC Switch 余额和延迟监控只读取当前启用的 Codex 供应商，避免把其他中转站余额误判为当前余额。
+- 桌面 CRT 小组件：始终置顶、动态尺寸、多个真实外形预设、红绿灯状态、最新输出、审批按钮、会话切换和快捷输入。
+- 快捷输入支持排队发送或打断当前 turn 立即发送，并可附加文本文件、图片和本地路径。
+- Codex 默认模型、CLI 权限、思考程度和 npm 更新统一管理；模型目录合并本地 CLI、当前配置和 CC Switch 当前供应商数据。
+- Skills 管理：中文解析、章节详情、仓库地址查找、更新检查、启用/停用、批量更新和删除。
+- Paseo 兼容能力：启动 Paseo、全量导入 Codex 会话、修复最近会话；Atlas 自己负责桥接、消息同步和语音服务，不依赖 Paseo 才能运行。
+- Atlas Voice：本地 Parakeet/Kokoro 模型安装、进度、健康检查和 daemon 生命周期管理。
+- Android 伴侣：局域网优先，可切换固定隧道或服务器通道；支持多设备、多电脑、多服务器、实时会话同步、消息队列、语音输入和 ColorOS 交互卡片。
+- 桌面端软件内更新：从 GitHub Releases 检查、下载并启动 Windows 安装包，已完整下载的版本直接复用。
+- Windows 与 macOS 原生窗口控制：最小化、最大化、关闭、窗口拖动和独立桌面小组件。
 
-- Recent five sessions on the overview, full archive search, status filters, sorting, and session inspector.
-- Recovery Monitor with explicit guardrails:
-  - `403` + `insufficient balance` / `credit` / `quota` pauses automation and never sends `continue`.
-  - Retryable timeout / `5xx` failures can send `continue` up to three attempts.
-  - The third consecutive failure stops automation and triggers the notification path.
-- CC Switch integration settings for local endpoint, credential-vault API key, provider balance checks, and last-check status.
-- Paseo integration settings for executable path, launch, full Codex session import, and recent-session repair.
-- Windows notification toggle and an Atlas Mini floating status window with red/yellow/green state lights and quick resume.
-- Atlas voice service lifecycle with local Parakeet/Kokoro model installation, progress reporting, health checks, and a persistent loopback daemon.
-- Runtime defaults, Codex versions, installed Skills, and local storage status.
-- Cross-platform window controls: minimize the main window and show/hide an always-on-top Atlas Mini window through the Tauri shell.
-- Native process-tree discovery for Codex sessions started outside Atlas, including `PowerShell -> node.exe -> codex.exe` chains.
-- Runtime state fusion from the Codex process, thread writer lock, rollout events, and optional official Codex hooks.
-- Android companion voice controls include continuous dictation and optional system TTS playback for new assistant replies.
-- White CRT mini-computer icon source at `public/codex-atlas-icon.svg`, shared by the browser, Windows `.ico`, and macOS `.icns` packaging.
-
-## Real tool contracts verified from public source
-
-CC Switch exposes a Tauri `get_balance(base_url, api_key)` command and session-manager commands such as `list_sessions` and `launch_session_terminal`. Balance is queried per provider credential; the local proxy `/v1/responses` endpoint is not itself a balance endpoint.
-
-Paseo's supported import flow is the daemon-backed command:
+## 技术架构
 
 ```text
-paseo import --provider codex <provider-session-id> --cwd <workspace>
+React + TypeScript + Vite
+            │ Tauri IPC
+Tauri 2 + Rust native shell
+   ├─ Codex state_5.sqlite / rollout JSONL
+   ├─ Codex app-server WebSocket
+   ├─ native process and terminal control
+   ├─ CC Switch / Paseo adapters
+   ├─ Atlas Voice daemon
+   └─ authenticated Mobile Bridge (LAN / fixed tunnel)
 ```
 
-The Atlas UI uses `paseo_import_agent` and `paseo_import_all_codex_sessions` IPC names so the Tauri shell can call Paseo's daemon/client implementation without coupling the renderer to shell commands. Voice installation is separate: Atlas stores models under `$CODEX_HOME/atlas-voice/models` and starts its own `atlas-voice` daemon on loopback.
+桌面端不会因为 Atlas 退出而批量结束 Codex 或 app-server 进程。Bridge 使用持久化同步游标（`syncEpoch + sequence`）和消息回执，Android 重连后只补发缺失消息，不重复执行同一条提交。
 
-### Paseo capability boundary
+### Codex 会话识别
 
-Atlas currently reuses the parts of Paseo that are useful for a companion
-control plane: Codex session discovery/import, recent-session repair, a shared
-conversation timeline over the authenticated bridge, session creation, text and
-voice input, approval choices, and desktop/mobile actions. It does not claim to
-be a full Paseo replacement yet. Paseo's daemon-owned PTY execution,
-long-lived WebSocket reconnection, and rich structured tool-rendering still need
-dedicated implementation before feature parity can be claimed. Atlas now owns
-the local voice model lifecycle and loopback daemon; platform-specific STT/TTS
-workers attach through that Atlas contract instead of a Paseo process.
+Atlas 读取 `$CODEX_HOME/state_5.sqlite`，JSONL 为回退来源；同时扫描原生进程树，解析工作目录、resume 参数、writer lock 和 rollout 元数据。实时状态来自 app-server 通知，并在外部 CLI 场景使用进程/rollout 事件兜底。旧版 Atlas Hook 已清理，不再为每个工具调用注入 5 秒超时的 PostToolUse Hook。
 
-## Development
+### 异常恢复规则
 
-```text
+1. 读取 Codex 输出并分类错误。
+2. 查询 CC Switch 当前启用供应商的余额和延迟。
+3. 余额确认大于 0 时，不把泛化的 403 文本误报为余额不足。
+4. 确认余额为 0 时暂停自动继续；余额恢复且开关开启时，后台向原会话发送“继续”并回车。
+5. 可恢复网络错误最多继续三次，第三次失败后停止并发送 Windows 通知。
+
+## 开发
+
+环境要求：Node.js 22、Rust stable、Windows WebView2；Android 构建使用 JDK 17 和 Android SDK 35。
+
+```bash
 npm install
 npm run dev
 npm run build
-```
-
-The browser preview safely falls back to explanatory toasts when the Tauri IPC bridge is unavailable. The desktop shell keeps provider credentials on the native side and maintains a process/session registry for writing `continue` to the correct Codex session.
-
-Android message delivery uses a durable outbox. Each queued submission carries a stable client
-message id; the desktop Bridge records accepted ids in
-`$CODEX_HOME/atlas-mobile-message-receipts.json`, so a timeout or reconnect retries the same
-submission without running `codex queue` twice. Queue items expose pending, sending and failed
-states and recover sending items after an app restart. The queue behavior and its Paseo rationale
-are documented in [PASEO_DEEP_RESEARCH.md](PASEO_DEEP_RESEARCH.md).
-
-Pairing links carry a stable desktop device identity. The Android companion can keep several
-Windows, macOS, Linux or cloud-server Bridge profiles and switches each profile's route,
-credentials and sync cursor independently.
-
-The bridge timeline uses a persisted `syncEpoch + sequence` cursor with explicit reset/gap
-recovery and structured tool/approval metadata. See
-[docs/mobile-sync-protocol.md](docs/mobile-sync-protocol.md).
-
-The renderer uses the same `minimize_window`, `set_floating_window_visible`, and `set_floating_window_size` IPC commands on Windows and macOS. The shell maps them to the native main window and an always-on-top, frameless Atlas Mini window respectively.
-
-The Tauri 2 shell in `src-tauri` reads `$CODEX_HOME/state_5.sqlite` (with a JSONL fallback), launches `codex resume`, keeps a writable stdin handle for guarded `continue` recovery, and exposes Paseo/CC Switch integrations plus the Atlas voice daemon. The standalone Atlas Mini window renders `/?view=floating`.
-
-## Runtime detection
-
-Atlas does not rely on sessions being launched from the app. It scans native process trees, resolves each Codex working directory and command line, and matches it to the session id using resume arguments, active thread writer locks, and rollout metadata. A lightweight runtime scan runs independently from the full searchable session index.
-
-For precise working/waiting/completed transitions, install the status hook from Runtime settings. Atlas uses the existing user-level hook representation: it updates `hooks.json` when that source exists, or appends inline TOML when `config.toml` already contains hooks, so Codex does not receive a second representation from Atlas. It records session lifecycle, prompt, pre/post-tool, permission, Stop, and subagent Stop events; a final assistant message that asks for input remains waiting. Hooks use the canonical `[features].hooks` key and are enabled by default when no feature override exists.
-
-Codex requires review of new non-managed hooks. After first installation, open a new Codex session and use `/hooks` once to review and trust the Atlas hook definition.
-
-The packaged Windows binary can install the hook without opening the UI:
-
-```text
-src-tauri\target\release\codex-atlas.exe --install-hook
-```
-
-This creates or updates `%USERPROFILE%\.codex\hooks.json`, enables `[features].hooks = true`, and makes a timestamped `.atlas-backup-*` copy before changing an existing configuration.
-
-```text
 npm run tauri:dev
-npm run tauri:build
+npm run tauri:build -- --bundles nsis
 ```
 
-### Android companion bridge
+浏览器预览会使用演示数据并把不可用的 Tauri 命令显示为提示；完整会话扫描、终端控制、通知、窗口和 Bridge 需要运行桌面壳。
 
-The desktop app starts an authenticated Atlas Mobile Bridge on port `15730`.
-The Runtime page shows the LAN URL and token for the Android companion. The
-bridge exposes `GET /v1/status`, `GET /v1/sessions`,
-`GET /v1/sessions/{id}/messages`, `POST /v1/sessions`,
-`POST /v1/sessions/{id}/message`, `POST /v1/sessions/{id}/activate`,
-`POST /v1/sessions/{id}/input`, and `POST /v1/paseo/import-all`. For live
-clients, `GET /v1/sync?since=<cursorMs>&wait=<milliseconds>` returns the current
-snapshot, session records, and only rollout messages newer than the supplied
-cursor. A positive `wait` value enables server-side long polling (capped at 25
-seconds), so Android receives a state or message change immediately instead of
-using a fixed polling tick. Messages are read from the same Codex rollout JSONL
-used by the desktop monitor, so desktop and Android clients share the same
-conversation history without reloading the complete timeline on every request.
-Activating a closed session falls back to the exact workspace's `codex resume`;
-message requests first use `codex queue` and then retry after launching resume
-when no interactive process is available.
-Keep the token private and allow port `15730` through the Windows firewall only
-on a trusted network.
+### Android
 
-## 项目与更新
+```bash
+cd android
+./gradlew assembleDebug
+```
 
-Codex Atlas 的公开项目地址：
+Android 版本号同时维护 `versionName` 和 `versionCode`。Release 构建会优先使用 GitHub Actions 的固定签名；没有签名 secrets 时会回退为 debug APK，并在日志中标记该 APK 不能覆盖安装旧签名版本。
 
-<https://github.com/hlok666/codex-atlas>
+## Mobile Bridge 与服务器通道
 
-桌面端在“运行设置”中提供项目主页和最新 Release 入口。Android 伴侣会直接读取 GitHub Releases API，发现新版本后下载 APK，并唤起系统安装页面；没有 APK 资产时会打开对应 Release 页面。发布由 `.github/workflows/release.yml` 在推送 `v*` 标签后自动构建 Windows 安装包和 Android APK。
+桌面端默认启动认证 Bridge（端口 `15730`），运行设置页提供 LAN 地址、固定隧道地址、token 和二维码。手机在同一局域网优先走 LAN，离开局域网后切换固定隧道；用户也可以填写自己的服务器 Host、SSH 端口、用户名、密码或私钥，一次部署并持久化配置。
 
-## 界面截图
+服务器直连模式不要求 Cloudflare。Atlas 会为 SSH 反向转发生成专用 ed25519 密钥，部署时写入服务器 `authorized_keys`，并在服务器端配置 Bridge 端口防火墙。固定 URL 模式会清理旧的 Atlas sshd 监听，避免 `remote port forwarding failed for listen port 15730`；端口被其他服务占用时会保留完整 SSH 错误供诊断。
+
+Bridge API 包括：
+
+```text
+GET  /v1/status
+GET  /v1/sessions
+GET  /v1/sessions/{id}/messages
+POST /v1/sessions
+POST /v1/sessions/{id}/message
+POST /v1/sessions/{id}/activate
+POST /v1/sessions/{id}/input
+POST /v1/paseo/import-all
+GET  /v1/sync?since=<cursorMs>&wait=<milliseconds>
+```
+
+请只在可信网络开放 `15730`，并把 Bridge token 当作密码保管。
+
+## 发布
+
+桌面端版本 `0.1.10` 在以下文件中保持一致：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json`。Android 当前为 `0.1.7`（versionCode `8`）。发布前执行：
+
+```bash
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+git diff --check
+npm run tauri:build -- --bundles nsis
+```
+
+推送 `v*` 标签后，`.github/workflows/release.yml` 会并行构建并发布：
+
+- Windows：`Codex Atlas_<version>_x64-setup.exe`
+- Android：`codex-atlas-android.apk`
+
+本地 Windows 安装包位于：
+
+```text
+src-tauri/target/release/bundle/nsis/Codex Atlas_<version>_x64-setup.exe
+```
+
+## 截图
 
 ![首页与最近会话](docs/screenshots/overview.png)
 
@@ -139,14 +127,10 @@ Codex Atlas 的公开项目地址：
 
 ![Atlas Mini CRT 桌面组件](docs/screenshots/floating-crt.png)
 
-## 发布与版本
+## English
 
-```text
-npm run build
-npm run tauri:build
-cd android && ./gradlew assembleDebug
-git tag v0.1.2
-git push origin v0.1.2
-```
+Codex Atlas is a native session control center for Codex CLI. It indexes existing sessions, searches conversation content, resumes or queues work, monitors live runtime state, and keeps desktop and Android clients synchronized.
 
-Android Release 使用固定的 release keystore（由 GitHub Actions secrets 注入），因此后续版本可以直接覆盖更新。旧版 debug APK 或由其他密钥签名的 APK 无法被 Android 覆盖安装，首次迁移时需要卸载一次旧版；Atlas 更新器会在安装前识别并提示这个情况。未配置签名 secrets 时 workflow 会回退为 debug APK，并在构建日志中警告该 APK 不支持无感更新。
+The desktop app is built with Tauri 2, Rust, React, TypeScript, and Vite. It prefers the Codex `app-server` WebSocket for session operations and keeps `codex queue`/terminal input as a compatibility fallback for external legacy sessions. Balance-aware recovery uses the currently enabled CC Switch provider, and never auto-continues a confirmed zero-balance incident. Paseo import and launch are supported, while Atlas owns its mobile bridge and voice service.
+
+Use `npm run tauri:dev` for the native shell and `npm run tauri:build -- --bundles nsis` for the Windows installer. Push a `v*` tag to build a Windows NSIS installer and an Android APK through GitHub Actions.

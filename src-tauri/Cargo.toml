@@ -1,6 +1,6 @@
 [package]
 name = "codex-atlas"
-version = "0.1.6"
+version = "0.1.10"
 description = "Codex Atlas desktop session control plane"
 authors = ["Codex Atlas"]
 edition = "2021"
@@ -25,6 +25,7 @@ dirs = "6"
 url = "2"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 keyring = "4.1.6"
+tungstenite = "0.30"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

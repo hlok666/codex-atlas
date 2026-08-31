@@ -77,8 +77,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
+      - name: Flatten release assets
+        shell: bash
+        run: |
+          find release-assets -type f \( -name '*.exe' -o -name '*.apk' \) -print0 | while IFS= read -r -d '' file; do
+            case "$file" in
+              release-assets/*.exe|release-assets/*.apk) ;;
+              *) cp "$file" release-assets/ ;;
+            esac
+          done
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body_path: RELEASE_NOTES.md
-          files: release-assets/**/*
+          files: |
+            release-assets/*.exe
+            release-assets/*.apk

@@ -82,6 +82,17 @@ export type NewCodexSessionRequest = {
   permission: string
 }
 
+export type DesktopUpdateInfo = {
+  currentVersion: string
+  latestVersion: string
+  available: boolean
+  assetName?: string | null
+  downloadUrl?: string | null
+  downloadedPath?: string | null
+  downloaded: boolean
+  releaseUrl: string
+}
+
 export type RunningCodexSession = {
   sessionId: string
   pid: number
@@ -115,7 +126,15 @@ export type CodexModelOption = {
   slug: string
   displayName: string
   official: boolean
-  source: 'codex-cache' | 'current-config'
+  source: 'codex-cache' | 'current-config' | 'cc-switch' | 'provider-api'
+}
+
+export type FloatingInputMode = 'queue' | 'interrupt'
+
+export type FloatingAttachment = {
+  kind: 'path' | 'file' | 'image'
+  name: string
+  path?: string
 }
 
 export type VoiceServiceStatus = {
@@ -480,7 +499,7 @@ export async function importAllPaseoSessions(): Promise<PaseoImportSummary | nul
   return invokeDesktop<PaseoImportSummary>('paseo_import_all_codex_sessions')
 }
 
-export async function getCodexInfo(): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string } | null> {
+export async function getCodexInfo(): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string; reasoningEffort?: string } | null> {
   return invokeDesktop('get_codex_info')
 }
 
@@ -541,8 +560,20 @@ export async function updateCodex(): Promise<{ installed: boolean; version: stri
   return invokeDesktop('update_codex')
 }
 
-export async function setCodexDefaults(model: string, permission: string): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string } | null> {
-  return invokeDesktop('set_codex_defaults', { model, permission })
+export async function checkDesktopUpdate(): Promise<DesktopUpdateInfo | null> {
+  return invokeDesktop<DesktopUpdateInfo>('check_desktop_update')
+}
+
+export async function downloadDesktopUpdate(update: DesktopUpdateInfo): Promise<DesktopUpdateInfo | null> {
+  return invokeDesktop<DesktopUpdateInfo>('download_desktop_update', { update })
+}
+
+export async function installDesktopUpdate(path: string): Promise<boolean> {
+  return (await invokeDesktop<boolean>('install_desktop_update', { path })) ?? false
+}
+
+export async function setCodexDefaults(model: string, permission: string, reasoningEffort = 'medium'): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string; reasoningEffort?: string } | null> {
+  return invokeDesktop('set_codex_defaults', { model, permission, reasoningEffort })
 }
 
 export async function listInstalledSkills(): Promise<SkillRecord[] | null> {
@@ -578,6 +609,22 @@ export async function sendCodexContinue(sessionId: string, focusTerminal = false
 /** Sends an arbitrary response to a live Codex session (approval choices included). */
 export async function sendSessionInput(sessionId: string, input: string, focusTerminal = true): Promise<boolean> {
   const result = await invokeDesktop<boolean>('send_session_input', { sessionId, input, focusTerminal })
+  return result ?? false
+}
+
+/** Sends floating-widget input through the requested queue or live-terminal path. */
+export async function sendFloatingMessage(
+  sessionId: string,
+  input: string,
+  mode: FloatingInputMode,
+  attachments: FloatingAttachment[] = [],
+): Promise<boolean> {
+  const result = await invokeDesktop<boolean>('send_floating_message', {
+    sessionId,
+    input,
+    mode,
+    attachments,
+  })
   return result ?? false
 }
 
