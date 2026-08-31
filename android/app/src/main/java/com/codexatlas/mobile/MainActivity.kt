@@ -268,8 +268,12 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             updateManager.download(update) { progress ->
                 scope.launch(Dispatchers.Main) { updateProgress = progress }
             }.onSuccess { file ->
-                val opened = updateManager.openInstaller(file)
-                if (!opened) Toast.makeText(context, if (zh) "请允许安装未知应用后继续" else "Allow installs from this source, then continue", Toast.LENGTH_LONG).show()
+                when (val result = updateManager.openInstaller(file)) {
+                    InstallerResult.Opened -> Unit
+                    InstallerResult.NeedsUnknownSources -> Toast.makeText(context, if (zh) "请允许安装未知应用，然后再次点击下载并安装" else "Allow installs from this source, then tap Download & install again", Toast.LENGTH_LONG).show()
+                    is InstallerResult.SignatureConflict -> Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                    is InstallerResult.Failure -> Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                }
             }.onFailure { error ->
                 updateError = error.message ?: if (zh) "下载更新失败" else "Update download failed"
             }
