@@ -3,6 +3,9 @@
 这份矩阵基于 `getpaseo/paseo` 主仓库源码和 `public-docs` 文档整理，目标是
 明确 Atlas 要继承的是能力和架构，而不是 Paseo 的品牌或视觉样式。
 
+源码级的分层、提交幂等、时间线补偿、语音 seq/ack 和移动端 runtime 分析见
+[`PASEO_DEEP_RESEARCH.md`](PASEO_DEEP_RESEARCH.md)。
+
 ## 结论
 
 Paseo 的关键设计是：daemon 负责所有 agent、终端、工作区和语音服务，桌面端、
@@ -23,7 +26,7 @@ Android 与 Windows 不能各自猜测状态，也不能只靠独立页面缓存
 | 终端 | 创建/订阅/恢复 PTY，输入、resize、滚动、捕获、结束 | Windows 有匹配终端和输入注入，Android 没有终端页 | P1 |
 | 语音输入 | dictation 流式 PCM、partial/final、ACK、重连、取消、重试、插入/发送 | Android 已有状态机、partial、音量、重试、插入/发送和连续 voice mode；仍是系统 STT | P0 |
 | 语音模式 | 持续监听，VAD，STT + 隐藏 agent + TTS，语音打断和思考提示音 | 连续模式可自动发送文本，Android 新增可选系统 TTS 朗读回复；仍缺 daemon 级 VAD/打断/思考提示音 | P1 |
-| 本地语音 | daemon 可下载并运行 Parakeet STT、Kokoro TTS ONNX 模型 | Windows Runtime 已提供 Paseo CLI、模型安装、进度与就绪检测；桌面录音 transport 仍待接入 | P1 |
+| 本地语音 | daemon 可下载并运行 Parakeet STT、Kokoro TTS ONNX 模型 | Atlas voice daemon 已接管模型目录、安装进度、健康检查和后台常驻；桌面录音 transport 继续沿用独立接口 | P1 |
 | 供应商语音 | STT/TTS 可分别使用 OpenAI endpoint，凭据留在执行环境 | 未实现 | P2 |
 | 断线与恢复 | transport 重连后重放未确认音频/事件，客户端保留游标 | HTTP 长轮询有 LAN/tunnel fallback，客户端保留消息游标并退避重试；仍缺确认/重放窗口 | P0 |
 | 配对与安全 | relay 或直连，二维码包含密钥，端到端加密，密码和 Host allowlist | Bridge Bearer token + LAN/JD/Cloudflare 通道 | P0 |
@@ -48,7 +51,7 @@ Android 与 Windows 不能各自猜测状态，也不能只靠独立页面缓存
 ### P1：产品完整性
 
 1. Android 增加工作区分组、会话搜索、终端输出页、工具详情和通知渠道。
-2. Windows Runtime 已提供 voice readiness、Paseo CLI 与 STT/TTS 模型下载状态；后续接入桌面录音 transport。
+2. Windows Runtime 已提供 Atlas voice readiness、STT/TTS 模型下载状态和 loopback daemon；后续接入桌面录音 transport。
 3. Android 使用 TTS 播放当前会话 assistant 输出，并在播放时暂停麦克风，形成真正的双向 voice mode。
 4. 桌面与 Android 共享 provider/model/permission 默认值和设置变更事件。
 

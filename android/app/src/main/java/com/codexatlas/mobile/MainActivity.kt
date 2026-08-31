@@ -7,11 +7,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,7 +33,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.verticalScroll
@@ -39,6 +40,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Typography
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -59,6 +61,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -84,7 +89,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         consumePairing(intent)
         consumeSessionIntent(intent)
-        setContent { AtlasMobileApp(pairingFromIntent, sessionIdFromIntent) }
+        if (BridgePreferences.token(this).isNotBlank()) AtlasSyncService.start(this)
+        setContent { AtlasTheme { AtlasMobileApp(pairingFromIntent, sessionIdFromIntent) } }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -92,6 +98,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         consumePairing(intent)
         consumeSessionIntent(intent)
+        if (BridgePreferences.token(this).isNotBlank()) AtlasSyncService.start(this)
     }
 
     private fun consumePairing(intent: Intent?) {
@@ -100,7 +107,19 @@ class MainActivity : ComponentActivity() {
         if (parsePairing(raw) == null) return
         pairingFromIntent = raw
         parsePairing(raw)?.let { pairing ->
-            BridgePreferences.savePairing(this, pairing.lanUrl, pairing.tunnelUrl, pairing.token, pairing.preferTunnel)
+            BridgePreferences.saveDevice(
+                this,
+                AtlasDeviceProfile(
+                    id = pairing.deviceId,
+                    name = pairing.deviceName.ifBlank { "Codex Atlas" },
+                    kind = pairing.deviceKind.ifBlank { "desktop" },
+                    lanUrl = pairing.lanUrl,
+                    tunnelUrl = pairing.tunnelUrl,
+                    token = pairing.token,
+                    preferTunnel = pairing.preferTunnel,
+                    route = if (pairing.preferTunnel) "server" else "auto",
+                ),
+            )
         }
     }
 
@@ -113,9 +132,13 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_SESSION_ID = "com.codexatlas.mobile.extra.SESSION_ID"
 
         fun storedPairing(context: Context): String {
-            val lan = BridgePreferences.url(context).trim()
-            val tunnel = BridgePreferences.tunnelUrl(context).trim()
-            val token = BridgePreferences.token(context).trim()
+            return BridgePreferences.selectedDevice(context)?.let(::pairingForProfile).orEmpty()
+        }
+
+        fun pairingForProfile(profile: AtlasDeviceProfile): String {
+            val lan = profile.lanUrl.trim()
+            val tunnel = profile.tunnelUrl.trim()
+            val token = profile.token.trim()
             if (lan.isBlank() || token.isBlank()) return ""
             return Uri.Builder()
                 .scheme("codex-atlas")
@@ -123,7 +146,10 @@ class MainActivity : ComponentActivity() {
                 .appendQueryParameter("lan", lan)
                 .apply { if (tunnel.isNotBlank()) appendQueryParameter("tunnel", tunnel) }
                 .appendQueryParameter("token", token)
-                .appendQueryParameter("preferTunnel", if (BridgePreferences.preferTunnel(context)) "1" else "0")
+                .appendQueryParameter("deviceId", profile.id)
+                .appendQueryParameter("deviceName", profile.name)
+                .appendQueryParameter("deviceKind", profile.kind)
+                .appendQueryParameter("preferTunnel", if (profile.preferTunnel) "1" else "0")
                 .build()
                 .toString()
         }
@@ -145,16 +171,29 @@ class MainActivity : ComponentActivity() {
             val tunnel = uri.getQueryParameter("tunnel")?.trim().orEmpty()
             val token = uri.getQueryParameter("token")?.trim().orEmpty()
             if (lan.isBlank() || token.isBlank()) return null
+            val deviceId = uri.getQueryParameter("deviceId")?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: "desktop-${Integer.toUnsignedString((lan + "|" + tunnel).hashCode(), 16)}"
+            val deviceName = uri.getQueryParameter("deviceName")?.trim().orEmpty()
+            val deviceKind = uri.getQueryParameter("deviceKind")?.trim().orEmpty()
             val preferTunnel = uri.getQueryParameter("preferTunnel").equals("1") ||
                 uri.getQueryParameter("preferTunnel").equals("true", ignoreCase = true)
-            return PairingDetails(lan, tunnel, token, preferTunnel)
+            return PairingDetails(lan, tunnel, token, preferTunnel, deviceId, deviceName, deviceKind)
         }
     }
 }
 
-data class PairingDetails(val lanUrl: String, val tunnelUrl: String, val token: String, val preferTunnel: Boolean)
+data class PairingDetails(
+    val lanUrl: String,
+    val tunnelUrl: String,
+    val token: String,
+    val preferTunnel: Boolean,
+    val deviceId: String = "",
+    val deviceName: String = "",
+    val deviceKind: String = "desktop",
+)
 
-private enum class ConnectionRoute(val key: String) {
+enum class ConnectionRoute(val key: String) {
     Auto("auto"),
     Lan("lan"),
     Server("server");
@@ -164,22 +203,53 @@ private enum class ConnectionRoute(val key: String) {
     }
 }
 
-private fun primaryBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
+fun primaryBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
     ConnectionRoute.Auto -> if (details.preferTunnel) details.tunnelUrl else details.lanUrl
     ConnectionRoute.Lan -> details.lanUrl
     ConnectionRoute.Server -> details.tunnelUrl
 }
 
-private fun fallbackBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
+fun fallbackBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
     ConnectionRoute.Auto -> if (details.preferTunnel) details.lanUrl else details.tunnelUrl
     ConnectionRoute.Lan, ConnectionRoute.Server -> ""
 }
 
-private fun mergeAtlasMessages(current: List<AtlasMessage>, incoming: List<AtlasMessage>): List<AtlasMessage> =
+private fun mergeAtlasMessages(current: List<AtlasMessage>, incoming: List<AtlasMessage>): List<AtlasMessage> {
+    val merged = linkedMapOf<String, AtlasMessage>()
     (current + incoming)
         .filter { it.id.isNotBlank() || it.text.isNotBlank() }
-        .distinctBy { it.id.ifBlank { "${it.timestampMs}:${it.role}:${it.text}" } }
-        .sortedBy { it.timestampMs }
+        .forEach { item ->
+            val key = item.callId?.takeIf { it.isNotBlank() }?.let { "call:$it" }
+                ?: item.id.ifBlank { "${item.timestampMs}:${item.role}:${item.text}" }
+            val previous = merged[key]
+            merged[key] = if (previous != null && item.callId?.isNotBlank() == true) {
+                item.copy(
+                    text = item.text.ifBlank { previous.text },
+                    toolStatus = item.toolStatus ?: previous.toolStatus,
+                    toolDetail = item.toolDetail ?: previous.toolDetail,
+                    turnId = item.turnId ?: previous.turnId,
+                    approvalOptions = if (item.approvalOptions.isNotEmpty()) item.approvalOptions else previous.approvalOptions,
+                    seq = maxOf(item.seq, previous.seq),
+                    seqStart = minOfNonZero(item.seqStart, previous.seqStart),
+                    seqEnd = maxOf(item.seqEnd, previous.seqEnd),
+                )
+            } else {
+                item
+            }
+        }
+    return merged.values
+        .sortedWith(
+            compareBy<AtlasMessage> { it.seq == 0L }
+                .thenBy { if (it.seq > 0) it.seq else it.timestampMs }
+                .thenBy { it.timestampMs },
+        )
+}
+
+private fun minOfNonZero(first: Long, second: Long): Long = when {
+    first == 0L -> second
+    second == 0L -> first
+    else -> minOf(first, second)
+}
 
 private sealed interface ConnectionState {
     data object Idle : ConnectionState
@@ -188,26 +258,68 @@ private sealed interface ConnectionState {
     data class Failed(val message: String) : ConnectionState
 }
 
+private val AtlasTypography = Typography(
+    headlineMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 28.sp, lineHeight = 34.sp, fontWeight = FontWeight.SemiBold),
+    titleLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold),
+    titleMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.Medium),
+    bodyLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 17.sp, lineHeight = 25.sp),
+    bodyMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 16.sp, lineHeight = 23.sp),
+    bodySmall = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 14.sp, lineHeight = 20.sp),
+    labelLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
+    labelMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium),
+)
+
+@Composable
+private fun AtlasTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = androidx.compose.material3.lightColorScheme(
+            primary = Color(0xFF4D8A54),
+            onPrimary = Color.White,
+            secondary = Color(0xFF7B9C7E),
+            onSecondary = Color.White,
+            background = Color(0xFFF4F7F2),
+            onBackground = Color(0xFF243025),
+            surface = Color.White,
+            onSurface = Color(0xFF243025),
+            surfaceVariant = Color(0xFFE9EEE7),
+            onSurfaceVariant = Color(0xFF667466),
+            error = Color(0xFFB44A45),
+            onError = Color.White,
+        ),
+        typography = AtlasTypography,
+        content = content,
+    )
+}
+
 @Composable
 private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = "") {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val zh = remember { Locale.getDefault().language.startsWith("zh") }
     var pairing by remember(initialPairing) { mutableStateOf(initialPairing.ifBlank { MainActivity.storedPairing(context) }) }
+    var deviceProfiles by remember { mutableStateOf(BridgePreferences.devices(context)) }
+    var selectedDeviceId by remember { mutableStateOf(BridgePreferences.selectedDeviceId(context)) }
+    var deviceManagerVisible by remember { mutableStateOf(false) }
     var state by remember { mutableStateOf<ConnectionState>(ConnectionState.Idle) }
-    var snapshot by remember { mutableStateOf<AtlasSnapshot?>(null) }
+    var snapshot by remember { mutableStateOf(BridgePreferences.cachedSnapshot(context)) }
     var sessions by remember { mutableStateOf<List<AtlasSession>>(emptyList()) }
     var selectedSessionId by remember(initialSessionId) { mutableStateOf(initialSessionId) }
-    var syncCursorMs by remember { mutableStateOf(0L) }
+    var conversationPage by remember { mutableStateOf(initialSessionId.isNotBlank()) }
+    var syncCursorMs by remember { mutableStateOf(BridgePreferences.syncCursor(context)) }
+    var syncEpoch by remember { mutableStateOf(BridgePreferences.syncEpoch(context)) }
+    var syncAfterSeq by remember { mutableStateOf(BridgePreferences.syncSeq(context)) }
     var messages by remember { mutableStateOf<List<AtlasMessage>>(emptyList()) }
     var message by remember { mutableStateOf("") }
+    var queuedMessageCount by remember { mutableStateOf(AtlasMessageQueue.count(context)) }
+    var queuedMessages by remember { mutableStateOf(AtlasMessageQueue.items(context)) }
+    var queueControl by remember { mutableStateOf(AtlasMessageQueue.control(context)) }
+    var queueVisible by remember { mutableStateOf(false) }
     var sessionQuery by remember { mutableStateOf("") }
     var messageBusy by remember { mutableStateOf(false) }
     var createVisible by remember { mutableStateOf(false) }
     var createCwd by remember { mutableStateOf("") }
     var createPrompt by remember { mutableStateOf("") }
     var createBusy by remember { mutableStateOf(false) }
-    var paseoBusy by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AtlasUpdate?>(null) }
     var updateBusy by remember { mutableStateOf(false) }
     var updateProgress by remember { mutableStateOf(0) }
@@ -245,6 +357,8 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         permissionDenied = !granted
         if (granted) scannerVisible = true
     }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    BackHandler(enabled = conversationPage) { conversationPage = false }
 
     fun checkForUpdate() {
         if (updateBusy) return
@@ -290,10 +404,27 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             return
         }
         state = ConnectionState.Testing
-        syncCursorMs = 0L
         scope.launch {
-            BridgePreferences.savePairing(context, details.lanUrl, details.tunnelUrl, details.token, details.preferTunnel)
+            val profile = AtlasDeviceProfile(
+                id = details.deviceId,
+                name = details.deviceName.ifBlank { "Codex Atlas" },
+                kind = details.deviceKind.ifBlank { "desktop" },
+                lanUrl = details.lanUrl,
+                tunnelUrl = details.tunnelUrl,
+                token = details.token,
+                preferTunnel = details.preferTunnel,
+                route = connectionRoute.key,
+                lastConnectedAtMs = System.currentTimeMillis(),
+            )
+            BridgePreferences.saveDevice(context, profile)
+            deviceProfiles = BridgePreferences.devices(context)
+            selectedDeviceId = profile.id
+            syncCursorMs = BridgePreferences.syncCursor(context)
+            syncEpoch = BridgePreferences.syncEpoch(context)
+            syncAfterSeq = BridgePreferences.syncSeq(context)
+            snapshot = BridgePreferences.cachedSnapshot(context)
             BridgePreferences.saveConnectionRoute(context, connectionRoute.key)
+            AtlasSyncService.start(context)
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val primary = primaryBridgeUrl(details, connectionRoute)
@@ -316,6 +447,11 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     runCatching { AtlasBridgeClient(primary, details.token).messagesAny(target, fallback) }.getOrDefault(freshSnapshot.messages)
                 }
                 state = ConnectionState.Connected(freshSnapshot.title)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
                 AtlasWidgetReceiver.requestRefresh(context)
             }.onFailure { error ->
                 state = ConnectionState.Failed(error.message ?: if (zh) "连接失败" else "Connection failed")
@@ -323,10 +459,34 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         }
     }
 
+    fun switchDevice(profile: AtlasDeviceProfile) {
+        if (profile.id == selectedDeviceId) {
+            deviceManagerVisible = false
+            return
+        }
+        BridgePreferences.selectDevice(context, profile.id)
+        selectedDeviceId = profile.id
+        pairing = MainActivity.pairingForProfile(profile)
+        connectionRoute = ConnectionRoute.fromKey(profile.route)
+        syncCursorMs = BridgePreferences.syncCursor(context)
+        syncEpoch = BridgePreferences.syncEpoch(context)
+        syncAfterSeq = BridgePreferences.syncSeq(context)
+        snapshot = BridgePreferences.cachedSnapshot(context)
+        sessions = emptyList()
+        messages = emptyList()
+        selectedSessionId = ""
+        deviceManagerVisible = false
+        state = ConnectionState.Idle
+    }
+
     LaunchedEffect(pairing, connectionRoute) {
         if (MainActivity.parsePairing(pairing) != null) {
             delay(250)
-            connect(pairing)
+            while (true) {
+                if (state is ConnectionState.Connected) break
+                if (state !is ConnectionState.Testing) connect(pairing)
+                delay(5_000)
+            }
         }
     }
 
@@ -341,11 +501,18 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     // The bridge holds this request until a new event arrives
                     // (or the server-side timeout expires), so the UI updates
                     // immediately without a fixed three-second polling tick.
-                    AtlasBridgeClient(primary, details.token).syncAny(syncCursorMs, fallback, 20_000)
+                    AtlasBridgeClient(primary, details.token).syncAny(
+                        syncCursorMs,
+                        fallback,
+                        20_000,
+                        syncEpoch,
+                        syncAfterSeq,
+                    )
                 }.getOrNull()
             }
             if (fresh != null) {
                 val previousCursor = syncCursorMs
+                var recoverySucceeded = true
                 snapshot = fresh.snapshot ?: snapshot
                 sessions = fresh.sessions
                 val target = selectedSessionId
@@ -354,7 +521,20 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     ?: fresh.sessions.firstOrNull()?.id.orEmpty()
                 if (target.isNotBlank() && selectedSessionId != target) selectedSessionId = target
                 val incoming = fresh.events.firstOrNull { it.sessionId == target }?.messages.orEmpty()
-                if (incoming.isNotEmpty()) {
+                if (fresh.reset || fresh.gap) {
+                    val full = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val primary = primaryBridgeUrl(details, connectionRoute)
+                            val fallback = fallbackBridgeUrl(details, connectionRoute)
+                            AtlasBridgeClient(primary, details.token).messagesAny(target, fallback)
+                        }.getOrNull()
+                    }
+                    if (full != null) messages = full
+                    else {
+                        recoverySucceeded = false
+                        if (incoming.isNotEmpty()) messages = mergeAtlasMessages(messages, incoming)
+                    }
+                } else if (incoming.isNotEmpty()) {
                     messages = mergeAtlasMessages(messages, incoming)
                     if (readRepliesAloud) {
                         incoming.lastOrNull { it.role == "assistant" && it.text.isNotBlank() }
@@ -363,9 +543,23 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 } else if (previousCursor == 0L && fresh.snapshot?.sessionId == target) {
                     messages = mergeAtlasMessages(messages, fresh.snapshot.messages)
                 }
-                syncCursorMs = maxOf(syncCursorMs, fresh.cursorMs)
+                if (recoverySucceeded) {
+                    syncCursorMs = maxOf(syncCursorMs, fresh.cursorMs)
+                    if (fresh.syncEpoch.isNotBlank()) {
+                        syncAfterSeq = if (fresh.reset || (syncEpoch.isNotBlank() && syncEpoch != fresh.syncEpoch)) {
+                            fresh.nextSeq
+                        } else {
+                            maxOf(syncAfterSeq, fresh.nextSeq)
+                        }
+                        syncEpoch = fresh.syncEpoch
+                        BridgePreferences.saveSyncPosition(context, syncEpoch, syncAfterSeq, syncCursorMs)
+                    } else {
+                        BridgePreferences.saveSyncCursor(context, syncCursorMs)
+                    }
+                }
                 state = ConnectionState.Connected(fresh.snapshot?.title ?: snapshot?.title.orEmpty())
                 AtlasWidgetReceiver.requestRefresh(context)
+                if (!recoverySucceeded) delay(750)
             } else {
                 // Back off briefly on a disconnected LAN/tunnel before trying
                 // the next candidate. A healthy bridge uses long-polling above.
@@ -374,9 +568,18 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         }
     }
 
-    // Continuous voice mode queues every utterance and sends it to the same
-    // Codex session as the normal composer. This keeps short pauses from
-    // dropping speech while a previous request is still in flight.
+    LaunchedEffect(state, pairing, conversationPage) {
+        while (true) {
+            queuedMessages = AtlasMessageQueue.items(context)
+            queuedMessageCount = queuedMessages.size
+            queueControl = AtlasMessageQueue.control(context)
+            delay(if (state is ConnectionState.Connected) 1_000 else 2_500)
+        }
+    }
+
+    // Continuous voice mode uses the Paseo-style ordered dictation protocol.
+    // If the bridge is unavailable, the final transcript falls back to the
+    // durable message outbox instead of being dropped.
     LaunchedEffect(Unit) {
         while (true) {
             val text = pendingVoiceSend.firstOrNull()?.trim().orEmpty()
@@ -388,27 +591,29 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             }
 
             pendingVoiceSend = pendingVoiceSend.drop(1)
-            messageBusy = true
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val primary = primaryBridgeUrl(details, connectionRoute)
-                    val fallback = fallbackBridgeUrl(details, connectionRoute)
-                    if (primary.isBlank()) error("No server route is available")
-                    AtlasBridgeClient(primary, details.token).sendMessageAny(conversationId, text, fallback)
+            val sent = if (state is ConnectionState.Connected) {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val primary = primaryBridgeUrl(details, connectionRoute)
+                        val fallback = fallbackBridgeUrl(details, connectionRoute)
+                        val nextSeq = BridgePreferences.dictationSeq(context, conversationId) + 1
+                        val ack = AtlasBridgeClient(primary, details.token).sendDictationChunkAny(
+                            conversationId,
+                            nextSeq,
+                            text,
+                            finalChunk = true,
+                            fallbackUrl = fallback,
+                        )
+                        if (ack.ackSeq >= nextSeq) BridgePreferences.saveDictationSeq(context, conversationId, ack.ackSeq)
+                    }.isSuccess
                 }
+            } else {
+                false
             }
-            result.onSuccess {
-                val primary = primaryBridgeUrl(details, connectionRoute)
-                val fallback = fallbackBridgeUrl(details, connectionRoute)
-                messages = withContext(Dispatchers.IO) {
-                    runCatching { AtlasBridgeClient(primary, details.token).messagesAny(conversationId, fallback) }
-                        .getOrDefault(messages)
-                }
-            }.onFailure { error ->
-                state = ConnectionState.Failed(error.message ?: if (zh) "语音消息发送失败" else "Voice message failed")
-                Toast.makeText(context, error.message ?: if (zh) "语音消息发送失败" else "Voice message failed", Toast.LENGTH_LONG).show()
-            }
-            messageBusy = false
+            if (!sent) AtlasMessageQueue.enqueue(context, conversationId, text)
+            queuedMessages = AtlasMessageQueue.items(context)
+            queuedMessageCount = queuedMessages.size
+            if (!sent) AtlasSyncService.start(context)
         }
     }
 
@@ -426,9 +631,14 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFF7F9F6)) {
         Column(
-            modifier = Modifier.fillMaxSize().verticalScroll(scrollState).padding(horizontal = 24.dp, vertical = 30.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = if (conversationPage) {
+                Modifier.fillMaxSize()
+            } else {
+                Modifier.fillMaxSize().verticalScroll(scrollState).padding(horizontal = 24.dp, vertical = 30.dp)
+            },
+            verticalArrangement = if (conversationPage) Arrangement.Top else Arrangement.spacedBy(14.dp),
         ) {
+            if (!conversationPage) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
                     Text("Codex Atlas", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold, color = Color(0xFF243025))
@@ -467,7 +677,51 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             }
             Surface(shape = RoundedCornerShape(16.dp), color = Color.White, tonalElevation = 0.dp) {
                 Column(modifier = Modifier.padding(18.dp)) {
-                    Text(if (zh) "配对手机" else "Pair this phone", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (zh) "设备" else "Devices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                        TextButton(onClick = { deviceManagerVisible = !deviceManagerVisible }) {
+                            Text(if (zh) "${deviceProfiles.size} 台 · 管理" else "${deviceProfiles.size} · Manage")
+                        }
+                    }
+                    if (deviceManagerVisible) {
+                        Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFFF4F7F2), tonalElevation = 0.dp) {
+                            Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                deviceProfiles.forEach { profile ->
+                                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        val selected = profile.id == selectedDeviceId
+                                        if (selected) {
+                                            Button(onClick = { switchDevice(profile) }, modifier = Modifier.weight(1f)) {
+                                                DeviceProfileLabel(profile)
+                                            }
+                                        } else {
+                                            OutlinedButton(onClick = { switchDevice(profile) }, modifier = Modifier.weight(1f)) {
+                                                DeviceProfileLabel(profile)
+                                            }
+                                        }
+                                        if (deviceProfiles.size > 1) {
+                                            TextButton(onClick = {
+                                                val wasSelected = profile.id == selectedDeviceId
+                                                BridgePreferences.removeDevice(context, profile.id)
+                                                deviceProfiles = BridgePreferences.devices(context)
+                                                selectedDeviceId = BridgePreferences.selectedDeviceId(context)
+                                                if (wasSelected) {
+                                                    pairing = MainActivity.storedPairing(context)
+                                                    connectionRoute = ConnectionRoute.fromKey(BridgePreferences.connectionRoute(context))
+                                                    snapshot = BridgePreferences.cachedSnapshot(context)
+                                                    sessions = emptyList()
+                                                    messages = emptyList()
+                                                    state = ConnectionState.Idle
+                                                }
+                                            }) { Text(if (zh) "删除" else "Remove") }
+                                        }
+                                    }
+                                }
+                                if (deviceProfiles.isEmpty()) Text(if (zh) "尚未保存设备" else "No saved devices", color = Color(0xFF667466), style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    Text(if (zh) "添加或更新设备" else "Add or update a device", style = MaterialTheme.typography.labelLarge, color = Color(0xFF526352))
                     Spacer(Modifier.height(8.dp))
                     Text(if (zh) "从桌面端扫描二维码，或粘贴配对链接。链接有效时会自动连接。" else "Scan the QR from Atlas Desktop, or paste the pairing link. A valid link connects automatically.", color = Color(0xFF667466), style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(14.dp))
@@ -526,6 +780,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 }
             }
             ConnectionStatus(state, zh)
+            }
             if (snapshot != null && MainActivity.parsePairing(pairing) != null) {
                 val details = MainActivity.parsePairing(pairing)!!
                 val selectedSession = sessions.firstOrNull { it.id == selectedSessionId }
@@ -544,12 +799,26 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 LaunchedEffect(conversationId, messages.size, messages.lastOrNull()?.id) {
                     if (messages.isNotEmpty()) messageScrollState.animateScrollTo(messageScrollState.maxValue)
                 }
-                if (sessions.isNotEmpty()) {
+                if (!conversationPage && sessions.isNotEmpty()) {
                     Surface(shape = RoundedCornerShape(16.dp), color = Color.White, tonalElevation = 0.dp) {
                         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                 Text(if (zh) "会话" else "Sessions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
-                                Text("${sessions.size}", color = Color(0xFF667466), style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    if (queuedMessageCount > 0) {
+                                        Text(
+                                            if (zh) "队列 $queuedMessageCount" else "Queue $queuedMessageCount",
+                                            color = Color(0xFFB27A25),
+                                            style = MaterialTheme.typography.labelMedium,
+                                        )
+                                    }
+                                    Text("${sessions.size}", color = Color(0xFF667466), style = MaterialTheme.typography.bodySmall)
+                                    TextButton(onClick = {
+                                        selectedSessionId = ""
+                                        conversationPage = true
+                                        createVisible = true
+                                    }) { Text(if (zh) "新建" else "New") }
+                                }
                             }
                             OutlinedTextField(
                                 value = sessionQuery,
@@ -563,7 +832,10 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                 query.isBlank() || listOf(item.title, item.preview, item.cwd, item.model, item.liveState).any { it.contains(query, ignoreCase = true) }
                             }
                             visibleSessions.take(20).forEach { item ->
-                                TextButton(onClick = { selectedSessionId = item.id }, modifier = Modifier.fillMaxWidth()) {
+                                TextButton(onClick = {
+                                    selectedSessionId = item.id
+                                    conversationPage = true
+                                }, modifier = Modifier.fillMaxWidth()) {
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(item.title.ifBlank { if (zh) "未命名会话" else "Untitled session" }, maxLines = 1, color = if (item.id == conversationId) Color(0xFF2F7C3B) else Color(0xFF243025), fontWeight = if (item.id == conversationId) FontWeight.SemiBold else FontWeight.Normal)
@@ -589,11 +861,72 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         }
                     }
                 }
-                Surface(shape = RoundedCornerShape(16.dp), color = Color.White, tonalElevation = 0.dp) {
-                    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(if (zh) "Codex 对话" else "Codex conversation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
-                        Text(conversationTitle, color = Color(0xFF243025), fontWeight = FontWeight.SemiBold)
-                        Text(listOf(conversationFolder, conversationModel, selectedSession?.liveState ?: snapshot!!.state).filter { it.isNotBlank() }.joinToString(" · "), color = Color(0xFF667466), style = MaterialTheme.typography.bodySmall)
+                if (conversationPage) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        TextButton(onClick = { conversationPage = false }) {
+                            Text(if (zh) "‹ 返回" else "‹ Back", color = Color(0xFF2F7C3B), fontWeight = FontWeight.SemiBold)
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(conversationTitle, maxLines = 1, color = Color(0xFF243025), fontWeight = FontWeight.SemiBold)
+                            Text(
+                                listOf(conversationFolder, conversationModel)
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" · "),
+                                maxLines = 1,
+                                color = Color(0xFF7A867B),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (queuedMessageCount > 0) {
+                                TextButton(onClick = { queueVisible = !queueVisible }) {
+                                    Text(if (zh) "队列 $queuedMessageCount" else "Queue $queuedMessageCount", color = Color(0xFFB27A25))
+                                }
+                            }
+                            ConnectionStatePill(selectedSession?.liveState ?: snapshot!!.state, zh)
+                        }
+                    }
+                }
+                if (queueVisible) {
+                    QueuePanel(
+                        chinese = zh,
+                        items = queuedMessages,
+                        control = queueControl,
+                        onPause = {
+                            AtlasMessageQueue.setControl(context, AtlasQueueControl.Paused)
+                            queueControl = AtlasQueueControl.Paused
+                            AtlasSyncService.start(context)
+                        },
+                        onResume = {
+                            AtlasMessageQueue.setControl(context, AtlasQueueControl.Running)
+                            queueControl = AtlasQueueControl.Running
+                            AtlasSyncService.start(context)
+                        },
+                        onStop = {
+                            AtlasMessageQueue.setControl(context, AtlasQueueControl.Stopping)
+                            queueControl = AtlasQueueControl.Stopping
+                            AtlasSyncService.start(context)
+                        },
+                        onRetry = { id ->
+                            AtlasMessageQueue.retry(context, id)
+                            queuedMessages = AtlasMessageQueue.items(context)
+                            queuedMessageCount = queuedMessages.size
+                            AtlasSyncService.start(context)
+                        },
+                        onRemove = { id ->
+                            AtlasMessageQueue.remove(context, id)
+                            queuedMessages = AtlasMessageQueue.items(context)
+                            queuedMessageCount = queuedMessages.size
+                        },
+                    )
+                }
+                if (conversationPage) {
+                Surface(modifier = Modifier.fillMaxWidth().weight(1f), shape = RoundedCornerShape(16.dp), color = Color.White, tonalElevation = 0.dp) {
+                    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (selectedSession?.requiresAttention == true) {
                             ApprovalActions(
                                 chinese = zh,
@@ -613,7 +946,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                 },
                             )
                         }
-                        Column(modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp, max = 320.dp).verticalScroll(messageScrollState), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(modifier = Modifier.fillMaxWidth().weight(1f).verticalScroll(messageScrollState), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (messages.isEmpty()) {
                                 Text(snapshot!!.lastOutput.ifBlank { if (zh) "暂无最新输出" else "No recent output" }, color = Color(0xFF4D5C4E), style = MaterialTheme.typography.bodySmall)
                             } else {
@@ -624,29 +957,16 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         }
                         fun sendToConversation(text: String) {
                             val normalized = text.trim()
-                            if (normalized.isEmpty() || messageBusy || conversationId.isBlank()) return
-                            messageBusy = true
-                            scope.launch {
-                                val result = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        val primary = primaryBridgeUrl(details, connectionRoute)
-                                        val fallback = fallbackBridgeUrl(details, connectionRoute)
-                                        AtlasBridgeClient(primary, details.token).sendMessageAny(conversationId, normalized, fallback)
-                                    }
-                                }
-                                result.onSuccess {
-                                    message = ""
-                                    val primary = primaryBridgeUrl(details, connectionRoute)
-                                    val fallback = fallbackBridgeUrl(details, connectionRoute)
-                                    messages = withContext(Dispatchers.IO) {
-                                        runCatching { AtlasBridgeClient(primary, details.token).messagesAny(conversationId, fallback) }
-                                            .getOrDefault(messages)
-                                    }
-                                }.onFailure { error ->
-                                    state = ConnectionState.Failed(error.message ?: if (zh) "消息发送失败" else "Message failed")
-                                }
-                                messageBusy = false
-                            }
+                            if (normalized.isEmpty() || conversationId.isBlank()) return
+                            val queued = AtlasMessageQueue.enqueue(context, conversationId, normalized)
+                            message = ""
+                            queuedMessages = AtlasMessageQueue.items(context)
+                            queuedMessageCount = queuedMessages.size
+                            messages = mergeAtlasMessages(
+                                messages,
+                                listOf(AtlasMessage("queued-${queued.id}", "user", normalized, queued.createdAtMs, "queued")),
+                            )
+                            AtlasSyncService.start(context)
                         }
                         OutlinedTextField(value = message, onValueChange = { message = it }, modifier = Modifier.fillMaxWidth(), label = { Text(if (zh) "发送消息" else "Send a message") }, minLines = 2, maxLines = 5)
                         if (voiceSnapshot.active) {
@@ -673,8 +993,8 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank() && !messageBusy) {
-                                if (messageBusy) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) else Text(if (zh) "发送" else "Send")
+                            Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank()) {
+                                Text(if (zh) "发送" else "Send")
                             }
                             TextButton(onClick = {
                                 pendingVoiceMode = false
@@ -705,19 +1025,13 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             }
                             OutlinedButton(onClick = { createVisible = !createVisible }) { Text(if (zh) "新建会话" else "New session") }
                         }
-                        OutlinedButton(onClick = {
-                            if (paseoBusy) return@OutlinedButton
-                            paseoBusy = true
-                            scope.launch {
-                                val result = withContext(Dispatchers.IO) {
-                                    val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
-                                    runCatching { AtlasBridgeClient(primary, details.token).importAllPaseoAny(fallback) }
-                                }
-                                result.onSuccess { Toast.makeText(context, if (zh) "已同步到 Paseo" else "Imported into Paseo", Toast.LENGTH_SHORT).show() }.onFailure { error -> Toast.makeText(context, error.message ?: if (zh) "Paseo 同步失败" else "Paseo import failed", Toast.LENGTH_LONG).show() }
-                                paseoBusy = false
-                            }
-                        }, enabled = !paseoBusy && conversationId.isNotBlank()) {
-                            if (paseoBusy) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) else Text(if (zh) "同步到 Paseo" else "Sync to Paseo")
+                        if (queuedMessageCount > 0) {
+                            Text(
+                                if (zh) "还有 $queuedMessageCount 条消息等待发送，连接恢复后会自动继续。"
+                                else "$queuedMessageCount message(s) queued and will send when the connection recovers.",
+                                color = Color(0xFFB27A25),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
                         if (audioPermissionDenied) Text(if (zh) "录音权限被拒绝，请在系统设置中允许。" else "Microphone permission was denied. Allow it in system settings.", color = Color(0xFFB44A45), style = MaterialTheme.typography.bodySmall)
                         if (createVisible) {
@@ -754,9 +1068,12 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         }
                     }
                 }
+                }
             }
-            OutlinedButton(onClick = { addCardToHome(context, zh) }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (zh) "添加 Codex Atlas 卡片到桌面" else "Add Codex Atlas card to home screen")
+            if (!conversationPage) {
+                OutlinedButton(onClick = { addCardToHome(context, zh) }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (zh) "添加 Codex Atlas 卡片到桌面" else "Add Codex Atlas card to home screen")
+                }
             }
         }
     }
@@ -774,6 +1091,108 @@ private fun ConnectionStatus(state: ConnectionState, chinese: Boolean) {
         Text("●", color = dot, style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.size(8.dp))
         Text(text, color = Color(0xFF4D5C4E), style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
+private fun ConnectionStatePill(value: String, chinese: Boolean) {
+    val normalized = value.lowercase(Locale.ROOT)
+    val color = when {
+        normalized.contains("error") || normalized.contains("fail") || normalized.contains("blocked") -> Color(0xFFD85D59)
+        normalized.contains("work") || normalized.contains("run") || normalized.contains("active") -> Color(0xFF58BE70)
+        else -> Color(0xFFD3A941)
+    }
+    Row(
+        modifier = Modifier.background(Color(0xFFF1F5EF), RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("●", color = color, style = MaterialTheme.typography.labelMedium)
+        Text(
+            when {
+                normalized.contains("error") || normalized.contains("fail") || normalized.contains("blocked") -> if (chinese) "需要处理" else "Needs attention"
+                normalized.contains("work") || normalized.contains("run") || normalized.contains("active") -> if (chinese) "运行中" else "Working"
+                else -> if (chinese) "等待中" else "Waiting"
+            },
+            color = Color(0xFF4D5C4E),
+            style = MaterialTheme.typography.labelMedium,
+        )
+    }
+}
+
+@Composable
+private fun QueuePanel(
+    chinese: Boolean,
+    items: List<QueuedAtlasMessage>,
+    control: AtlasQueueControl,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onStop: () -> Unit,
+    onRetry: (String) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFFFFFCF4),
+        tonalElevation = 0.dp,
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(if (chinese) "发送队列" else "Outgoing queue", fontWeight = FontWeight.SemiBold, color = Color(0xFF4D4230))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when (control) {
+                            AtlasQueueControl.Running -> if (chinese) "发送中" else "Sending"
+                            AtlasQueueControl.Paused -> if (chinese) "等待" else "Waiting"
+                            AtlasQueueControl.Stopping -> if (chinese) "停止中" else "Stopping"
+                        },
+                        color = if (control == AtlasQueueControl.Running) Color(0xFF4D8A54) else Color(0xFFB27A25),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    TextButton(onClick = if (control == AtlasQueueControl.Running) onPause else onResume) {
+                        Text(if (control == AtlasQueueControl.Running) { if (chinese) "等待" else "Wait" } else { if (chinese) "继续" else "Resume" })
+                    }
+                    if (control == AtlasQueueControl.Running) {
+                        TextButton(onClick = onStop) { Text(if (chinese) "停止" else "Stop") }
+                    }
+                }
+            }
+            Text(if (chinese) "断线后会自动重试，等待或停止不会删除队列消息。" else "Offline items retry automatically; waiting or stopping keeps them in the queue.", color = Color(0xFF8B7B60), style = MaterialTheme.typography.bodySmall)
+            if (items.isEmpty()) {
+                Text(if (chinese) "队列已清空" else "Queue is empty", color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
+            } else {
+                items.take(20).forEach { item ->
+                    Column(modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp)).padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text(item.text, maxLines = 3, color = Color(0xFF334238), style = MaterialTheme.typography.bodyMedium)
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                when {
+                                    item.state == AtlasQueueItemState.Sending.key -> if (chinese) "发送中" else "Sending"
+                                    item.state == AtlasQueueItemState.Failed.key -> if (chinese) "失败 ${item.attempts} 次" else "Failed ${item.attempts} times"
+                                    item.attempts > 0 -> if (chinese) "等待重试 ${item.attempts}" else "Retrying ${item.attempts}"
+                                    else -> if (chinese) "等待发送" else "Pending"
+                                },
+                                color = when {
+                                    item.state == AtlasQueueItemState.Failed.key -> Color(0xFFB44A45)
+                                    item.state == AtlasQueueItemState.Sending.key -> Color(0xFF4D8A54)
+                                    else -> Color(0xFF8B7B60)
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (item.state == AtlasQueueItemState.Failed.key) TextButton(onClick = { onRetry(item.id) }) { Text(if (chinese) "重试" else "Retry") }
+                                TextButton(onClick = { onRemove(item.id) }) { Text(if (chinese) "删除" else "Remove") }
+                            }
+                        }
+                        item.lastError?.let { error ->
+                            Text(error, maxLines = 2, color = Color(0xFFB44A45), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                if (items.size > 20) Text(if (chinese) "仅显示前 20 条" else "Showing the first 20 items", color = Color(0xFF8B7B60), style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 
@@ -797,6 +1216,14 @@ private fun openPublicUrl(context: android.content.Context, url: String) {
 private sealed interface ConversationBlock {
     data class Paragraph(val text: String) : ConversationBlock
     data class Code(val language: String, val text: String) : ConversationBlock
+}
+
+@Composable
+private fun DeviceProfileLabel(profile: AtlasDeviceProfile) {
+    Column(horizontalAlignment = Alignment.Start) {
+        Text(profile.name.ifBlank { "Codex Atlas" }, maxLines = 1)
+        Text(profile.kind.uppercase(), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+    }
 }
 
 private fun parseConversationBlocks(raw: String): List<ConversationBlock> {
@@ -866,10 +1293,22 @@ private fun ConversationMessage(item: AtlasMessage, chinese: Boolean) {
             Text(roleLabel, color = roleColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
             if (item.timestampMs > 0) Text(formatConversationTime(item.timestampMs), color = Color(0xFF8A968B), style = MaterialTheme.typography.labelSmall)
         }
-        if (item.text.isBlank()) {
+        if (isTool && !item.toolStatus.isNullOrBlank()) {
+            Text(
+                when (item.toolStatus?.lowercase()) {
+                    "completed", "done", "success" -> if (chinese) "已完成" else "Completed"
+                    "failed", "error" -> if (chinese) "失败" else "Failed"
+                    else -> if (chinese) "执行中" else "Running"
+                },
+                color = roleColor,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        val content = item.text.ifBlank { item.toolDetail.orEmpty() }
+        if (content.isBlank()) {
             Text(if (isTool) if (chinese) "工具调用" else "Tool call" else if (chinese) "正在生成…" else "Generating…", color = Color(0xFF69766B), style = MaterialTheme.typography.bodySmall)
         } else {
-            parseConversationBlocks(item.text).forEach { block ->
+            parseConversationBlocks(content).forEach { block ->
                 when (block) {
                     is ConversationBlock.Code -> Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF202A24), tonalElevation = 0.dp) {
                         Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {

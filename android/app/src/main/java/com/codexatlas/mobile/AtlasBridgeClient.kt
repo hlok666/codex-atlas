@@ -75,13 +75,28 @@ class AtlasBridgeClient(
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
-    fun syncAny(sinceMs: Long, fallbackUrl: String = "", waitMs: Long = 0): AtlasSyncResponse {
+    fun syncAny(
+        sinceMs: Long,
+        fallbackUrl: String = "",
+        waitMs: Long = 0,
+        epoch: String = "",
+        afterSeq: Long = 0,
+    ): AtlasSyncResponse {
         val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
+                val query = buildString {
+                    append("?since=").append(sinceMs)
+                    if (waitMs > 0) append("&wait=").append(waitMs)
+                    if (epoch.isNotBlank()) {
+                        append("&epoch=")
+                            .append(java.net.URLEncoder.encode(epoch, Charsets.UTF_8.name()))
+                    }
+                    if (afterSeq > 0) append("&after=").append(afterSeq)
+                }
                 val request = Request.Builder()
-                    .url(candidate + "/v1/sync?since=" + sinceMs + if (waitMs > 0) "&wait=" + waitMs else "")
+                    .url(candidate + "/v1/sync" + query)
                     .header("Authorization", "Bearer $token")
                     .get()
                     .build()
@@ -117,13 +132,22 @@ class AtlasBridgeClient(
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
-    fun messagesAny(sessionId: String, fallbackUrl: String = ""): List<AtlasMessage> {
+    fun messagesAny(
+        sessionId: String,
+        fallbackUrl: String = "",
+        afterSeq: Long = 0,
+        limit: Int = 0,
+    ): List<AtlasMessage> {
         val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
+                val query = buildString {
+                    if (afterSeq > 0) append("?after=").append(afterSeq)
+                    if (limit > 0) append(if (isNotEmpty()) "&" else "?").append("limit=").append(limit)
+                }
                 val request = Request.Builder()
-                    .url(candidate + "/v1/sessions/" + java.net.URLEncoder.encode(sessionId, Charsets.UTF_8.name()) + "/messages")
+                    .url(candidate + "/v1/sessions/" + java.net.URLEncoder.encode(sessionId, Charsets.UTF_8.name()) + "/messages" + query)
                     .header("Authorization", "Bearer $token")
                     .get()
                     .build()
@@ -159,8 +183,53 @@ class AtlasBridgeClient(
     fun inputAny(sessionId: String, text: String, fallbackUrl: String = "") =
         postAny(sessionIdPath(sessionId, "/input"), json.encodeToString(mapOf("text" to text)), fallbackUrl)
 
-    fun sendMessageAny(sessionId: String, text: String, fallbackUrl: String = "") =
-        postAny("/v1/sessions/$sessionId/message", json.encodeToString(mapOf("text" to text)), fallbackUrl)
+    fun sendMessageAny(
+        sessionId: String,
+        text: String,
+        fallbackUrl: String = "",
+        clientMessageId: String = "",
+    ) {
+        val payload = buildMap {
+            put("text", text)
+            if (clientMessageId.isNotBlank()) put("clientMessageId", clientMessageId)
+        }
+        postAny("/v1/sessions/$sessionId/message", json.encodeToString(payload), fallbackUrl)
+    }
+
+    fun sendDictationChunkAny(
+        sessionId: String,
+        seq: Long,
+        text: String,
+        finalChunk: Boolean,
+        fallbackUrl: String = "",
+    ): AtlasDictationAck {
+        val body = json.encodeToString(
+            AtlasDictationChunk(
+                seq = seq,
+                text = text,
+                finalChunk = finalChunk,
+                clientMessageId = "dictation:$sessionId:$seq",
+            ),
+        )
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(candidate + "/v1/sessions/" + java.net.URLEncoder.encode(sessionId, Charsets.UTF_8.name()) + "/dictation")
+                    .header("Authorization", "Bearer $token")
+                    .post(body.toRequestBody())
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
+                    return json.decodeFromString(response.body?.string().orEmpty())
+                }
+            } catch (error: Throwable) {
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
 
     fun importAllPaseoAny(fallbackUrl: String = "") =
         postAny("/v1/paseo/import-all", "{}", fallbackUrl)

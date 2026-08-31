@@ -1,7 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
@@ -66,10 +67,42 @@ struct RuntimeSessionCache {
 
 #[derive(Default)]
 struct MobileSyncState {
+    loaded: bool,
+    epoch: String,
+    next_seq: u64,
+    sequences: HashMap<String, u64>,
     fingerprints: HashMap<String, (String, i64)>,
+    raw_messages: HashMap<String, CachedMobileMessages>,
+    dictation_last_seq: HashMap<String, u64>,
+}
+
+#[derive(Clone)]
+struct CachedMobileMessages {
+    size: u64,
+    modified_ms: i64,
+    messages: Vec<MobileSessionMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PersistedMobileSyncState {
+    epoch: String,
+    next_seq: u64,
+    sequences: HashMap<String, u64>,
+    #[serde(default)]
+    dictation_last_seq: HashMap<String, u64>,
 }
 
 static MOBILE_SYNC_STATE: OnceLock<Mutex<MobileSyncState>> = OnceLock::new();
+
+#[derive(Default)]
+struct MobileMessageReceiptState {
+    loaded: bool,
+    accepted: HashMap<String, i64>,
+    in_flight: HashSet<String>,
+}
+
+static MOBILE_MESSAGE_RECEIPTS: OnceLock<Mutex<MobileMessageReceiptState>> = OnceLock::new();
 
 #[derive(Default)]
 struct ProcessSnapshotCache {
@@ -204,6 +237,7 @@ pub struct SkillRecord {
     pub name: String,
     pub version: String,
     pub description: String,
+    pub description_zh: Option<String>,
     pub source: String,
     pub path: String,
     pub enabled: bool,
@@ -216,10 +250,18 @@ pub struct SkillRecord {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SkillSection {
+    pub heading: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillDetail {
     pub skill: SkillRecord,
     pub content: String,
     pub files: Vec<String>,
+    pub sections: Vec<SkillSection>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -233,6 +275,9 @@ pub struct SkillActionResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileBridgeConfig {
+    pub device_id: String,
+    pub device_name: String,
+    pub device_kind: String,
     pub url: String,
     pub lan_url: String,
     pub tunnel_url: Option<String>,
@@ -323,8 +368,8 @@ pub struct ServerTunnelProgress {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceServiceStatus {
-    pub paseo_installed: bool,
-    pub paseo_version: Option<String>,
+    pub service_installed: bool,
+    pub service_version: Option<String>,
     pub daemon_running: bool,
     pub stt_ready: bool,
     pub tts_ready: bool,
@@ -412,6 +457,9 @@ pub struct MobileBridgeSettingsInput {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MobileStatusSnapshot {
+    device_id: String,
+    device_name: String,
+    device_kind: String,
     updated_at_ms: i64,
     session_id: String,
     title: String,
@@ -446,8 +494,17 @@ struct MobileApprovalOption {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileApprovalRequest {
+    request_id: String,
     prompt: String,
     options: Vec<MobileApprovalOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileSeqRange {
+    source: String,
+    start: u64,
+    end: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -458,6 +515,22 @@ struct MobileSessionMessage {
     text: String,
     timestamp_ms: i64,
     kind: String,
+    seq: u64,
+    seq_start: u64,
+    seq_end: u64,
+    source_seq_ranges: Vec<MobileSeqRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    approval_options: Vec<MobileApprovalOption>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -470,8 +543,12 @@ struct MobileSessionEventBatch {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MobileSyncResponse {
-    /// Wall-clock cursor used by clients to request only newer rollout events.
+    /// Legacy wall-clock cursor retained for older mobile clients.
     cursor_ms: i64,
+    sync_epoch: String,
+    next_seq: u64,
+    reset: bool,
+    gap: bool,
     snapshot: Option<MobileStatusSnapshot>,
     sessions: Vec<SessionRecord>,
     events: Vec<MobileSessionEventBatch>,
@@ -486,6 +563,15 @@ pub struct CodexInfo {
     pub model: Option<String>,
     pub model_provider: Option<String>,
     pub provider_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelOption {
+    pub slug: String,
+    pub display_name: String,
+    pub official: bool,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,9 +624,24 @@ pub struct NewCodexSessionRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MobileSessionInputRequest {
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    client_message_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileDictationChunkRequest {
+    seq: u64,
+    #[serde(default)]
+    text: String,
+    #[serde(rename = "final", default)]
+    final_chunk: bool,
+    #[serde(default)]
+    client_message_id: String,
 }
 
 fn now_ms() -> i64 {
@@ -1455,6 +1556,9 @@ fn mobile_bridge_config() -> MobileBridgeConfig {
         "lan"
     };
     let token = mobile_bridge_token();
+    let device_id = mobile_bridge_device_id();
+    let device_name = mobile_bridge_device_name();
+    let device_kind = mobile_bridge_device_kind().to_string();
     // `Serializer` only adds `&` between pairs; seed the custom URI with `?`
     // so Android and other URI parsers see a real query string.
     let mut pairing = url::form_urlencoded::Serializer::new(String::from("codex-atlas://connect?"));
@@ -1463,12 +1567,18 @@ fn mobile_bridge_config() -> MobileBridgeConfig {
         pairing.append_pair("tunnel", tunnel);
     }
     pairing.append_pair("token", &token);
+    pairing.append_pair("deviceId", &device_id);
+    pairing.append_pair("deviceName", &device_name);
+    pairing.append_pair("deviceKind", &device_kind);
     pairing.append_pair(
         "preferTunnel",
         if settings.prefer_tunnel { "1" } else { "0" },
     );
     pairing.append_pair("mode", connection_mode);
     MobileBridgeConfig {
+        device_id,
+        device_name,
+        device_kind,
         url: lan_url.clone(),
         lan_url,
         tunnel_url: tunnel_url.clone(),
@@ -1488,7 +1598,58 @@ fn mobile_bridge_config() -> MobileBridgeConfig {
     }
 }
 
-fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage> {
+fn mobile_bridge_device_id() -> String {
+    let path = codex_home().join("atlas-device-id");
+    if let Ok(value) = fs::read_to_string(&path) {
+        let value = value.trim();
+        if !value.is_empty() && value.len() <= 96 {
+            return value.to_string();
+        }
+    }
+    let seed = format!(
+        "{}:{}:{}",
+        std::process::id(),
+        std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default(),
+        path.display()
+    );
+    let value = format!("desktop-{}", stable_text_digest(&seed));
+    let _ = write_text_atomically(&path, &format!("{value}\n"));
+    value
+}
+
+fn mobile_bridge_device_name() -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Codex Atlas Desktop".to_string());
+    format!("Codex Atlas · {}", host.trim())
+}
+
+fn mobile_bridge_device_kind() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "desktop"
+    }
+}
+
+fn rollout_lines(path: &Path) -> Vec<String> {
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    BufReader::new(file)
+        .lines()
+        .filter_map(Result::ok)
+        .filter(|line| !line.trim().is_empty())
+        .collect()
+}
+
+fn mobile_session_messages_raw(session: &SessionRecord) -> Vec<MobileSessionMessage> {
     if session.rollout_path.trim().is_empty() {
         return Vec::new();
     }
@@ -1496,7 +1657,7 @@ fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage>
     let modified_ms = file_modified_ms(path).max(session.updated_at_ms);
     let mut messages = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (index, line) in tail_lines(path, 512 * 1024, 512).into_iter().enumerate() {
+    for (index, line) in rollout_lines(path).into_iter().enumerate() {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -1556,16 +1717,243 @@ fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage>
         if !seen.insert(id.clone()) {
             continue;
         }
+        let turn_id = first_string_for_keys(
+            payload,
+            &["turn_id", "turnId", "turn"],
+            0,
+        )
+        .or_else(|| first_string_for_keys(&value, &["turn_id", "turnId", "turn"], 0));
+        let call_id = first_string_for_keys(
+            payload,
+            &["call_id", "callId", "tool_call_id", "toolCallId", "function_call_id"],
+            0,
+        )
+        .or_else(|| first_string_for_keys(&value, &["call_id", "callId", "tool_call_id", "toolCallId"], 0));
+        let tool_status = if role == "tool" {
+            let status = first_string_for_keys(payload, &["status", "state"], 0)
+                .or_else(|| first_string_for_keys(&value, &["status", "state"], 0));
+            Some(status.unwrap_or_else(|| {
+                if kind.contains("failed") || kind.contains("error") {
+                    "failed".to_string()
+                } else if kind.contains("completed") || kind.contains("output") {
+                    "completed".to_string()
+                } else {
+                    "running".to_string()
+                }
+            }))
+        } else {
+            None
+        };
+        let approval_id = if role == "assistant" {
+            first_string_for_keys(
+                payload,
+                &["approval_id", "approvalId", "request_id", "requestId", "permission_id"],
+                0,
+            )
+            .or_else(|| first_string_for_keys(&value, &["approval_id", "approvalId", "request_id", "requestId"], 0))
+        } else {
+            None
+        };
         messages.push(MobileSessionMessage {
             id,
             role: role.to_string(),
             text: text.chars().take(4000).collect(),
             timestamp_ms,
             kind,
+            seq: 0,
+            seq_start: 0,
+            seq_end: 0,
+            source_seq_ranges: Vec::new(),
+            turn_id,
+            call_id,
+            tool_status,
+            tool_detail: (role == "tool").then(|| text.chars().take(8000).collect()),
+            approval_id,
+            approval_options: Vec::new(),
         });
     }
     messages.sort_by_key(|message| message.timestamp_ms);
     messages
+}
+
+fn mobile_sync_state_path() -> PathBuf {
+    codex_home().join("atlas-mobile-sync-state.json")
+}
+
+fn load_mobile_sync_state(state: &mut MobileSyncState) {
+    if state.loaded {
+        return;
+    }
+    state.loaded = true;
+    let path = mobile_sync_state_path();
+    if let Ok(raw) = fs::read_to_string(path) {
+        if let Ok(persisted) = serde_json::from_str::<PersistedMobileSyncState>(&raw) {
+            state.epoch = persisted.epoch;
+            state.sequences = persisted.sequences;
+            state.dictation_last_seq = persisted.dictation_last_seq;
+            state.next_seq = persisted
+                .next_seq
+                .max(state.sequences.values().copied().max().unwrap_or(0));
+        }
+    }
+    if state.epoch.trim().is_empty() {
+        state.epoch = format!(
+            "atlas-{}-{}",
+            now_ms(),
+            stable_text_digest(&format!("{}:{}", std::process::id(), mobile_sync_state_path().display()))
+        );
+        let _ = persist_mobile_sync_state(state);
+    }
+}
+
+fn persist_mobile_sync_state(state: &MobileSyncState) -> Result<(), String> {
+    let persisted = PersistedMobileSyncState {
+        epoch: state.epoch.clone(),
+        next_seq: state.next_seq,
+        sequences: state.sequences.clone(),
+        dictation_last_seq: state.dictation_last_seq.clone(),
+    };
+    let raw = serde_json::to_string(&persisted).unwrap_or_else(|_| "{}".to_string());
+    write_text_atomically(&mobile_sync_state_path(), &format!("{raw}\n"))
+}
+
+fn rotate_mobile_sync_epoch(state: &mut MobileSyncState) {
+    state.epoch = format!(
+        "atlas-{}-{}",
+        now_ms(),
+        stable_text_digest(&format!("{}:{}", state.epoch, std::process::id()))
+    );
+    state.next_seq = 0;
+    state.sequences.clear();
+    state.raw_messages.clear();
+    state.dictation_last_seq.clear();
+    let _ = persist_mobile_sync_state(state);
+}
+
+fn assign_mobile_message_sequences(session_id: &str, messages: &mut [MobileSessionMessage]) {
+    let store = MOBILE_SYNC_STATE.get_or_init(|| Mutex::new(MobileSyncState::default()));
+    let Ok(mut state) = store.lock() else {
+        return;
+    };
+    load_mobile_sync_state(&mut state);
+    let mut changed = false;
+    for message in messages {
+        let sequence_key = format!("{}:{}", session_id, message.id);
+        let seq = if let Some(seq) = state.sequences.get(&sequence_key).copied() {
+            seq
+        } else {
+            state.next_seq = state.next_seq.saturating_add(1);
+            let seq = state.next_seq;
+            state.sequences.insert(sequence_key, seq);
+            changed = true;
+            seq
+        };
+        message.seq = seq;
+        message.seq_start = seq;
+        message.seq_end = seq;
+        message.source_seq_ranges = vec![MobileSeqRange {
+            source: "rollout".to_string(),
+            start: seq,
+            end: seq,
+        }];
+    }
+    // Retain a bounded canonical history. If an older client asks for a
+    // sequence below this window, the response advertises `gap` and the
+    // client performs a full session reload.
+    const MAX_SEQUENCE_ENTRIES: usize = 100_000;
+    if state.sequences.len() > MAX_SEQUENCE_ENTRIES {
+        let remove_count = state.sequences.len() - MAX_SEQUENCE_ENTRIES;
+        let mut entries = state
+            .sequences
+            .iter()
+            .map(|(id, seq)| (id.clone(), *seq))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(_, seq)| *seq);
+        for (id, _) in entries.into_iter().take(remove_count) {
+            state.sequences.remove(&id);
+        }
+        changed = true;
+    }
+    if changed {
+        let _ = persist_mobile_sync_state(&state);
+    }
+}
+
+fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage> {
+    let path = Path::new(&session.rollout_path);
+    let size = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let modified_ms = file_modified_ms(path);
+    let store = MOBILE_SYNC_STATE.get_or_init(|| Mutex::new(MobileSyncState::default()));
+    let cached = store
+        .lock()
+        .ok()
+        .and_then(|mut state| {
+            load_mobile_sync_state(&mut state);
+            if state
+                .raw_messages
+                .get(&session.id)
+                .map(|cached| size < cached.size)
+                .unwrap_or(false)
+            {
+                // Rollout replacement/truncation invalidates the canonical
+                // sequence window; clients must receive a reset marker.
+                rotate_mobile_sync_epoch(&mut state);
+                return None;
+            }
+            state.raw_messages.get(&session.id).and_then(|cached| {
+                (cached.size == size && cached.modified_ms == modified_ms)
+                    .then(|| cached.messages.clone())
+            })
+        });
+    let mut messages = cached.unwrap_or_else(|| {
+        let parsed = mobile_session_messages_raw(session);
+        if let Ok(mut state) = store.lock() {
+            load_mobile_sync_state(&mut state);
+            state.raw_messages.insert(
+                session.id.clone(),
+                CachedMobileMessages {
+                    size,
+                    modified_ms,
+                    messages: parsed.clone(),
+                },
+            );
+        }
+        parsed
+    });
+    assign_mobile_message_sequences(&session.id, &mut messages);
+    messages
+}
+
+fn mobile_sync_metadata() -> (String, u64, u64) {
+    let store = MOBILE_SYNC_STATE.get_or_init(|| Mutex::new(MobileSyncState::default()));
+    let Ok(mut state) = store.lock() else {
+        return (String::new(), 0, 0);
+    };
+    load_mobile_sync_state(&mut state);
+    let oldest = state.sequences.values().copied().min().unwrap_or(0);
+    (state.epoch.clone(), state.next_seq, oldest)
+}
+
+fn mobile_sync_window_flags(
+    requested_epoch: Option<&str>,
+    sync_epoch: &str,
+    after_seq: u64,
+    next_seq: u64,
+    oldest_seq: u64,
+) -> (bool, bool) {
+    let reset = requested_epoch
+        .filter(|epoch| !epoch.trim().is_empty())
+        .map(|epoch| epoch != sync_epoch)
+        .unwrap_or(false);
+    let gap = !reset
+        && after_seq > 0
+        && ((oldest_seq > 0 && after_seq.saturating_add(1) < oldest_seq)
+            || after_seq > next_seq);
+    (reset, gap)
+}
+
+fn dictation_sequence_is_gap(last_seq: u64, incoming_seq: u64) -> bool {
+    incoming_seq > last_seq.saturating_add(1)
 }
 
 fn mobile_approval_request(session: &SessionRecord) -> Option<MobileApprovalRequest> {
@@ -1655,7 +2043,15 @@ fn mobile_approval_request(session: &SessionRecord) -> Option<MobileApprovalRequ
             label: "Other".to_string(),
         });
     }
-    Some(MobileApprovalRequest { prompt, options })
+    let request_id = session
+        .failure_key
+        .clone()
+        .unwrap_or_else(|| format!("approval-{}", stable_text_digest(&prompt)));
+    Some(MobileApprovalRequest {
+        request_id,
+        prompt,
+        options,
+    })
 }
 
 fn mobile_status_snapshot() -> Option<MobileStatusSnapshot> {
@@ -1684,6 +2080,9 @@ fn mobile_status_snapshot() -> Option<MobileStatusSnapshot> {
         .map(|_| now_ms())
         .unwrap_or(0);
     Some(MobileStatusSnapshot {
+        device_id: mobile_bridge_device_id(),
+        device_name: mobile_bridge_device_name(),
+        device_kind: mobile_bridge_device_kind().to_string(),
         updated_at_ms: session.last_event_at_ms.max(session.updated_at_ms),
         session_id: session.id.clone(),
         title: session.title.clone(),
@@ -1739,34 +2138,175 @@ fn query_parameter(url: &str, key: &str) -> Option<String> {
         .find_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
 }
 
-fn mobile_sync_response(since_ms: i64) -> MobileSyncResponse {
+fn mobile_message_receipt_path() -> PathBuf {
+    codex_home().join("atlas-mobile-message-receipts.json")
+}
+
+fn mobile_message_receipts() -> &'static Mutex<MobileMessageReceiptState> {
+    MOBILE_MESSAGE_RECEIPTS.get_or_init(|| Mutex::new(MobileMessageReceiptState::default()))
+}
+
+fn normalize_mobile_client_message_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 160 {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn mobile_message_receipt_key(session_id: &str, client_message_id: &str) -> Option<String> {
+    let id = normalize_mobile_client_message_id(client_message_id)?;
+    if session_id.trim().is_empty() {
+        return None;
+    }
+    Some(format!("{}:{}", session_id.trim(), id))
+}
+
+fn load_mobile_message_receipts(state: &mut MobileMessageReceiptState) {
+    if state.loaded {
+        return;
+    }
+    state.loaded = true;
+    let path = mobile_message_receipt_path();
+    let Ok(raw) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(values) = serde_json::from_str::<HashMap<String, i64>>(&raw) else {
+        return;
+    };
+    let cutoff = now_ms().saturating_sub(30 * 24 * 60 * 60 * 1000);
+    state.accepted = values
+        .into_iter()
+        .filter(|(_, timestamp)| *timestamp >= cutoff)
+        .collect();
+}
+
+enum MobileMessageClaim {
+    New,
+    Accepted,
+    InFlight,
+}
+
+fn claim_mobile_message(session_id: &str, client_message_id: &str) -> MobileMessageClaim {
+    let Some(key) = mobile_message_receipt_key(session_id, client_message_id) else {
+        return MobileMessageClaim::New;
+    };
+    let Ok(mut state) = mobile_message_receipts().lock() else {
+        return MobileMessageClaim::New;
+    };
+    load_mobile_message_receipts(&mut state);
+    if state.accepted.contains_key(&key) {
+        return MobileMessageClaim::Accepted;
+    }
+    if !state.in_flight.insert(key.clone()) {
+        return MobileMessageClaim::InFlight;
+    }
+    MobileMessageClaim::New
+}
+
+fn remember_mobile_message_accepted(session_id: &str, client_message_id: &str) {
+    let Some(key) = mobile_message_receipt_key(session_id, client_message_id) else {
+        return;
+    };
+    let Ok(mut state) = mobile_message_receipts().lock() else {
+        return;
+    };
+    load_mobile_message_receipts(&mut state);
+    state.in_flight.remove(&key);
+    state.accepted.insert(key, now_ms());
+    if state.accepted.len() > 2048 {
+        let mut entries = state
+            .accepted
+            .iter()
+            .map(|(key, value)| (key.clone(), *value))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(_, value)| *value);
+        for (key, _) in entries
+            .into_iter()
+            .take(state.accepted.len().saturating_sub(2048))
+        {
+            state.accepted.remove(&key);
+        }
+    }
+    if let Ok(raw) = serde_json::to_string(&state.accepted) {
+        let _ = write_text_atomically(&mobile_message_receipt_path(), &format!("{raw}\n"));
+    }
+}
+
+fn release_mobile_message_claim(session_id: &str, client_message_id: &str) {
+    let Some(key) = mobile_message_receipt_key(session_id, client_message_id) else {
+        return;
+    };
+    let Ok(mut state) = mobile_message_receipts().lock() else {
+        return;
+    };
+    load_mobile_message_receipts(&mut state);
+    state.in_flight.remove(&key);
+}
+
+fn mobile_sync_response(since_ms: i64, requested_epoch: Option<&str>, after_seq: u64) -> MobileSyncResponse {
     let sessions = list_sessions_sync().unwrap_or_default();
     let _ = mobile_runtime_changed_since(&sessions, since_ms);
+    let session_messages = sessions
+        .iter()
+        .map(|session| (session.id.clone(), mobile_session_messages(session)))
+        .collect::<Vec<_>>();
+    let (sync_epoch, next_seq, oldest_seq) = mobile_sync_metadata();
+    let (reset, gap) = mobile_sync_window_flags(
+        requested_epoch,
+        &sync_epoch,
+        after_seq,
+        next_seq,
+        oldest_seq,
+    );
+    let include_all = reset || gap;
     let mut events = Vec::new();
-    for session in &sessions {
-        let messages = mobile_session_messages(session)
+    for (session_id, messages) in session_messages {
+        let messages = messages
             .into_iter()
-            .filter(|message| message.timestamp_ms > since_ms)
+            .filter(|message| {
+                include_all
+                    || if after_seq > 0 && requested_epoch == Some(sync_epoch.as_str()) {
+                        message.seq > after_seq
+                    } else {
+                        message.timestamp_ms > since_ms
+                    }
+            })
             .collect::<Vec<_>>();
         if !messages.is_empty() {
             events.push(MobileSessionEventBatch {
-                session_id: session.id.clone(),
+                session_id,
                 messages,
             });
         }
     }
     MobileSyncResponse {
         cursor_ms: now_ms(),
+        sync_epoch,
+        next_seq,
+        reset,
+        gap,
         snapshot: mobile_status_snapshot(),
         sessions,
         events,
     }
 }
 
-fn mobile_sync_has_changes(since_ms: i64) -> bool {
+fn mobile_sync_has_changes(since_ms: i64, requested_epoch: Option<&str>, after_seq: u64) -> bool {
     let Ok(sessions) = list_sessions_sync() else {
         return false;
     };
+    let (sync_epoch, next_seq, _) = mobile_sync_metadata();
+    if requested_epoch
+        .filter(|epoch| !epoch.trim().is_empty())
+        .map(|epoch| epoch != sync_epoch)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if after_seq > 0 && next_seq > after_seq {
+        return true;
+    }
     if mobile_runtime_changed_since(&sessions, since_ms) {
         return true;
     }
@@ -1792,6 +2332,9 @@ fn mobile_runtime_changed_since(sessions: &[SessionRecord], since_ms: i64) -> bo
         .collect::<std::collections::HashSet<_>>();
     state
         .fingerprints
+        .retain(|session_id, _| active_ids.contains(session_id.as_str()));
+    state
+        .raw_messages
         .retain(|session_id, _| active_ids.contains(session_id.as_str()));
     let mut changed = false;
     for session in sessions {
@@ -1826,13 +2369,18 @@ fn mobile_runtime_changed_since(sessions: &[SessionRecord], since_ms: i64) -> bo
     changed
 }
 
-fn wait_for_mobile_sync(since_ms: i64, wait_ms: u64) {
+fn wait_for_mobile_sync(
+    since_ms: i64,
+    requested_epoch: Option<&str>,
+    after_seq: u64,
+    wait_ms: u64,
+) {
     if since_ms <= 0 || wait_ms == 0 {
         return;
     }
     let deadline = Instant::now() + Duration::from_millis(wait_ms.min(25_000));
     while Instant::now() < deadline {
-        if mobile_sync_has_changes(since_ms) {
+        if mobile_sync_has_changes(since_ms, requested_epoch, after_seq) {
             return;
         }
         thread::sleep(Duration::from_millis(250));
@@ -1861,11 +2409,18 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         let since_ms = query_parameter(&url, "since")
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(0);
+        let requested_epoch = query_parameter(&url, "epoch");
+        let after_seq = query_parameter(&url, "after")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
         let wait_ms = query_parameter(&url, "wait")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
-        wait_for_mobile_sync(since_ms, wait_ms);
-        let _ = request.respond(bridge_json_response(&mobile_sync_response(since_ms), 200));
+        wait_for_mobile_sync(since_ms, requested_epoch.as_deref(), after_seq, wait_ms);
+        let _ = request.respond(bridge_json_response(
+            &mobile_sync_response(since_ms, requested_epoch.as_deref(), after_seq),
+            200,
+        ));
         return;
     }
     if method == Method::Get && path == "/v1/status" {
@@ -1896,8 +2451,8 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         }
         return;
     }
-    if method == Method::Get && url.starts_with("/v1/sessions/") && url.ends_with("/messages") {
-        let Some(session_id) = url
+    if method == Method::Get && path.starts_with("/v1/sessions/") && path.ends_with("/messages") {
+        let Some(session_id) = path
             .strip_prefix("/v1/sessions/")
             .and_then(|value| value.strip_suffix("/messages"))
         else {
@@ -1914,10 +2469,18 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             ));
             return;
         };
-        let _ = request.respond(bridge_json_response(
-            &mobile_session_messages(&session),
-            200,
-        ));
+        let after_seq = query_parameter(&url, "after")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let limit = query_parameter(&url, "limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let messages = mobile_session_messages(&session)
+            .into_iter()
+            .filter(|message| after_seq == 0 || message.seq > after_seq)
+            .take(if limit == 0 { usize::MAX } else { limit.min(10_000) })
+            .collect::<Vec<_>>();
+        let _ = request.respond(bridge_json_response(&messages, 200));
         return;
     }
     if method != Method::Post {
@@ -1963,6 +2526,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             .strip_suffix("/activate")
             .or_else(|| value.strip_suffix("/input"))
             .or_else(|| value.strip_suffix("/message"))
+            .or_else(|| value.strip_suffix("/dictation"))
     }) else {
         let _ = request.respond(bridge_json_response(
             &serde_json::json!({"error": "not found"}),
@@ -1977,6 +2541,137 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         ));
         return;
     };
+    if url.ends_with("/dictation") {
+        let chunk = match serde_json::from_str::<MobileDictationChunkRequest>(&body) {
+            Ok(chunk) if chunk.seq > 0 && chunk.text.chars().count() <= 16_000 => chunk,
+            _ => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"ok": false, "error": "invalid dictation chunk"}),
+                    400,
+                ));
+                return;
+            }
+        };
+        let last_seq = MOBILE_SYNC_STATE
+            .get_or_init(|| Mutex::new(MobileSyncState::default()))
+            .lock()
+            .ok()
+            .map(|mut state| {
+                load_mobile_sync_state(&mut state);
+                state.dictation_last_seq.get(session_id).copied().unwrap_or(0)
+            })
+            .unwrap_or(0);
+        if dictation_sequence_is_gap(last_seq, chunk.seq) {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"ok": false, "error": "dictation sequence gap", "ackSeq": last_seq}),
+                409,
+            ));
+            return;
+        }
+        if chunk.seq <= last_seq {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"ok": true, "deduplicated": true, "ackSeq": last_seq, "finalSeq": last_seq}),
+                200,
+            ));
+            return;
+        }
+        let receipt_id = if chunk.client_message_id.trim().is_empty() {
+            format!("dictation:{}", chunk.seq)
+        } else {
+            chunk.client_message_id.clone()
+        };
+        match claim_mobile_message(session_id, &receipt_id) {
+            MobileMessageClaim::Accepted => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"ok": true, "deduplicated": true, "ackSeq": chunk.seq, "finalSeq": chunk.seq}),
+                    200,
+                ));
+                return;
+            }
+            MobileMessageClaim::InFlight => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"ok": false, "error": "dictation chunk already in progress", "ackSeq": last_seq}),
+                    409,
+                ));
+                return;
+            }
+            MobileMessageClaim::New => {}
+        }
+        let result = if !chunk.final_chunk || chunk.text.trim().is_empty() {
+            Ok(())
+        } else if queue_codex_message(&session, &chunk.text) {
+            Ok(())
+        } else if session.running {
+            send_text_to_terminal(&session, &chunk.text, true)
+        } else {
+            match launch_codex_resume_terminal(&session) {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    let mut queued = false;
+                    for delay in [250, 500, 750, 1_000] {
+                        thread::sleep(Duration::from_millis(delay));
+                        if let Some(refreshed) = find_session(session_id) {
+                            if queue_codex_message(&refreshed, &chunk.text) {
+                                queued = true;
+                                break;
+                            }
+                        }
+                    }
+                    if queued {
+                        Ok(())
+                    } else {
+                        Err("Codex resume window opened, but dictation could not be queued".to_string())
+                    }
+                }
+            }
+        };
+        if result.is_ok() {
+            if let Ok(mut state) = MOBILE_SYNC_STATE
+                .get_or_init(|| Mutex::new(MobileSyncState::default()))
+                .lock()
+            {
+                load_mobile_sync_state(&mut state);
+                state.dictation_last_seq.insert(session_id.to_string(), chunk.seq);
+                let _ = persist_mobile_sync_state(&state);
+            }
+            remember_mobile_message_accepted(session_id, &receipt_id);
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"ok": true, "ackSeq": chunk.seq, "finalSeq": chunk.final_chunk.then_some(chunk.seq)}),
+                200,
+            ));
+        } else {
+            release_mobile_message_claim(session_id, &receipt_id);
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"ok": false, "error": result.err().unwrap_or_else(|| "dictation failed".to_string()), "ackSeq": last_seq}),
+                409,
+            ));
+        }
+        return;
+    }
+    let request_body = serde_json::from_str::<MobileSessionInputRequest>(&body).ok();
+    let client_message_id = request_body
+        .as_ref()
+        .and_then(|value| normalize_mobile_client_message_id(&value.client_message_id));
+    let claim = client_message_id
+        .as_deref()
+        .map(|id| claim_mobile_message(session_id, id));
+    match claim.as_ref() {
+        Some(MobileMessageClaim::Accepted) => {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"ok": true, "deduplicated": true}),
+                200,
+            ));
+            return;
+        }
+        Some(MobileMessageClaim::InFlight) => {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"ok": false, "error": "message delivery already in progress"}),
+                409,
+            ));
+            return;
+        }
+        _ => {}
+    }
     let result = if url.ends_with("/activate") {
         if session.running {
             focus_session_terminal(&session).or_else(|_| launch_codex_resume_terminal(&session))
@@ -1984,9 +2679,9 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             launch_codex_resume_terminal(&session)
         }
     } else {
-        let input = serde_json::from_str::<MobileSessionInputRequest>(&body)
-            .ok()
-            .map(|request| request.text)
+        let input = request_body
+            .as_ref()
+            .map(|request| request.text.clone())
             .filter(|text| !text.trim().is_empty())
             .unwrap_or_else(|| "继续".to_string());
         if session.running {
@@ -2030,10 +2725,21 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             )
         }
     };
+    let succeeded = result.is_ok();
     let response = match result {
-        Ok(()) => bridge_json_response(&serde_json::json!({"ok": true}), 200),
+        Ok(()) => {
+            if let Some(client_message_id) = client_message_id.as_deref() {
+                remember_mobile_message_accepted(session_id, client_message_id);
+            }
+            bridge_json_response(&serde_json::json!({"ok": true}), 200)
+        }
         Err(error) => bridge_json_response(&serde_json::json!({"ok": false, "error": error}), 409),
     };
+    if !succeeded {
+        if let Some(client_message_id) = client_message_id.as_deref() {
+            release_mobile_message_claim(session_id, client_message_id);
+        }
+    }
     let _ = request.respond(response);
 }
 
@@ -5715,9 +6421,9 @@ fn send_session_input(
     let Some(session) = find_session(&session_id) else {
         return Ok(false);
     };
-    if !session.running {
-        return Ok(false);
-    }
+    // `codex queue` is deliberately allowed for an exited thread too. This
+    // persists the prompt without opening or focusing a terminal; the user
+    // can activate the queued thread separately when needed.
     if queue_codex_message(&session, &input) {
         return Ok(true);
     }
@@ -5982,6 +6688,42 @@ fn open_url(url: String) -> Result<bool, String> {
     Ok(true)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn open_workspace(path: String) -> Result<bool, String> {
+    let requested = PathBuf::from(path.trim());
+    if requested.as_os_str().is_empty() {
+        return Err("workspace path is empty".to_string());
+    }
+    let workspace = requested
+        .canonicalize()
+        .map_err(|error| format!("workspace path is unavailable: {error}"))?;
+    if !workspace.is_dir() {
+        return Err("workspace path is not a directory".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(&workspace)
+            .spawn()
+            .map_err(|error| format!("open workspace: {error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&workspace)
+            .spawn()
+            .map_err(|error| format!("open workspace: {error}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&workspace)
+            .spawn()
+            .map_err(|error| format!("open workspace: {error}"))?;
+    }
+    Ok(true)
+}
+
 struct VoiceModelSpec {
     id: &'static str,
     archive_url: &'static str,
@@ -6004,16 +6746,10 @@ const VOICE_TTS_MODEL: VoiceModelSpec = VoiceModelSpec {
     required_files: &["model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data"],
 };
 
-fn paseo_home_path() -> PathBuf {
-    std::env::var_os("PASEO_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".paseo"))
-}
-
 fn voice_models_dir() -> PathBuf {
-    std::env::var_os("PASEO_LOCAL_MODELS_DIR")
+    std::env::var_os("ATLAS_VOICE_MODELS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| paseo_home_path().join("models").join("local-speech"))
+        .unwrap_or_else(|| codex_home().join("atlas-voice").join("models"))
 }
 
 fn voice_model_dir(spec: &VoiceModelSpec) -> PathBuf {
@@ -6030,72 +6766,53 @@ fn voice_model_ready(spec: &VoiceModelSpec) -> bool {
     })
 }
 
-fn paseo_cli_version() -> Option<String> {
-    let path = executable_candidate("paseo")?;
-    let output = output_command(&path.to_string_lossy(), &["--version".to_string()]).ok()?;
-    if !output.status.success() {
-        return None;
+const ATLAS_VOICE_SERVICE_VERSION: &str = "0.1.0";
+const ATLAS_VOICE_PORT: u16 = 15731;
+
+fn atlas_voice_daemon_ready() -> bool {
+    let address = format!("127.0.0.1:{ATLAS_VOICE_PORT}");
+    let Ok(address) = address.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(350)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(350)));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    let mut response = [0_u8; 128];
+    let Ok(size) = stream.read(&mut response) else {
+        return false;
+    };
+    String::from_utf8_lossy(&response[..size]).starts_with("HTTP/1.1 200")
 }
 
 fn voice_service_status() -> VoiceServiceStatus {
-    let paseo_version = paseo_cli_version();
-    let paseo_installed = paseo_version.is_some();
     let stt_ready = voice_model_ready(&VOICE_STT_MODEL);
     let tts_ready = voice_model_ready(&VOICE_TTS_MODEL);
-    let error = if !paseo_installed {
-        Some("未检测到 Paseo CLI".to_string())
-    } else if !stt_ready || !tts_ready {
+    let daemon_running = atlas_voice_daemon_ready();
+    let error = if !stt_ready || !tts_ready {
         Some("本地语音模型尚未完整安装".to_string())
+    } else if !daemon_running {
+        Some("Atlas 语音服务未运行".to_string())
     } else {
         None
     };
     VoiceServiceStatus {
-        paseo_installed,
-        paseo_version,
-        daemon_running: paseo_installed && paseo_daemon_ready(),
+        service_installed: stt_ready && tts_ready,
+        service_version: Some(ATLAS_VOICE_SERVICE_VERSION.to_string()),
+        daemon_running,
         stt_ready,
         tts_ready,
         models_dir: voice_models_dir().to_string_lossy().to_string(),
-        provider: "Paseo local · Sherpa ONNX".to_string(),
-        ready: paseo_installed && stt_ready && tts_ready,
+        provider: "Atlas local · Parakeet + Kokoro".to_string(),
+        ready: stt_ready && tts_ready && daemon_running,
         error,
     }
-}
-
-fn install_paseo_cli() -> Result<(), String> {
-    if executable_candidate("paseo").is_some() {
-        return Ok(());
-    }
-    let output = command_for(
-        "npm",
-        &[
-            "install".to_string(),
-            "--global".to_string(),
-            "@getpaseo/cli@latest".to_string(),
-        ],
-    )?
-    .stdin(Stdio::null())
-    .output()
-    .map_err(|error| format!("安装 Paseo CLI 失败: {error}"))?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!("npm 安装 Paseo 失败: {}", output.status)
-        } else {
-            detail
-        });
-    }
-    if executable_candidate("paseo").is_none() {
-        return Err("Paseo CLI 安装完成，但系统仍找不到 paseo 命令".to_string());
-    }
-    Ok(())
 }
 
 fn extract_voice_archive(archive_path: &Path, models_dir: &Path) -> Result<(), String> {
@@ -6379,18 +7096,105 @@ async fn download_voice_model(spec: &'static VoiceModelSpec, step: u8) -> Result
     Ok(())
 }
 
+fn atlas_voice_json_response(payload: Value, status: u16) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{\"ok\":false}".to_vec());
+    Response::from_data(body)
+        .with_status_code(status)
+        .with_header(
+            Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..])
+                .expect("valid voice response header"),
+        )
+}
+
+/// Atlas owns this local process. It is intentionally a small HTTP/IPC
+/// boundary: model lifecycle and health are managed here, while native STT or
+/// TTS workers can be attached to the documented endpoints independently of
+/// Paseo. Binding to loopback keeps microphone/model traffic local.
+fn run_atlas_voice_daemon() -> Result<(), String> {
+    let server = Server::http(("127.0.0.1", ATLAS_VOICE_PORT))
+        .map_err(|error| format!("启动 Atlas 语音服务失败: {error}"))?;
+    for mut request in server.incoming_requests() {
+        let method = request.method().clone();
+        let path = request.url().split('?').next().unwrap_or(request.url());
+        let response = match (method, path) {
+            (Method::Get, "/health") | (Method::Get, "/v1/voice/status") => {
+                let stt_ready = voice_model_ready(&VOICE_STT_MODEL);
+                let tts_ready = voice_model_ready(&VOICE_TTS_MODEL);
+                atlas_voice_json_response(
+                    serde_json::json!({
+                        "ok": true,
+                        "service": "atlas-voice",
+                        "version": ATLAS_VOICE_SERVICE_VERSION,
+                        "sttReady": stt_ready,
+                        "ttsReady": tts_ready,
+                        "modelsDir": voice_models_dir().to_string_lossy(),
+                        "provider": "Atlas local · Parakeet + Kokoro"
+                    }),
+                    200,
+                )
+            }
+            (Method::Get, "/v1/voice/capabilities") => atlas_voice_json_response(
+                serde_json::json!({
+                    "ok": true,
+                    "service": "atlas-voice",
+                    "version": ATLAS_VOICE_SERVICE_VERSION,
+                    "stt": { "model": VOICE_STT_MODEL.id, "ready": voice_model_ready(&VOICE_STT_MODEL) },
+                    "tts": { "model": VOICE_TTS_MODEL.id, "ready": voice_model_ready(&VOICE_TTS_MODEL) },
+                    "endpoints": ["/v1/voice/transcribe", "/v1/voice/synthesize"]
+                }),
+                200,
+            ),
+            (Method::Post, "/v1/voice/transcribe") | (Method::Post, "/v1/voice/synthesize") => {
+                let mut discarded = Vec::new();
+                let _ = request.as_reader().read_to_end(&mut discarded);
+                atlas_voice_json_response(
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "Atlas voice worker is not available in this installation"
+                    }),
+                    501,
+                )
+            }
+            _ => atlas_voice_json_response(serde_json::json!({ "ok": false, "error": "not found" }), 404),
+        };
+        let _ = request.respond(response);
+    }
+    Ok(())
+}
+
+fn ensure_atlas_voice_daemon() -> Result<(), String> {
+    if atlas_voice_daemon_ready() {
+        return Ok(());
+    }
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("获取 Atlas 程序路径失败: {error}"))?;
+    spawn_detached(
+        &executable.to_string_lossy(),
+        &["--atlas-voice-daemon".to_string()],
+    )?;
+    for delay in [120, 240, 480, 800, 1_200, 1_800] {
+        thread::sleep(Duration::from_millis(delay));
+        if atlas_voice_daemon_ready() {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "Atlas 语音服务未在 127.0.0.1:{ATLAS_VOICE_PORT} 就绪"
+    ))
+}
+
 #[tauri::command]
 async fn get_voice_service_status() -> VoiceServiceStatus {
     tauri::async_runtime::spawn_blocking(voice_service_status)
         .await
         .unwrap_or_else(|_| VoiceServiceStatus {
-            paseo_installed: false,
-            paseo_version: None,
+            service_installed: false,
+            service_version: Some(ATLAS_VOICE_SERVICE_VERSION.to_string()),
             daemon_running: false,
             stt_ready: false,
             tts_ready: false,
             models_dir: voice_models_dir().to_string_lossy().to_string(),
-            provider: "Paseo local · Sherpa ONNX".to_string(),
+            provider: "Atlas local · Parakeet + Kokoro".to_string(),
             ready: false,
             error: Some("语音服务状态检测失败".to_string()),
         })
@@ -6410,20 +7214,15 @@ async fn install_voice_service() -> Result<VoiceServiceStatus, String> {
     set_voice_service_progress(
         "installing",
         1,
-        "正在准备 Paseo 语音服务",
+        "正在准备 Atlas 语音服务",
         0,
         None,
         Some(started_at_ms),
         None,
     );
-    if let Err(error) = tauri::async_runtime::spawn_blocking(install_paseo_cli)
-        .await
-        .map_err(|error| format!("准备 Paseo CLI 任务失败: {error}"))?
-    {
-        set_voice_service_progress("error", 1, error.clone(), 0, None, None, Some(now_ms()));
-        return Err(error);
-    }
-    set_voice_service_progress("installing", 2, "Paseo CLI 已就绪", 0, None, None, None);
+    fs::create_dir_all(voice_models_dir())
+        .map_err(|error| format!("创建 Atlas 语音模型目录失败: {error}"))?;
+    set_voice_service_progress("installing", 2, "Atlas 语音运行时已准备", 0, None, None, None);
     if let Err(error) = download_voice_model(&VOICE_STT_MODEL, 3).await {
         set_voice_service_progress("error", 3, error.clone(), 0, None, None, Some(now_ms()));
         return Err(error);
@@ -6432,10 +7231,10 @@ async fn install_voice_service() -> Result<VoiceServiceStatus, String> {
         set_voice_service_progress("error", 5, error.clone(), 0, None, None, Some(now_ms()));
         return Err(error);
     }
-    set_voice_service_progress("starting", 6, "正在启动 Paseo daemon", 0, None, None, None);
-    let daemon_result = tauri::async_runtime::spawn_blocking(ensure_paseo_daemon)
+    set_voice_service_progress("starting", 6, "正在启动 Atlas voice daemon", 0, None, None, None);
+    let daemon_result = tauri::async_runtime::spawn_blocking(ensure_atlas_voice_daemon)
         .await
-        .map_err(|error| format!("启动 Paseo daemon 任务失败: {error}"))?;
+        .map_err(|error| format!("启动 Atlas voice daemon 任务失败: {error}"))?;
     if let Err(error) = daemon_result {
         set_voice_service_progress("error", 6, error.clone(), 0, None, None, Some(now_ms()));
         return Err(error);
@@ -7090,6 +7889,69 @@ fn get_codex_info() -> CodexInfo {
     }
 }
 
+/// Reads the catalog maintained by Codex itself instead of shipping a stale
+/// model list in Atlas. The cache is refreshed by the CLI during normal use.
+/// A configured custom model is retained as a non-official option so users of
+/// CC Switch or another provider can still switch back to it.
+#[tauri::command]
+fn get_codex_models() -> Vec<CodexModelOption> {
+    let config = fs::read_to_string(codex_config_path()).unwrap_or_default();
+    let current_model = parse_toml_string(&config, "model")
+        .filter(|model| !model.trim().is_empty());
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    let cache_path = codex_home().join("models_cache.json");
+    if let Ok(raw) = fs::read_to_string(cache_path) {
+        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+            if let Some(entries) = value.get("models").and_then(Value::as_array) {
+                for entry in entries {
+                    let Some(slug) = entry.get("slug").and_then(Value::as_str)
+                        .map(str::trim).filter(|slug| !slug.is_empty()) else {
+                        continue;
+                    };
+                    let visible = entry.get("visibility")
+                        .and_then(Value::as_str)
+                        .map(|value| !value.eq_ignore_ascii_case("hide"))
+                        .unwrap_or(true);
+                    let supported = entry.get("supported_in_api")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if !visible || !supported || !seen.insert(slug.to_string()) {
+                        continue;
+                    }
+                    let display_name = entry.get("display_name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(slug)
+                        .to_string();
+                    models.push(CodexModelOption {
+                        slug: slug.to_string(),
+                        display_name,
+                        official: true,
+                        source: "codex-cache".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    if let Some(model) = current_model {
+        if seen.insert(model.clone()) {
+            models.push(CodexModelOption {
+                display_name: model.clone(),
+                slug: model,
+                official: false,
+                source: "current-config".to_string(),
+            });
+        }
+    }
+    models.sort_by(|left, right| {
+        right.official.cmp(&left.official)
+            .then_with(|| left.display_name.to_lowercase().cmp(&right.display_name.to_lowercase()))
+    });
+    models
+}
+
 #[tauri::command]
 fn get_mobile_bridge_config() -> MobileBridgeConfig {
     mobile_bridge_config()
@@ -7254,6 +8116,109 @@ fn frontmatter_value(text: &str, key: &str) -> Option<String> {
     None
 }
 
+fn normalize_repository(value: &str) -> Option<String> {
+    let mut value = value.trim().trim_matches(['"', '\'', '`']).trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    value = value.trim_matches(|character: char| {
+        matches!(character, ')' | ']' | '}' | ',' | ';' | '.')
+    }).to_string();
+    if let Some(rest) = value.strip_prefix("git@github.com:") {
+        value = format!("https://github.com/{rest}");
+    } else if let Some(rest) = value.strip_prefix("github.com/") {
+        value = format!("https://github.com/{rest}");
+    } else if let Some(index) = value.find("github.com/") {
+        value = format!("https://{}", &value[index..]);
+    } else if !value.contains("://") && value.split('/').count() == 2 {
+        value = format!("https://github.com/{value}");
+    }
+    while value.ends_with('/') {
+        value.pop();
+    }
+    if value.ends_with(".git") {
+        value.truncate(value.len() - 4);
+    }
+    if value.starts_with("http://github.com/") {
+        value = value.replacen("http://", "https://", 1);
+    }
+    if value.starts_with("https://") || value.starts_with("http://") {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn repository_from_skill_text(text: &str) -> Option<String> {
+    for key in [
+        "repository",
+        "source-url",
+        "source-repo",
+        "source",
+        "homepage",
+    ] {
+        if let Some(value) = frontmatter_value(text, key).and_then(|value| normalize_repository(&value)) {
+            return Some(value);
+        }
+    }
+    for token in text.split_whitespace() {
+        let candidate = token.trim_matches(|character: char| {
+            matches!(character, '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '"' | '\'')
+        });
+        if candidate.to_ascii_lowercase().contains("github.com/") {
+            if let Some(value) = normalize_repository(candidate) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn skill_description_zh(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "frontend-design" => "创建具有鲜明视觉风格、可直接投入生产的前端界面。".to_string(),
+        "ui-ux-pro-max" | "uiuxpromax" => "提供界面设计、布局、色彩、字体和交互体验的设计建议。".to_string(),
+        "code-review" => "从缺陷、回归风险和测试覆盖角度审查代码。".to_string(),
+        "playwright" => "使用真实浏览器验证页面交互、表单和响应式布局。".to_string(),
+        "openai-docs" => "查阅并引用 OpenAI 官方文档，处理 Codex 配置与使用问题。".to_string(),
+        "skill-creator" => "创建或更新 Codex 技能，并生成所需的目录和说明文件。".to_string(),
+        "skill-installer" => "从精选列表或 GitHub 仓库安装 Codex 技能。".to_string(),
+        "security-review" => "检查认证、授权、输入处理和信任边界中的安全风险。".to_string(),
+        "screenshot" => "采集桌面或指定窗口截图，用于问题定位和视觉验证。".to_string(),
+        "web-clone" => "根据参考网址复刻页面，并进行视觉与功能验证。".to_string(),
+        "plan" => "把复杂需求拆解为可执行的实施计划，并识别风险。".to_string(),
+        _ => format!("用于在 Codex 中执行“{name}”相关任务的技能。"),
+    }
+}
+
+fn skill_sections(content: &str) -> Vec<SkillSection> {
+    let mut sections = Vec::new();
+    let mut heading = "SKILL.md".to_string();
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            if !lines.is_empty() {
+                sections.push(SkillSection {
+                    heading: heading.clone(),
+                    content: lines.join("\n").trim().to_string(),
+                });
+                lines.clear();
+            }
+            heading = trimmed.trim_start_matches('#').trim().to_string();
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !lines.is_empty() || sections.is_empty() {
+        sections.push(SkillSection {
+            heading,
+            content: lines.join("\n").trim().to_string(),
+        });
+    }
+    sections
+}
+
 fn skill_git_command(root: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(root).args(args);
@@ -7324,6 +8289,7 @@ fn skill_record(path: &Path, root: &Path, enabled: bool) -> Option<SkillRecord> 
         .chars()
         .take(240)
         .collect::<String>();
+    let description_zh = skill_description_zh(&name);
     let version = frontmatter_value(&text, "version").unwrap_or_else(|| "local".to_string());
     let relative = path.strip_prefix(root).unwrap_or(path);
     let protected = relative
@@ -7335,10 +8301,8 @@ fn skill_record(path: &Path, root: &Path, enabled: bool) -> Option<SkillRecord> 
     let repository = git_root
         .as_deref()
         .and_then(|repo| git_output(repo, &["config", "--get", "remote.origin.url"]))
-        .filter(|value| !value.is_empty())
-        .or_else(|| frontmatter_value(&text, "repository"))
-        .or_else(|| frontmatter_value(&text, "source"))
-        .or_else(|| frontmatter_value(&text, "homepage"));
+        .and_then(|value| normalize_repository(&value))
+        .or_else(|| repository_from_skill_text(&text));
     let (update_available, update_status) = if protected {
         (None, "managed-by-codex".to_string())
     } else {
@@ -7348,6 +8312,7 @@ fn skill_record(path: &Path, root: &Path, enabled: bool) -> Option<SkillRecord> 
         name,
         version,
         description,
+        description_zh: Some(description_zh),
         source: if protected {
             "system"
         } else if enabled {
@@ -7443,10 +8408,12 @@ fn get_skill_detail(path: String) -> Result<SkillDetail, String> {
         })
         .take(100)
         .collect();
+    let sections = skill_sections(&content);
     Ok(SkillDetail {
         skill,
         content,
         files,
+        sections,
     })
 }
 
@@ -7623,6 +8590,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn run() {
+    if std::env::args().any(|arg| arg == "--atlas-voice-daemon") {
+        if let Err(error) = run_atlas_voice_daemon() {
+            eprintln!("{error}");
+        }
+        return;
+    }
     let state = Arc::new(AppState::default());
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -7646,6 +8619,11 @@ pub fn run() {
             if server_settings.auto_start && server_tunnel_key_path().exists() {
                 thread::spawn(move || {
                     let _ = start_server_tunnel_process(&server_settings);
+                });
+            }
+            if voice_model_ready(&VOICE_STT_MODEL) && voice_model_ready(&VOICE_TTS_MODEL) {
+                thread::spawn(|| {
+                    let _ = ensure_atlas_voice_daemon();
                 });
             }
             let state = app.state::<AppState>().inner().clone();
@@ -7672,12 +8650,14 @@ pub fn run() {
             set_auto_continue,
             launch_external_app,
             open_url,
+            open_workspace,
             launch_paseo,
             paseo_import_agent,
             paseo_import_all_codex_sessions,
             get_balance,
             get_cc_switch_provider_balances,
             get_codex_info,
+            get_codex_models,
             get_voice_service_status,
             get_voice_service_progress,
             install_voice_service,
@@ -7723,6 +8703,7 @@ mod runtime_probe_tests {
                 name: "test-skill".to_string(),
                 version: "local".to_string(),
                 description: "test".to_string(),
+                description_zh: Some("测试技能".to_string()),
                 source: "global".to_string(),
                 path: "C:\\skills\\test-skill".to_string(),
                 enabled: true,
@@ -7734,6 +8715,7 @@ mod runtime_probe_tests {
             },
             content: "---\nname: test-skill\n---".to_string(),
             files: vec!["SKILL.md".to_string()],
+            sections: vec![],
         };
         let value = serde_json::to_value(detail).expect("serialize skill detail");
         assert_eq!(value["skill"]["name"], "test-skill");
@@ -7762,6 +8744,67 @@ mod runtime_probe_tests {
         assert!(is_continue_prompt("  CONTINUE\n"));
         assert!(is_continue_prompt("继续"));
         assert!(!is_continue_prompt("resume"));
+    }
+
+    #[test]
+    fn mobile_message_receipts_require_a_bounded_non_empty_client_id() {
+        assert_eq!(
+            mobile_message_receipt_key("session-1", " msg-1 "),
+            Some("session-1:msg-1".to_string())
+        );
+        assert_eq!(mobile_message_receipt_key("session-1", ""), None);
+        assert_eq!(mobile_message_receipt_key("", "msg-1"), None);
+        assert_eq!(
+            normalize_mobile_client_message_id(&"x".repeat(161)),
+            None
+        );
+    }
+
+    #[test]
+    fn mobile_sync_window_detects_epoch_reset_and_sequence_gap() {
+        assert_eq!(mobile_sync_window_flags(Some("old"), "new", 7, 12, 1), (true, false));
+        assert_eq!(mobile_sync_window_flags(Some("same"), "same", 2, 12, 5), (false, true));
+        assert_eq!(mobile_sync_window_flags(Some("same"), "same", 12, 12, 5), (false, false));
+        assert_eq!(mobile_sync_window_flags(None, "same", 0, 12, 5), (false, false));
+    }
+
+    #[test]
+    fn dictation_chunks_must_be_contiguous() {
+        assert!(!dictation_sequence_is_gap(0, 1));
+        assert!(!dictation_sequence_is_gap(7, 8));
+        assert!(dictation_sequence_is_gap(7, 9));
+        assert!(!dictation_sequence_is_gap(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn mobile_message_contract_contains_sequence_and_structured_fields() {
+        let message = MobileSessionMessage {
+            id: "session:event".to_string(),
+            role: "tool".to_string(),
+            text: "running cargo check".to_string(),
+            timestamp_ms: 1_700_000_000_000,
+            kind: "item_started".to_string(),
+            seq: 42,
+            seq_start: 42,
+            seq_end: 42,
+            source_seq_ranges: vec![MobileSeqRange {
+                source: "rollout".to_string(),
+                start: 42,
+                end: 42,
+            }],
+            turn_id: Some("turn-1".to_string()),
+            call_id: Some("call-1".to_string()),
+            tool_status: Some("running".to_string()),
+            tool_detail: Some("cargo check".to_string()),
+            approval_id: None,
+            approval_options: Vec::new(),
+        };
+        let value = serde_json::to_value(message).expect("serialize mobile message");
+        assert_eq!(value["seq"], 42);
+        assert_eq!(value["seqStart"], 42);
+        assert_eq!(value["sourceSeqRanges"][0]["source"], "rollout");
+        assert_eq!(value["callId"], "call-1");
+        assert_eq!(value["toolStatus"], "running");
     }
 
     #[test]

@@ -26,6 +26,7 @@ import {
   Layers3,
   LayoutDashboard,
   ListFilter,
+  ListTree,
   LoaderCircle,
   Maximize2,
   Minus,
@@ -55,8 +56,8 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
-import type { CcSwitchProviderBalance, CodexHookStatus, DesktopCommandError, DesktopSessionRecord, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
+import { checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendSessionInput, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
 import '@fontsource-variable/geist'
 import './styles.css'
@@ -67,6 +68,7 @@ type Session = {
   preview: string
   branch: string
   folder: string
+  cwd?: string
   model: string
   permission: string
   updated: string
@@ -229,6 +231,21 @@ const navItems = [
 
 type UiLanguage = 'zh' | 'en'
 
+type FloatingSkin = 'classic' | 'macintosh' | 'mono' | 'mint' | 'amber' | 'blue'
+
+const floatingSkinOptions: Array<{ id: FloatingSkin; labelZh: string; labelEn: string }> = [
+  { id: 'classic', labelZh: '经典白', labelEn: 'Classic' },
+  { id: 'macintosh', labelZh: '初代 Mac', labelEn: 'Macintosh' },
+  { id: 'mono', labelZh: '单色终端', labelEn: 'Mono' },
+  { id: 'mint', labelZh: '薄荷绿', labelEn: 'Mint' },
+  { id: 'amber', labelZh: '琥珀屏', labelEn: 'Amber' },
+  { id: 'blue', labelZh: '蓝灰屏', labelEn: 'Blue' },
+]
+
+function normalizeFloatingSkin(value: unknown): FloatingSkin {
+  return floatingSkinOptions.some((option) => option.id === value) ? value as FloatingSkin : 'classic'
+}
+
 const uiText = {
   zh: {
     navigate: '导航', collections: '收藏', activeNow: '当前运行', needsReview: '待处理', pinned: '已固定',
@@ -261,7 +278,7 @@ const uiText = {
     recoveryGuardrails: '恢复保护', pauseBalance: '暂停余额不足并在 3 次重试后停止', on: '开启', off: '关闭', desktopStatusObject: '桌面状态组件', keepObject: '保持小组件置顶显示',
     codexVersion: 'Codex 版本', detectedCli: '从已安装的 CLI 检测', installedBadge: '已安装', detecting: '检测中…', readyResume: '可执行 resume 命令', checkUpdates: '用 npm 更新', atlasProject: 'Codex Atlas', atlasProjectDescription: '项目主页与 GitHub Release', openProject: '打开项目', openRelease: '打开 Release',
     packageManager: 'npm install -g @openai/codex@latest', codexStatusHook: 'Codex 状态 Hook', officialEvents: '优先读取官方事件，再用进程与 rollout 兜底',
-    voiceService: '本地语音服务', voiceServiceDescription: 'Paseo 本地 STT / TTS', voiceServiceReady: '语音服务已就绪', voiceServiceMissing: '尚未安装本地语音', voiceServiceDaemonStopped: 'Paseo daemon 未运行', voiceServiceInstalling: '正在安装…', installVoiceService: '安装', repairVoiceService: '修复', voiceServiceDaemon: 'Paseo daemon', voiceServiceModels: '语音模型', voiceServiceProvider: '本地模型 · Parakeet + Kokoro', voiceServiceChecking: '检测中…', voiceServiceInstallFailed: '语音服务安装失败',
+    voiceService: 'Atlas 语音服务', voiceServiceDescription: 'Atlas 本地 STT / TTS', voiceServiceReady: '语音服务已就绪', voiceServiceMissing: '尚未安装本地语音', voiceServiceDaemonStopped: 'Atlas 语音服务未运行', voiceServiceInstalling: '正在安装…', installVoiceService: '安装', repairVoiceService: '修复', voiceServiceDaemon: 'Atlas voice daemon', voiceServiceModels: '语音模型', voiceServiceProvider: '本地模型 · Parakeet + Kokoro', voiceServiceChecking: '检测中…', voiceServiceInstallFailed: '语音服务安装失败',
     connected: '状态正常', configuredWaiting: '等待首次事件', notConfigured: '未配置', sessionEvents: '个会话事件', refreshHook: '刷新 Hook 状态', recoverSession: '恢复监控', runningNow: '正在运行',
     repairHook: '重新安装 / 修复', installHook: '安装状态 Hook', browserWindowControls: '浏览器预览不支持窗口控制', desktopWindowUnavailable: '桌面窗口命令尚未连接',
     desktopNotificationsOn: '桌面通知已开启', desktopNotificationsOff: '桌面通知已关闭', browserPreviewSessions: '浏览器预览使用演示会话', noReadableSessions: '未找到可读的 Codex 会话',
@@ -275,7 +292,7 @@ const uiText = {
     widgetVisible: '正在桌面显示', widgetHidden: '当前已隐藏', showWidget: '显示悬浮窗', hideWidget: '隐藏悬浮窗', floatingControls: '悬浮窗设置',
     floatingWidget: '桌面悬浮组件', floatingWidgetDescription: '置顶显示会话状态和快捷操作', showOnLaunch: '启动时显示', showOnLaunchDescription: 'Atlas 启动后自动显示桌面小组件',
     floatingNotifications: '异常提醒', floatingNotificationsDescription: '余额不足或自动恢复停止时发送系统通知', quickActions: '快捷操作', resumeActive: '继续活动会话', alwaysOnTop: '始终置顶', alwaysOnTopDescription: '让 CRT 保持在其他窗口上方', showOutput: '显示最新输出', showOutputDescription: '在屏幕中保留 Codex 最新内容', autoPickSession: '自动跟随活跃会话', autoPickSessionDescription: '哪个会话有变化就显示哪个', floatingScale: '组件尺寸', floatingOpacity: '组件透明度', rightClickMenu: '右键快捷菜单', rightClickMenuDescription: '右键打开激活、输入和主窗口操作', small: '小', medium: '标准', large: '大',
-    floatingCrtPreview: 'CRT 预览', floatingCrtPreviewDescription: '桌面悬浮窗使用同一方形 CRT 形态',
+    floatingCrtPreview: 'CRT 预览', floatingCrtPreviewDescription: '桌面悬浮窗使用当前外形和皮肤', floatingSkin: 'CRT 外形与皮肤', floatingSkinDescription: '选择桌面窗口和预览共用的外观', skinClassic: '经典白', skinMacintosh: '初代 Mac', skinMono: '单色终端', skinMint: '薄荷绿', skinAmber: '琥珀屏', skinBlue: '蓝灰屏', quickInputPlaceholder: '点击屏幕输入消息…', quickInputSubmit: '提交消息', modelMenu: '模型', permissionMenu: 'CLI 权限', currentModel: '当前模型', officialModel: 'Codex 官方', configuredModel: '当前配置',
     mobileBridge: 'Android 伴侣', mobileBridgeDescription: '局域网优先，固定隧道作为备用连接', bridgeUrl: 'Bridge 地址', bridgeToken: '访问令牌', copyBridge: '复制连接信息', bridgeCopied: '连接信息已复制', bridgeOffline: 'Bridge 未启动', bridgeLan: '局域网', bridgeTunnel: '固定隧道', bridgeActive: '当前连接', bridgeModeLan: '局域网优先', bridgeModeTunnel: '隧道优先', tunnelUrl: '固定 Tunnel 地址', tunnelToken: 'Tunnel token', tunnelName: 'Tunnel 名称', cloudflaredPath: 'cloudflared 路径', saveBridge: '保存连接', startTunnel: '启动隧道', stopTunnel: '停止隧道', tunnelRunning: '隧道运行中', tunnelStopped: '隧道未运行', tunnelNotConfigured: '未配置固定隧道', tunnelAutoStart: 'Atlas 启动时自动开启隧道', scanToConnect: '扫码连接 Android', bridgePairingHint: '扫码后优先尝试局域网，离开局域网自动切换固定隧道', serverTunnel: '我的服务器通道', serverTunnelDescription: 'SSH 部署服务器通道；Cloudflare 为可选增强', serverHost: 'Host / IP 地址', serverPort: 'SSH 端口', serverUsername: '用户名', serverPassword: '密码', cloudflareToken: 'Cloudflare Tunnel token（可选）', serverRemotePort: '服务器 Bridge 端口', rememberPassword: '记住密码', installAndConnect: '部署', serverInstalling: '正在部署…', serverRunning: '服务器通道运行中', serverStopped: '服务器通道未运行', serverNotConfigured: '尚未部署服务器通道', serverKeyHint: '留空 Cloudflare 字段时使用服务器公网地址直连；部署后使用专用 SSH 密钥自动重连',
     noActiveSession: '当前没有活动会话', activeSession: '活动', waiting: '等待', blocked: '阻塞', otherChoice: '其他', otherChoicePlaceholder: '输入自定义回复', submitOtherChoice: '提交', launchPreferenceOn: '已设为启动时显示', launchPreferenceOff: '已取消启动时显示',
   },
@@ -310,7 +327,7 @@ const uiText = {
     recoveryGuardrails: 'Recovery guardrails', pauseBalance: 'Pause balance failures and stop after 3 retries', on: 'On', off: 'Off', desktopStatusObject: 'Desktop status object', keepObject: 'Keep the small status object above other apps',
     codexVersion: 'Codex version', detectedCli: 'Detected from the installed CLI', installedBadge: 'INSTALLED', detecting: 'Detecting…', readyResume: 'Ready for resume commands', checkUpdates: 'Update with npm', atlasProject: 'Codex Atlas', atlasProjectDescription: 'Project home and GitHub releases', openProject: 'Open project', openRelease: 'Open Release',
     packageManager: 'npm install -g @openai/codex@latest', codexStatusHook: 'Codex status hook', officialEvents: 'Official events first, with process and rollout fallbacks',
-    voiceService: 'Local voice service', voiceServiceDescription: 'Paseo local STT / TTS', voiceServiceReady: 'Voice service is ready', voiceServiceMissing: 'Local voice is not installed', voiceServiceDaemonStopped: 'Paseo daemon is not running', voiceServiceInstalling: 'Installing…', installVoiceService: 'Install', repairVoiceService: 'Repair', voiceServiceDaemon: 'Paseo daemon', voiceServiceModels: 'Voice models', voiceServiceProvider: 'Local models · Parakeet + Kokoro', voiceServiceChecking: 'Checking…', voiceServiceInstallFailed: 'Voice service installation failed',
+    voiceService: 'Atlas voice service', voiceServiceDescription: 'Atlas local STT / TTS', voiceServiceReady: 'Voice service is ready', voiceServiceMissing: 'Local voice is not installed', voiceServiceDaemonStopped: 'Atlas voice service is not running', voiceServiceInstalling: 'Installing…', installVoiceService: 'Install', repairVoiceService: 'Repair', voiceServiceDaemon: 'Atlas voice daemon', voiceServiceModels: 'Voice models', voiceServiceProvider: 'Local models · Parakeet + Kokoro', voiceServiceChecking: 'Checking…', voiceServiceInstallFailed: 'Voice service installation failed',
     connected: 'Monitoring', configuredWaiting: 'Waiting for first event', notConfigured: 'Not configured', sessionEvents: 'session events', refreshHook: 'Refresh hook status', recoverSession: 'Recover monitor', runningNow: 'Running now',
     repairHook: 'Repair hook', installHook: 'Install status hook', browserWindowControls: 'Window controls are unavailable in browser preview', desktopWindowUnavailable: 'Desktop window command is unavailable',
     desktopNotificationsOn: 'Desktop notifications on', desktopNotificationsOff: 'Desktop notifications off', browserPreviewSessions: 'Browser preview uses demo sessions', noReadableSessions: 'No readable Codex sessions found',
@@ -324,7 +341,7 @@ const uiText = {
     widgetVisible: 'Visible on desktop', widgetHidden: 'Currently hidden', showWidget: 'Show floating window', hideWidget: 'Hide floating window', floatingControls: 'Floating window settings',
     floatingWidget: 'Desktop floating widget', floatingWidgetDescription: 'Keep session status and quick actions above other apps', showOnLaunch: 'Show on launch', showOnLaunchDescription: 'Show the desktop widget when Atlas starts',
     floatingNotifications: 'Incident alerts', floatingNotificationsDescription: 'Send a system notification for low balance or stopped recovery', quickActions: 'Quick actions', resumeActive: 'Resume active session', alwaysOnTop: 'Always on top', alwaysOnTopDescription: 'Keep the CRT above other windows', showOutput: 'Show latest output', showOutputDescription: 'Keep the newest Codex content on screen', autoPickSession: 'Follow active session', autoPickSessionDescription: 'Show whichever session is changing', floatingScale: 'Widget size', floatingOpacity: 'Widget opacity', rightClickMenu: 'Right-click menu', rightClickMenuDescription: 'Open activate, input, and main-window actions', small: 'Small', medium: 'Standard', large: 'Large',
-    floatingCrtPreview: 'CRT preview', floatingCrtPreviewDescription: 'The desktop widget uses the same square CRT shape',
+    floatingCrtPreview: 'CRT preview', floatingCrtPreviewDescription: 'The desktop widget uses the selected form and skin', floatingSkin: 'CRT form and skin', floatingSkinDescription: 'Use one appearance for the preview and desktop window', skinClassic: 'Classic', skinMacintosh: 'Macintosh', skinMono: 'Mono terminal', skinMint: 'Mint', skinAmber: 'Amber', skinBlue: 'Blue gray', quickInputPlaceholder: 'Click the screen to type…', quickInputSubmit: 'Send message', modelMenu: 'Model', permissionMenu: 'CLI permission', currentModel: 'Current model', officialModel: 'Codex official', configuredModel: 'Current config',
     mobileBridge: 'Android companion', mobileBridgeDescription: 'Prefer LAN, then fall back to a fixed tunnel', bridgeUrl: 'Bridge URL', bridgeToken: 'Access token', copyBridge: 'Copy connection info', bridgeCopied: 'Connection info copied', bridgeOffline: 'Bridge is offline', bridgeLan: 'LAN', bridgeTunnel: 'Fixed tunnel', bridgeActive: 'Active connection', bridgeModeLan: 'Prefer LAN', bridgeModeTunnel: 'Prefer tunnel', tunnelUrl: 'Fixed Tunnel URL', tunnelToken: 'Tunnel token', tunnelName: 'Tunnel name', cloudflaredPath: 'cloudflared path', saveBridge: 'Save connection', startTunnel: 'Start tunnel', stopTunnel: 'Stop tunnel', tunnelRunning: 'Tunnel running', tunnelStopped: 'Tunnel stopped', tunnelNotConfigured: 'Fixed tunnel is not configured', tunnelAutoStart: 'Start tunnel when Atlas launches', scanToConnect: 'Scan to connect Android', bridgePairingHint: 'The phone tries LAN first and switches to the fixed tunnel outside your network', serverTunnel: 'My server tunnel', serverTunnelDescription: 'Deploy a server channel over SSH; Cloudflare is optional', serverHost: 'Host / IP address', serverPort: 'SSH port', serverUsername: 'Username', serverPassword: 'Password', cloudflareToken: 'Cloudflare Tunnel token (optional)', serverRemotePort: 'Server Bridge port', rememberPassword: 'Remember password', installAndConnect: 'Deploy', serverInstalling: 'Deploying…', serverRunning: 'Server tunnel running', serverStopped: 'Server tunnel stopped', serverNotConfigured: 'Server tunnel is not deployed', serverKeyHint: 'Leave Cloudflare fields empty for direct public-server access; a dedicated SSH key is used for reconnects',
     noActiveSession: 'No active session right now', activeSession: 'Active', waiting: 'Waiting', blocked: 'Blocked', otherChoice: 'Other', otherChoicePlaceholder: 'Enter a custom response', submitOtherChoice: 'Submit', launchPreferenceOn: 'Will show when Atlas starts', launchPreferenceOff: 'Will stay hidden when Atlas starts',
   },
@@ -506,6 +523,7 @@ function mapDesktopSession(record: DesktopSessionRecord, index: number): Session
     preview: record.preview || record.searchText || 'No preview available',
     branch,
     folder,
+    cwd: record.cwd,
     model: record.model || 'model not detected',
     permission: record.permission || 'Workspace write',
     updated: relativeUpdated(record.updatedAtMs),
@@ -675,6 +693,7 @@ function App() {
       'toggle_maximize_window',
       'close_main_window',
       'show_main_window',
+      'open_workspace',
     ])
     const onCommandError = (event: Event) => {
       const detail = (event as CustomEvent<DesktopCommandError>).detail
@@ -1183,6 +1202,16 @@ function App() {
     })
   }
 
+  const openSessionWorkspace = (session: Session) => {
+    if (!session.cwd) {
+      showToast(language === 'zh' ? '该会话没有可用的工作目录' : 'This session has no readable workspace path')
+      return
+    }
+    void openWorkspacePath(session.cwd).then((opened) => {
+      if (!opened) showToast(language === 'zh' ? '无法打开工作区目录' : 'Unable to open the workspace directory')
+    })
+  }
+
   const createSession = async (request: NewCodexSessionRequest) => {
     const created = await createCodexSession(request)
     if (created) {
@@ -1259,7 +1288,7 @@ function App() {
             loadState={sessionLoadState}
             onCreate={() => setNewSessionOpen(true)}
           />}
-          {activeNav === 'sessions' && <SessionsView language={language} sessions={filteredSessions} query={query} setQuery={setQuery} selected={selected} setSelected={setSelected} activateSession={activateSession} inputContinue={inputContinue} loadState={sessionLoadState} />}
+          {activeNav === 'sessions' && <SessionsView language={language} sessions={filteredSessions} query={query} setQuery={setQuery} selected={selected} setSelected={setSelected} activateSession={activateSession} inputContinue={inputContinue} openWorkspace={openSessionWorkspace} loadState={sessionLoadState} />}
           {activeNav === 'monitor' && <MonitorView language={language} sessions={sessionItems} autoContinue={autoContinue} setAutoContinue={updateAutoContinue} autoResumeOnBalance={autoResumeOnBalance} setAutoResumeOnBalance={setAutoResumeOnBalance} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} showToast={showToast} activateSession={activateSession} inputContinue={inputContinue} />}
           {activeNav === 'integrations' && <IntegrationsView language={language} providerBalances={providerBalances} sessionTotal={sessionItems.length} ccSwitchCheckedAt={ccSwitchCheckedAt} setCcSwitchCheckedAt={setCcSwitchCheckedAt} paseoImportedCount={paseoImportedCount} setPaseoImportedCount={setPaseoImportedCount} showToast={showToast} openExternalTool={openExternalTool} />}
           {activeNav === 'skills' && <SkillsView language={language} skills={installedSkills} setSkills={setInstalledSkills} loadState={skillsLoadState} setLoadState={setSkillsLoadState} showToast={showToast} />}
@@ -1268,7 +1297,7 @@ function App() {
           </main>
         </div>
 
-        {selected && !['skills', 'runtime', 'monitor', 'integrations', 'floating'].includes(activeNav) && <SessionInspector language={language} session={selected} onClose={() => setSelected(null)} onActivate={() => activateSession(selected)} onInputContinue={() => inputContinue(selected)} />}
+        {selected && !['skills', 'runtime', 'monitor', 'integrations', 'floating'].includes(activeNav) && <SessionInspector language={language} session={selected} onClose={() => setSelected(null)} onActivate={() => activateSession(selected)} onInputContinue={() => inputContinue(selected)} onOpenWorkspace={() => openSessionWorkspace(selected)} />}
       </div>
       {toast && <div className="toast"><Check size={15} />{toast}</div>}
       {newSessionOpen && <NewSessionDialog language={language} defaultModel={defaultModel} defaultPermission={defaultPermission} onClose={() => setNewSessionOpen(false)} onCreate={createSession} />}
@@ -1375,29 +1404,29 @@ function Metric({ label, value, delta, icon, tone }: { label: string; value: str
   return <div className="metric-card"><div className={`metric-icon ${tone}`}>{icon}</div><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-delta">{delta}</div></div>
 }
 
-function SessionRow({ language, session, index, selected, onSelect, onActivate, onInputContinue }: { language: UiLanguage; session: Session; index: number; selected: boolean; onSelect: () => void; onActivate: () => void; onInputContinue: () => void }) {
+function SessionRow({ language, session, index, selected, onSelect, onActivate, onInputContinue, onOpenWorkspace }: { language: UiLanguage; session: Session; index: number; selected: boolean; onSelect: () => void; onActivate: () => void; onInputContinue: () => void; onOpenWorkspace?: () => void }) {
   return <div className={`session-row ${selected ? 'selected' : ''}`} style={{ animationDelay: `${index * 45}ms` }} onClick={onSelect}>
     <div className="session-main"><span className={`status-dot ${session.status}`} /><div><strong>{localizeSessionValue(session.title, language)}</strong><small>{localizeSessionValue(session.preview, language)}</small><div className="tag-line">{session.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div></div></div>
     <div className="workspace-cell"><strong>{session.folder}</strong><small><GitBranch size={12} /> {session.branch}</small></div>
     <div className="model-cell"><span className="model-chip">{localizeSessionValue(session.model, language)}</span><small>{formatPermission(session.permission, language)}</small></div>
     <div className="updated-cell"><Clock3 size={13} />{formatSessionUpdated(session, language)}</div>
-    <div className="row-actions session-actions"><button className="resume-button" onClick={(event) => { event.stopPropagation(); onActivate() }}><Play size={13} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="resume-button input-continue-button" onClick={(event) => { event.stopPropagation(); onInputContinue() }}><TerminalSquare size={13} /> {tr(language, 'inputContinue')}</button></div>
+    <div className="row-actions session-actions">{onOpenWorkspace && <button className="icon-button session-workspace-button" aria-label={language === 'zh' ? '打开工作区' : 'Open workspace'} title={language === 'zh' ? '打开工作区' : 'Open workspace'} disabled={!session.cwd} onClick={(event) => { event.stopPropagation(); onOpenWorkspace() }}><FolderOpen size={15} /></button>}<button className="resume-button" onClick={(event) => { event.stopPropagation(); onActivate() }}><Play size={13} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="resume-button input-continue-button" onClick={(event) => { event.stopPropagation(); onInputContinue() }}><TerminalSquare size={13} /> {tr(language, 'inputContinue')}</button></div>
   </div>
 }
 
-function SessionInspector({ language, session, onClose, onActivate, onInputContinue }: { language: UiLanguage; session: Session; onClose: () => void; onActivate: () => void; onInputContinue: () => void }) {
+function SessionInspector({ language, session, onClose, onActivate, onInputContinue, onOpenWorkspace }: { language: UiLanguage; session: Session; onClose: () => void; onActivate: () => void; onInputContinue: () => void; onOpenWorkspace?: () => void }) {
   return <aside className="inspector">
     <div className="inspector-head"><span className="eyebrow">{tr(language, 'session')}</span><button className="icon-button small" aria-label={tr(language, 'closeDetail')} title={tr(language, 'closeDetail')} onClick={onClose}><X size={16} /></button></div>
     <div className="inspector-title"><span className={`status-dot ${session.status}`} /><h2>{localizeSessionValue(session.title, language)}</h2></div>
     <p className="inspector-preview">{localizeSessionValue(session.preview, language)}</p>
-    <div className="inspector-actions"><button className="inspector-resume" onClick={onActivate}><Play size={15} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="inspector-resume input-continue-button" onClick={onInputContinue}><TerminalSquare size={15} /> {tr(language, 'inputContinue')}</button></div>
-    <div className="detail-block"><div className="eyebrow">{tr(language, 'workspace')}</div><div className="detail-row"><FolderOpen size={14} /><span>{tr(language, 'folder')}</span><strong>{session.folder}</strong></div><div className="detail-row"><GitBranch size={14} /><span>{tr(language, 'branch')}</span><strong>{session.branch}</strong></div></div>
+    <div className="inspector-actions"><button className="inspector-resume" onClick={onActivate}><Play size={15} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="inspector-resume input-continue-button" onClick={onInputContinue}><TerminalSquare size={15} /> {tr(language, 'inputContinue')}</button>{onOpenWorkspace && <button className="inspector-resume workspace-open-action" onClick={onOpenWorkspace} disabled={!session.cwd}><FolderOpen size={15} /> {language === 'zh' ? '打开工作区' : 'Open workspace'}</button>}</div>
+    <div className="detail-block"><div className="eyebrow">{tr(language, 'workspace')}</div><div className="detail-row"><FolderOpen size={14} /><span>{tr(language, 'folder')}</span><strong>{session.folder}</strong></div><div className="detail-row workspace-path-row" title={session.cwd || undefined}><FolderOpen size={14} /><span>{language === 'zh' ? '完整路径' : 'Full path'}</span><strong>{session.cwd || (language === 'zh' ? '未读取' : 'Unavailable')}</strong></div><div className="detail-row"><GitBranch size={14} /><span>{tr(language, 'branch')}</span><strong>{session.branch}</strong></div></div>
     <div className="detail-block"><div className="eyebrow">{tr(language, 'runtime')}</div><div className="detail-row"><Cpu size={14} /><span>{tr(language, 'model')}</span><strong>{localizeSessionValue(session.model, language)}</strong></div><div className="detail-row"><ShieldCheck size={14} /><span>{tr(language, 'permission')}</span><strong>{formatPermission(session.permission, language)}</strong></div><div className="detail-row"><Clock3 size={14} /><span>{tr(language, 'updated')}</span><strong>{formatSessionUpdated(session, language)}</strong></div></div>
   </aside>
 }
 
-function SessionsView({ language, sessions: items, query, setQuery, selected, setSelected, activateSession, inputContinue, loadState }: { language: UiLanguage; sessions: Session[]; query: string; setQuery: (value: string) => void; selected: Session | null; setSelected: (value: Session) => void; activateSession: (value: Session) => void; inputContinue: (value: Session) => void; loadState: 'loading' | 'ready' | 'error' }) {
-  return <><section className="page-heading compact"><div><div className="eyebrow accent-text">{tr(language, 'sessionArchive')} <span className="heading-line" /></div><h1>{tr(language, 'allSessions')}</h1></div></section><div className="archive-toolbar"><div className="search-box wide"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr(language, 'searchArchive')} /></div><div className="archive-stat"><span className="pulse-dot" /> {items.length} {tr(language, 'matchingRecords')}</div></div><div className="archive-list">{items.map((session, index) => <SessionRow key={session.id} language={language} session={session} index={index} selected={selected?.id === session.id} onSelect={() => setSelected(session)} onActivate={() => activateSession(session)} onInputContinue={() => inputContinue(session)} />)}{items.length === 0 && <ContentState language={language} state={loadState} emptyLabel={query.trim() ? tr(language, 'noSearchResults') : tr(language, 'noReadableSessions')} />}</div></>
+function SessionsView({ language, sessions: items, query, setQuery, selected, setSelected, activateSession, inputContinue, openWorkspace, loadState }: { language: UiLanguage; sessions: Session[]; query: string; setQuery: (value: string) => void; selected: Session | null; setSelected: (value: Session) => void; activateSession: (value: Session) => void; inputContinue: (value: Session) => void; openWorkspace: (value: Session) => void; loadState: 'loading' | 'ready' | 'error' }) {
+  return <><section className="page-heading compact"><div><div className="eyebrow accent-text">{tr(language, 'sessionArchive')} <span className="heading-line" /></div><h1>{tr(language, 'allSessions')}</h1></div></section><div className="archive-toolbar"><div className="search-box wide"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr(language, 'searchArchive')} /></div><div className="archive-stat"><span className="pulse-dot" /> {items.length} {tr(language, 'matchingRecords')}</div></div><div className="archive-list">{items.map((session, index) => <SessionRow key={session.id} language={language} session={session} index={index} selected={selected?.id === session.id} onSelect={() => setSelected(session)} onActivate={() => activateSession(session)} onInputContinue={() => inputContinue(session)} onOpenWorkspace={() => openWorkspace(session)} />)}{items.length === 0 && <ContentState language={language} state={loadState} emptyLabel={query.trim() ? tr(language, 'noSearchResults') : tr(language, 'noReadableSessions')} />}</div></>
 }
 
 function SkillsView({ language, skills, setSkills, loadState, setLoadState, showToast }: { language: UiLanguage; skills: SkillRecord[]; setSkills: React.Dispatch<React.SetStateAction<SkillRecord[]>>; loadState: 'loading' | 'ready' | 'error'; setLoadState: React.Dispatch<React.SetStateAction<'loading' | 'ready' | 'error'>>; showToast: (message: string) => void }) {
@@ -1531,7 +1560,7 @@ function SkillsView({ language, skills, setSkills, loadState, setLoadState, show
           {visibleSkills.map((skill) => <div className={`skill-row ${detailTarget?.path === skill.path ? 'active' : ''} ${!skill.enabled ? 'disabled-skill' : ''}`} key={skill.path} onClick={() => void openDetail(skill)}>
             <button className={`select-control ${selectedPaths.includes(skill.path) ? 'selected' : ''}`} disabled={skill.protected || busy !== null} aria-label={language === 'zh' ? `选择 ${skill.name}` : `Select ${skill.name}`} onClick={(event) => { event.stopPropagation(); toggleSelection(skill.path) }}>{selectedPaths.includes(skill.path) ? <Check size={15} /> : <Square size={15} />}</button>
             <div className="skill-symbol"><Sparkles size={17} /></div>
-            <button className="skill-copy" onClick={(event) => { event.stopPropagation(); void openDetail(skill) }}><strong>{skill.name}</strong><small>{skill.description}</small></button>
+            <button className="skill-copy" onClick={(event) => { event.stopPropagation(); void openDetail(skill) }}><strong>{skill.name}</strong><small>{language === 'zh' ? (skill.descriptionZh || `用于 Codex 的“${skill.name}”技能。`) : skill.description}</small></button>
             <span className={`skill-update-state ${skill.updateAvailable ? 'available' : ''}`}>{updateStatus(skill)}</span>
             <span className="skill-version">{skill.version === 'local' ? 'local' : `v${skill.version}`}</span>
             <button className={`toggle ${skill.enabled ? 'on' : ''}`} disabled={skill.protected || busy !== null} aria-label={`${tr(language, 'skillOptions')}: ${skill.name}`} onClick={(event) => { event.stopPropagation(); void runEnabled(!skill.enabled, [skill.path]) }}><span /></button>
@@ -1545,9 +1574,11 @@ function SkillsView({ language, skills, setSkills, loadState, setLoadState, show
         {detailError && !detailLoading && <div className="detail-error" role="alert"><div className="skill-detail-head"><div className="skill-symbol error"><CircleAlert size={18} /></div><div><h2>{detailTarget?.name || (language === 'zh' ? '技能详情' : 'Skill details')}</h2><span>{language === 'zh' ? '读取失败' : 'Could not load'}</span></div><button className="icon-button" onClick={closeDetail} aria-label={language === 'zh' ? '关闭详情' : 'Close details'}><X size={17} /></button></div><p>{detailError}</p><button className="secondary-button" onClick={() => detailTarget && void openDetail(detailTarget)}><RefreshCw size={14} />{language === 'zh' ? '重试' : 'Retry'}</button></div>}
         {detail && !detailLoading && <>
           <div className="skill-detail-head"><div className="skill-symbol"><Sparkles size={18} /></div><div><h2>{detail.skill.name}</h2><span>{updateStatus(detail.skill)}</span></div><button className="icon-button" onClick={closeDetail} aria-label={language === 'zh' ? '关闭详情' : 'Close details'}><X size={17} /></button></div>
-          <p className="skill-detail-description">{detail.skill.description}</p>
-          <dl className="skill-meta"><div><dt>{language === 'zh' ? '状态' : 'Status'}</dt><dd>{detail.skill.enabled ? (language === 'zh' ? '已启用' : 'Enabled') : (language === 'zh' ? '已停用' : 'Disabled')}</dd></div><div><dt>{language === 'zh' ? '版本' : 'Version'}</dt><dd>{detail.skill.version}</dd></div><div><dt>{language === 'zh' ? '来源' : 'Source'}</dt><dd>{detail.skill.repository || (detail.skill.protected ? 'Codex' : (language === 'zh' ? '本地目录' : 'Local folder'))}</dd></div><div><dt>{language === 'zh' ? '文件' : 'Files'}</dt><dd>{detail.files?.length ?? 0}</dd></div></dl>
-          <div className="skill-detail-section"><h3><FileText size={15} />SKILL.md</h3><pre>{detail.content}</pre></div>
+          <div className="skill-detail-description-block"><span className="detail-label">{language === 'zh' ? '中文摘要' : 'Summary'}</span><p className="skill-detail-description">{language === 'zh' ? (detail.skill.descriptionZh || `用于 Codex 的“${detail.skill.name}”技能。`) : detail.skill.description}</p><span className="detail-label">{language === 'zh' ? '原始描述' : 'Original description'}</span><p className="skill-detail-description original">{detail.skill.description}</p></div>
+          <dl className="skill-meta"><div><dt>{language === 'zh' ? '状态' : 'Status'}</dt><dd>{detail.skill.enabled ? (language === 'zh' ? '已启用' : 'Enabled') : (language === 'zh' ? '已停用' : 'Disabled')}</dd></div><div><dt>{language === 'zh' ? '版本' : 'Version'}</dt><dd>{detail.skill.version}</dd></div><div><dt>{language === 'zh' ? '文件' : 'Files'}</dt><dd>{detail.files?.length ?? 0}</dd></div></dl>
+          <div className="skill-repository-panel"><div><span className="detail-label">{language === 'zh' ? '技能仓库' : 'Repository'}</span><strong title={detail.skill.repository || undefined}>{detail.skill.repository || (language === 'zh' ? '未在技能元数据中找到' : 'No repository metadata found')}</strong></div><button className="secondary-button" onClick={() => { const url = detail.skill.repository || `https://github.com/search?q=${encodeURIComponent(detail.skill.name)}&type=repositories`; void openExternalUrl(url).then((opened) => { if (!opened) showToast(language === 'zh' ? '无法打开仓库搜索' : 'Could not open repository search') }) }}><ExternalLink size={14} />{detail.skill.repository ? (language === 'zh' ? '打开仓库' : 'Open repo') : (language === 'zh' ? '查找仓库' : 'Find repo')}</button></div>
+          {detail.sections && detail.sections.length > 0 && <div className="skill-detail-section parsed-skill-section"><h3><ListTree size={15} />{language === 'zh' ? '技能说明' : 'Skill guide'}</h3>{detail.sections.slice(0, 12).map((section) => <article key={section.heading}><h4>{section.heading}</h4><p>{section.content || (language === 'zh' ? '此部分没有正文。' : 'No content in this section.')}</p></article>)}</div>}
+          <div className="skill-detail-section"><details className="skill-source-details"><summary><FileText size={15} />{language === 'zh' ? '查看 SKILL.md 原文' : 'View raw SKILL.md'}</summary><pre>{detail.content}</pre></details></div>
           <div className="skill-detail-actions"><button className="secondary-button" onClick={() => void runEnabled(!detail.skill.enabled, [detail.skill.path])} disabled={detail.skill.protected || busy !== null}>{detail.skill.enabled ? <Pause size={14} /> : <Power size={14} />}{detail.skill.enabled ? (language === 'zh' ? '停用' : 'Disable') : (language === 'zh' ? '启用' : 'Enable')}</button><button className="primary-button" onClick={() => void runUpdate([detail.skill.path])} disabled={!detail.skill.managed || busy !== null}><RefreshCw size={14} />{language === 'zh' ? '更新' : 'Update'}</button></div>
         </>}
       </aside>}
@@ -1651,6 +1682,7 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
   const [showOutput, setShowOutput] = useState(() => readStored('floatingShowOutput', true))
   const [autoPickSession, setAutoPickSession] = useState(() => readStored('floatingAutoPickSession', true))
   const [rightClickMenu, setRightClickMenu] = useState(() => readStored('floatingRightClickMenu', true))
+  const [floatingSkin, setFloatingSkin] = useState<FloatingSkin>(() => normalizeFloatingSkin(readStored('floatingSkin', 'classic')))
   const [floatingSize, setFloatingSize] = useState(() => {
     const stored = Number(readStored('floatingSize', 252))
     return Number.isFinite(stored) ? Math.max(180, Math.min(720, stored)) : 252
@@ -1696,6 +1728,10 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
     setFloatingOpacity(value)
     writeStored('floatingOpacity', value)
   }
+  const updateFloatingSkin = (skin: FloatingSkin) => {
+    setFloatingSkin(skin)
+    writeStored('floatingSkin', skin)
+  }
   return <>
     <section className="page-heading compact floating-page-heading">
       <div><div className="eyebrow accent-text">{tr(language, 'floating')} <span className="heading-line" /></div><h1>{tr(language, 'floatingTitle')}</h1></div>
@@ -1705,7 +1741,7 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
       <section className="floating-preview-panel">
         <div className="floating-preview-head"><div><span className="eyebrow">{tr(language, 'widgetPreview')}</span><strong>{tr(language, floatingEnabled ? 'widgetVisible' : 'widgetHidden')}</strong><small>{tr(language, 'widgetPreviewDescription')}</small></div><span className={`floating-visibility-state ${floatingEnabled ? 'visible' : ''}`}><i />{tr(language, floatingEnabled ? 'on' : 'off')}</span></div>
         <div className="floating-preview-stage">
-          <div className={`floating-crt-preview ${state}`} aria-label={tr(language, 'floatingCrtPreview')}>
+          <div className={`floating-crt-preview ${state} skin-${floatingSkin}`} aria-label={tr(language, 'floatingCrtPreview')}>
             <div className="floating-crt-preview-top"><strong>ATLAS</strong><span><i className="red" /><i className="yellow" /><i className="green" /></span></div>
              <div className="floating-crt-preview-body"><div className="floating-crt-preview-screen"><div><i className="floating-crt-preview-dot" />{active > 0 ? (language === 'zh' ? '执行中' : 'Working') : (language === 'zh' ? '空闲' : 'Idle')}<b>{count || 0}</b></div><strong>{activeSession?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{activeSession ? `${activeSession.folder} · ${activeSession.model}` : tr(language, 'floatingCrtPreviewDescription')}</small><div className="floating-crt-preview-balance">{balance ? `${balance.name} · ${balance.balance}` : (language === 'zh' ? '余额未检查' : 'Balance not checked')}</div><p>{showOutput ? (activeSession?.lastOutput || activeSession?.lastError || (language === 'zh' ? '暂无最新输出' : 'No recent output')) : (language === 'zh' ? '输出已隐藏' : 'Output hidden')}</p></div></div>
             <div className="floating-crt-preview-footer"><button aria-label={language === 'zh' ? '上一个会话' : 'Previous session'}><ChevronLeft size={13} /></button><span>{count > 0 ? `${count} ${language === 'zh' ? '个会话' : 'sessions'}` : tr(language, 'floatingIdle')}</span><button aria-label={tr(language, 'activateSession')}><Play size={11} fill="currentColor" /></button><button aria-label={tr(language, 'inputContinue')}><TerminalSquare size={11} /></button><button aria-label={language === 'zh' ? '下一个会话' : 'Next session'}><ChevronRight size={13} /></button></div>
@@ -1723,6 +1759,12 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
           <div className="switch-row"><span><strong>{tr(language, 'showOutput')}</strong><small>{tr(language, 'showOutputDescription')}</small></span><button className={`toggle ${showOutput ? 'on' : ''}`} onClick={() => toggleFloatingOption('floatingShowOutput', !showOutput, setShowOutput)} aria-label={tr(language, 'showOutput')}><span /></button></div>
           <div className="switch-row"><span><strong>{tr(language, 'autoPickSession')}</strong><small>{tr(language, 'autoPickSessionDescription')}</small></span><button className={`toggle ${autoPickSession ? 'on' : ''}`} onClick={() => toggleFloatingOption('floatingAutoPickSession', !autoPickSession, setAutoPickSession)} aria-label={tr(language, 'autoPickSession')}><span /></button></div>
           <div className="switch-row"><span><strong>{tr(language, 'rightClickMenu')}</strong><small>{tr(language, 'rightClickMenuDescription')}</small></span><button className={`toggle ${rightClickMenu ? 'on' : ''}`} onClick={() => toggleFloatingOption('floatingRightClickMenu', !rightClickMenu, setRightClickMenu)} aria-label={tr(language, 'rightClickMenu')}><span /></button></div>
+        </div>
+        <div className="floating-skin-picker">
+          <div><strong>{tr(language, 'floatingSkin')}</strong><small>{tr(language, 'floatingSkinDescription')}</small></div>
+          <div className="floating-skin-options" role="radiogroup" aria-label={tr(language, 'floatingSkin')}>
+            {floatingSkinOptions.map((option) => <button key={option.id} type="button" role="radio" aria-checked={floatingSkin === option.id} className={`floating-skin-option skin-${option.id} ${floatingSkin === option.id ? 'selected' : ''}`} onClick={() => updateFloatingSkin(option.id)} title={language === 'zh' ? option.labelZh : option.labelEn}><i aria-hidden="true" /><span>{language === 'zh' ? option.labelZh : option.labelEn}</span></button>)}
+          </div>
         </div>
         <div className="floating-appearance-grid"><label><span>{tr(language, 'floatingScale')} · {floatingSize}px</span><input type="range" min="180" max="720" step="1" value={floatingSize} onChange={(event) => updateFloatingSize(Number(event.target.value))} /></label><label><span>{tr(language, 'floatingOpacity')} · {floatingOpacity}%</span><input type="range" min="65" max="100" step="5" value={floatingOpacity} onChange={(event) => updateFloatingOpacity(Number(event.target.value))} /></label></div>
         <div className="floating-quick-actions"><span className="eyebrow">{tr(language, 'quickActions')}</span><div className="floating-action-pair"><button className="secondary-button" onClick={() => activeSession && activateSession(activeSession)} disabled={!activeSession}><Play size={14} fill="currentColor" />{activeSession ? tr(language, 'activateSession') : tr(language, 'noActiveSession')}</button><button className="secondary-button" onClick={() => activeSession && inputContinue(activeSession)} disabled={!activeSession}><TerminalSquare size={14} />{tr(language, 'inputContinue')}</button></div></div>
@@ -1944,7 +1986,7 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
     return labels[state]?.[language === 'zh' ? 0 : 1] || state
   }
   const voiceReady = Boolean(voiceStatus?.ready && voiceStatus.daemonRunning)
-  const voiceConfigured = Boolean(voiceStatus?.paseoInstalled || voiceStatus?.sttReady || voiceStatus?.ttsReady)
+  const voiceConfigured = Boolean(voiceStatus?.serviceInstalled || voiceStatus?.sttReady || voiceStatus?.ttsReady)
   const voiceTone = voiceReady ? 'green' : 'yellow'
   const voiceHeadline = voiceBusy
     ? tr(language, 'voiceServiceInstalling')
@@ -1952,7 +1994,7 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
       ? tr(language, 'voiceServiceReady')
       : !voiceStatus
         ? tr(language, 'voiceServiceChecking')
-        : !voiceStatus.paseoInstalled || !voiceStatus.sttReady || !voiceStatus.ttsReady
+        : !voiceStatus.serviceInstalled || !voiceStatus.sttReady || !voiceStatus.ttsReady
           ? tr(language, 'voiceServiceMissing')
           : tr(language, 'voiceServiceDaemonStopped')
   const voiceProgressStep = voiceProgress ? Math.min(voiceProgress.step, voiceProgress.total || 6) : 0
@@ -1991,7 +2033,7 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
         <div className="panel-head"><div><h3>{tr(language, 'voiceService')}</h3><span className="panel-subtitle">{tr(language, 'voiceServiceDescription')}</span></div><Activity size={17} className="teal-icon" /></div>
         <div className="voice-service-status">
           <span className={`health-light ${voiceTone}`} />
-          <div className="voice-service-status-copy"><strong>{voiceHeadline}</strong><small>{voiceStatus?.paseoVersion ? `Paseo ${voiceStatus.paseoVersion}` : tr(language, 'voiceServiceDaemon')} · {voiceStatus?.daemonRunning ? tr(language, 'connected') : tr(language, 'notConfigured')}</small></div>
+          <div className="voice-service-status-copy"><strong>{voiceHeadline}</strong><small>{voiceStatus?.serviceVersion ? `Atlas ${voiceStatus.serviceVersion}` : tr(language, 'voiceServiceDaemon')} · {voiceStatus?.daemonRunning ? tr(language, 'connected') : tr(language, 'notConfigured')}</small></div>
           <button className="secondary-button compact-button" onClick={() => void installVoice()} disabled={voiceBusy}>{voiceBusy ? <LoaderCircle className="spin" size={14} /> : voiceConfigured ? <RefreshCw size={14} /> : <Download size={14} />}{voiceBusy ? tr(language, 'voiceServiceInstalling') : voiceConfigured ? tr(language, 'repairVoiceService') : tr(language, 'installVoiceService')}</button>
         </div>
         <div className="voice-service-meta"><span><strong>{tr(language, 'voiceServiceModels')}</strong><small>{voiceStatus?.sttReady ? 'STT ✓' : 'STT —'} · {voiceStatus?.ttsReady ? 'TTS ✓' : 'TTS —'}</small></span><span><strong>{tr(language, 'voiceServiceProvider')}</strong><small>{tr(language, 'voiceServiceDaemon')}</small></span></div>
@@ -2000,7 +2042,7 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
       <section className="settings-panel mobile-bridge-panel connection-panel">
         <div className="panel-head"><div><h3>{tr(language, 'mobileBridge')}</h3><span className="panel-subtitle">{language === 'zh' ? '扫描一次，手机卡片自动同步' : 'Scan once; the phone card stays in sync'}</span></div><PictureInPicture2 size={17} className="teal-icon" /></div>
         {mobileBridge ? <>
-          <div className="mobile-bridge-status connection-status"><span className={`health-light ${mobileBridge.tunnelRunning ? 'green' : mobileBridge.tunnelConfigured ? 'yellow' : 'green'}`} /><div><strong>{language === 'zh' ? '桌面 Bridge 已就绪' : 'Desktop Bridge is ready'}</strong><small>{mobileBridge.tunnelRunning ? tr(language, 'tunnelRunning') : (mobileBridge.tunnelConfigured ? (language === 'zh' ? '局域网优先 · 固定通道备用' : 'LAN first · fixed route as fallback') : (language === 'zh' ? '局域网连接' : 'LAN connection'))}</small></div><button className="secondary-button compact-button" onClick={() => void toggleTunnel()} disabled={tunnelBusy || !mobileBridge.tunnelConfigured}>{tunnelBusy ? <LoaderCircle className="spin" size={13} /> : <Power size={13} />}{mobileBridge.tunnelRunning ? tr(language, 'stopTunnel') : tr(language, 'startTunnel')}</button></div>
+          <div className="mobile-bridge-status connection-status"><span className={`health-light ${mobileBridge.tunnelRunning ? 'green' : mobileBridge.tunnelConfigured ? 'yellow' : 'green'}`} /><div><strong>{mobileBridge.deviceName || (language === 'zh' ? '桌面 Bridge 已就绪' : 'Desktop Bridge is ready')}</strong><small>{mobileBridge.deviceKind ? `${mobileBridge.deviceKind} · ` : ''}{mobileBridge.tunnelRunning ? tr(language, 'tunnelRunning') : (mobileBridge.tunnelConfigured ? (language === 'zh' ? '局域网优先 · 固定通道备用' : 'LAN first · fixed route as fallback') : (language === 'zh' ? '局域网连接' : 'LAN connection'))}</small></div><button className="secondary-button compact-button" onClick={() => void toggleTunnel()} disabled={tunnelBusy || !mobileBridge.tunnelConfigured}>{tunnelBusy ? <LoaderCircle className="spin" size={13} /> : <Power size={13} />}{mobileBridge.tunnelRunning ? tr(language, 'stopTunnel') : tr(language, 'startTunnel')}</button></div>
           {mobileBridge.tunnelError && <div className="field-hint error-text">{mobileBridge.tunnelError}</div>}
           <div className="mobile-bridge-pairing pairing-card"><div className="pairing-copy"><strong>{language === 'zh' ? '用手机扫描二维码' : 'Scan with your phone'}</strong><small>{language === 'zh' ? '也可以复制链接，在手机上粘贴后自动连接' : 'You can also copy the link and paste it on your phone'}</small><code className="mobile-bridge-pairing-link" title={mobileBridge.pairingUri}>{mobileBridge.pairingUri}</code><div className="mobile-bridge-actions"><button className="primary-button" onClick={() => void copyMobileBridge()}><Upload size={14} />{language === 'zh' ? '复制配对链接' : 'Copy pairing link'}</button><button className="secondary-button version-help" onClick={() => void saveBridgeSettings()} disabled={bridgeSaving}>{bridgeSaving ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{tr(language, 'saveBridge')}</button></div></div><QRCodeSVG className="pairing-qr" value={mobileBridge.pairingUri} size={220} level="L" includeMargin /></div>
           <button className="advanced-toggle" onClick={() => setBridgeAdvanced((value) => !value)} aria-expanded={bridgeAdvanced}><span>{language === 'zh' ? '高级连接设置' : 'Advanced connection settings'}</span><ChevronDown size={15} className={bridgeAdvanced ? 'rotated' : ''} /></button>
@@ -2236,6 +2278,7 @@ function PrototypeGallery() {
 function FloatingMini() {
   const [language, setLanguage] = useState<UiLanguage>(() => readStored('language', 'zh'))
   const [floatingOpacity, setFloatingOpacity] = useState(() => readStored('floatingOpacity', 100))
+  const [floatingSkin, setFloatingSkin] = useState<FloatingSkin>(() => normalizeFloatingSkin(readStored('floatingSkin', 'classic')))
   const [floatingSize, setFloatingSize] = useState(() => {
     const stored = Number(readStored('floatingSize', 252))
     return Number.isFinite(stored) ? Math.max(180, Math.min(720, stored)) : 252
@@ -2243,13 +2286,20 @@ function FloatingMini() {
   const [showOutput, setShowOutput] = useState(() => readStored('floatingShowOutput', true))
   const [autoPickSession, setAutoPickSession] = useState(() => readStored('floatingAutoPickSession', true))
   const [rightClickMenu, setRightClickMenu] = useState(() => readStored('floatingRightClickMenu', true))
+  const [defaultModel, setDefaultModel] = useState(() => readStored('defaultModel', ''))
+  const [defaultPermission, setDefaultPermission] = useState(() => readStored('defaultPermission', 'Workspace write'))
   const t = (key: string) => tr(language, key)
   const [items, setItems] = useState<Session[]>([])
+  const [codexModels, setCodexModels] = useState<CodexModelOption[]>([])
+  const [modelBusy, setModelBusy] = useState(false)
   const [currentBalance, setCurrentBalance] = useState<CcSwitchProviderBalance | null>(null)
   const currentBalanceRef = useRef<CcSwitchProviderBalance | null>(null)
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [message, setMessage] = useState('')
   const [actionBusy, setActionBusy] = useState<'activate' | 'input' | null>(null)
+  const [quickInputOpen, setQuickInputOpen] = useState(false)
+  const [quickInput, setQuickInput] = useState('')
+  const quickInputRef = useRef<HTMLInputElement | null>(null)
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null)
   const [approvalOther, setApprovalOther] = useState('')
   const approvalOtherInputRef = useRef<HTMLInputElement | null>(null)
@@ -2328,6 +2378,19 @@ function FloatingMini() {
   }, [])
   useEffect(() => {
     let disposed = false
+    const syncModels = () => void getCodexModels().then((models) => {
+      if (!disposed && models) setCodexModels(models)
+    })
+    syncModels()
+    const modelTimer = window.setInterval(syncModels, 60_000)
+    void getCodexInfo().then((info) => {
+      if (disposed || !info?.model || defaultModel.trim()) return
+      setDefaultModel(info.model)
+    })
+    return () => { disposed = true; window.clearInterval(modelTimer) }
+  }, [])
+  useEffect(() => {
+    let disposed = false
     const syncBalance = async () => {
       const result = await getCcSwitchProviderBalances()
       if (!disposed) {
@@ -2347,10 +2410,13 @@ function FloatingMini() {
     const syncSettings = (event: StorageEvent) => {
       if (!event.key?.startsWith('codex-atlas:')) return
       if (event.key === 'codex-atlas:floatingOpacity') setFloatingOpacity(readStored('floatingOpacity', 100))
+      if (event.key === 'codex-atlas:floatingSkin') setFloatingSkin(normalizeFloatingSkin(readStored('floatingSkin', 'classic')))
       if (event.key === 'codex-atlas:floatingSize') setFloatingSize(Math.max(180, Math.min(720, Number(readStored('floatingSize', 252)) || 252)))
       if (event.key === 'codex-atlas:floatingShowOutput') setShowOutput(readStored('floatingShowOutput', true))
       if (event.key === 'codex-atlas:floatingAutoPickSession') setAutoPickSession(readStored('floatingAutoPickSession', true))
       if (event.key === 'codex-atlas:floatingRightClickMenu') setRightClickMenu(readStored('floatingRightClickMenu', true))
+      if (event.key === 'codex-atlas:defaultModel') setDefaultModel(readStored('defaultModel', ''))
+      if (event.key === 'codex-atlas:defaultPermission') setDefaultPermission(readStored('defaultPermission', 'Workspace write'))
     }
     window.addEventListener('storage', syncSettings)
     return () => window.removeEventListener('storage', syncSettings)
@@ -2423,13 +2489,22 @@ function FloatingMini() {
     .sort((left, right) => Number(right.foreground) - Number(left.foreground) || eventTime(right) - eventTime(left)), [items])
   const selectedIndex = Math.max(0, orderedItems.findIndex((item) => item.id === selectedSessionId))
   const selectedItem = orderedItems[selectedIndex] || orderedItems[0]
+  useEffect(() => {
+    const observed = selectedItem?.model?.trim()
+    if (!observed) return
+    setCodexModels((current) => current.some((model) => model.slug === observed)
+      ? current
+      : [...current, { slug: observed, displayName: observed, official: false, source: 'current-config' }])
+  }, [selectedItem?.model])
+  const phase = selectedItem?.liveState?.toLowerCase() || ''
+  const outputLower = selectedItem?.lastOutput?.toLowerCase() || ''
+  const isWorking = selectedItem?.status === 'active'
+    && (phase === 'working' || phase === 'thinking' || phase === 'tool' || outputLower.includes('thinking') || outputLower.includes('running tool') || outputLower.includes('正在思考') || outputLower.includes('执行工具'))
   const state = selectedItem?.recovery === 'paused-balance' || selectedItem?.recovery === 'stopped'
     ? 'blocked'
     : selectedItem?.recovery === 'watching' || selectedItem?.recovery === 'retrying' || selectedItem?.requiresAttention
       ? 'warning'
-      : selectedItem?.status === 'active' ? 'active' : 'idle'
-  const phase = selectedItem?.liveState?.toLowerCase()
-  const outputLower = selectedItem?.lastOutput?.toLowerCase() || ''
+      : isWorking ? 'working' : selectedItem?.status === 'active' ? 'active' : 'idle'
   const approvalRequest = parseApprovalRequest(selectedItem, language)
   const phaseLabel = approvalRequest
     ? (language === 'zh' ? '需要审批' : 'Approval')
@@ -2478,11 +2553,59 @@ function FloatingMini() {
   const inputContinueSelected = () => {
     if (!selectedItem) return
     setActionBusy('input')
-    void inputCodexContinue(selectedItem.id).then((ok) => {
+    // Queue through Codex itself so the floating widget never steals focus
+    // from the user's active application.
+    void sendCodexContinue(selectedItem.id, false).then((ok) => {
       setMessage(ok
-        ? (language === 'zh' ? '已输入“继续”并回车' : 'Typed continue and pressed Enter')
-        : (language === 'zh' ? '无法定位运行中的终端' : 'Running terminal not found'))
+        ? (language === 'zh' ? '已在后台提交“继续”' : 'Continue queued in the background')
+        : (language === 'zh' ? '无法提交到该会话' : 'Could not queue the message'))
       setActionBusy(null)
+      window.setTimeout(() => setMessage(''), 2200)
+    })
+  }
+  const submitQuickInput = (event?: React.FormEvent) => {
+    event?.preventDefault()
+    const value = quickInput.trim()
+    if (!selectedItem || !value || actionBusy || modelBusy) return
+    setActionBusy('input')
+    void sendSessionInput(selectedItem.id, value, false).then((ok) => {
+      setMessage(ok
+        ? (language === 'zh' ? '已在后台提交消息' : 'Message queued in the background')
+        : (language === 'zh' ? '消息提交失败' : 'Message could not be queued'))
+      if (ok) {
+        setQuickInput('')
+        setQuickInputOpen(false)
+      }
+      setActionBusy(null)
+      window.setTimeout(() => setMessage(''), 2200)
+    }).catch(() => {
+      setActionBusy(null)
+      setMessage(language === 'zh' ? '消息提交失败' : 'Message could not be queued')
+      window.setTimeout(() => setMessage(''), 2200)
+    })
+  }
+  const saveRuntimeSetting = (nextModel: string, nextPermission: string) => {
+    if (!nextModel.trim()) {
+      setMessage(language === 'zh' ? '尚未读取 Codex 模型' : 'Codex model is not available yet')
+      window.setTimeout(() => setMessage(''), 2200)
+      return
+    }
+    setModelBusy(true)
+    void setCodexDefaults(nextModel, nextPermission).then((info) => {
+      if (info?.model) {
+        setDefaultModel(info.model)
+        setDefaultPermission(nextPermission)
+        writeStored('defaultModel', info.model)
+        writeStored('defaultPermission', nextPermission)
+        setMessage(language === 'zh' ? `已切换模型：${info.model}` : `Model switched to ${info.model}`)
+      } else {
+        setMessage(language === 'zh' ? '模型设置失败' : 'Model setting failed')
+      }
+      setModelBusy(false)
+      window.setTimeout(() => setMessage(''), 2200)
+    }).catch(() => {
+      setModelBusy(false)
+      setMessage(language === 'zh' ? '模型设置失败' : 'Model setting failed')
       window.setTimeout(() => setMessage(''), 2200)
     })
   }
@@ -2534,7 +2657,7 @@ function FloatingMini() {
   const openContextMenu = (event: React.MouseEvent<HTMLElement>) => {
     if (!rightClickMenu) return
     event.preventDefault()
-    setContextMenu({ x: Math.min(event.clientX, Math.max(8, window.innerWidth - 190)), y: Math.min(event.clientY, Math.max(8, window.innerHeight - 150)) })
+    setContextMenu({ x: Math.min(event.clientX, Math.max(8, window.innerWidth - 246)), y: Math.min(event.clientY, Math.max(8, window.innerHeight - 360)) })
   }
   useEffect(() => {
     if (!contextMenu) return
@@ -2546,6 +2669,9 @@ function FloatingMini() {
       window.removeEventListener('blur', close)
     }
   }, [contextMenu])
+  useEffect(() => {
+    if (quickInputOpen) quickInputRef.current?.focus()
+  }, [quickInputOpen])
   const beginFloatingDrag = (event: React.MouseEvent<HTMLElement>) => {
     if (event.button !== 0) return
     void startDesktopWindowDrag()
@@ -2553,7 +2679,7 @@ function FloatingMini() {
   const beginFloatingDragWithKeyboard = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === 'Enter' || event.key === ' ') void startDesktopWindowDrag()
   }
-  return <main className={`desktop-tv-widget ${state}`} style={{ opacity: floatingOpacity / 100 }} aria-label={`${t('statusPrefix')}: ${statusLabel}`} title={statusLabel} onContextMenu={openContextMenu}>
+  return <main className={`desktop-tv-widget ${state} skin-${floatingSkin}`} style={{ opacity: floatingOpacity / 100 }} aria-label={`${t('statusPrefix')}: ${statusLabel}`} title={statusLabel} onContextMenu={openContextMenu}>
     <div className="desktop-tv-shell">
        <div className="desktop-tv-top">
         <span className="desktop-tv-brand">ATLAS</span>
@@ -2561,11 +2687,11 @@ function FloatingMini() {
       </div>
       <div className="desktop-tv-body">
         <div className="desktop-tv-screen-frame">
-          <div className="desktop-tv-screen">
+          <div className={`desktop-tv-screen ${quickInputOpen ? 'is-inputting' : ''}`} onClick={() => { if (!approvalRequest && selectedItem) setQuickInputOpen(true) }} title={selectedItem?.title || t('floatingIdle')}>
             <div className="desktop-tv-scanlines" aria-hidden="true" />
             <div className="desktop-tv-screen-head"><span><i className="desktop-tv-status-dot" />{phaseLabel}</span><b>{sessionLabel}</b></div>
-              <div className="desktop-tv-session-meta"><strong title={selectedItem?.title}>{selectedItem?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{selectedItem ? `${selectedItem.folder} · ${selectedItem.model}` : ''}</small></div>
-             {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite"><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input ref={approvalOtherInputRef} value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
+              <div className="desktop-tv-session-meta" aria-hidden="true"><strong>{selectedItem?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{selectedItem ? `${selectedItem.folder} · ${selectedItem.model}` : ''}</small></div>
+             {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite" onClick={(event) => event.stopPropagation()}><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input ref={approvalOtherInputRef} value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : quickInputOpen ? <form className="desktop-tv-quick-input" onSubmit={submitQuickInput} onClick={(event) => event.stopPropagation()}><input ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuickInputOpen(false); setQuickInput('') } }} placeholder={t('quickInputPlaceholder')} disabled={!selectedItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} /><button type="submit" disabled={!quickInput.trim() || !selectedItem || actionBusy !== null} aria-label={t('quickInputSubmit')} title={t('quickInputSubmit')}>{actionBusy === 'input' ? <LoaderCircle className="spin" size={12} /> : <ArrowUpRight size={12} />}</button></form> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
           </div>
         </div>
       </div>
@@ -2581,6 +2707,15 @@ function FloatingMini() {
     {contextMenu && <div className="desktop-tv-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" onClick={(event) => event.stopPropagation()}>
       <button role="menuitem" onClick={() => { setContextMenu(null); activateSelected() }} disabled={!selectedItem || actionBusy !== null}><Play size={13} fill="currentColor" />{t('floatingResume')}</button>
       <button role="menuitem" onClick={() => { setContextMenu(null); inputContinueSelected() }} disabled={!selectedItem || actionBusy !== null}><TerminalSquare size={13} />{t('floatingInputContinue')}</button>
+      <button role="menuitem" onClick={() => { setContextMenu(null); setQuickInputOpen(true) }} disabled={!selectedItem}><Plus size={13} />{t('quickInputSubmit')}</button>
+      <div className="desktop-tv-context-divider" />
+      <span className="desktop-tv-context-label">{t('modelMenu')}</span>
+      {codexModels.length === 0 && <span className="desktop-tv-context-empty">{language === 'zh' ? '正在读取 Codex 模型…' : 'Reading Codex models…'}</span>}
+      {codexModels.map((model) => <button key={model.slug} role="menuitem" className="desktop-tv-context-choice" onClick={() => { setContextMenu(null); saveRuntimeSetting(model.slug, defaultPermission) }} disabled={modelBusy}><span><Check size={12} className={defaultModel === model.slug ? 'is-selected' : 'is-hidden'} />{model.displayName}</span><small>{model.official ? t('officialModel') : t('configuredModel')}</small></button>)}
+      <div className="desktop-tv-context-divider" />
+      <span className="desktop-tv-context-label">{t('permissionMenu')}</span>
+      {['Workspace write', 'Read only', 'Full access'].map((permission) => <button key={permission} role="menuitem" className="desktop-tv-context-choice" onClick={() => { setContextMenu(null); saveRuntimeSetting(defaultModel || selectedItem?.model || codexModels[0]?.slug || '', permission) }} disabled={modelBusy}><span><Check size={12} className={defaultPermission === permission ? 'is-selected' : 'is-hidden'} />{language === 'zh' ? (permission === 'Workspace write' ? '工作区写入' : permission === 'Read only' ? '只读' : '完全访问') : permission}</span></button>)}
+      <div className="desktop-tv-context-divider" />
       <button role="menuitem" onClick={() => { setContextMenu(null); void showMainDesktopWindow() }}><ExternalLink size={13} />{t('floatingOpen')}</button>
     </div>}
   </main>

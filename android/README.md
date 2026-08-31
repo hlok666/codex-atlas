@@ -22,12 +22,17 @@ widget. Both read the same `Atlas Mobile Bridge` JSON contract:
 }
 ```
 
-Configure the Bridge URL and access token in the app. The widget refreshes on a
-short-lived WorkManager cadence and immediately after a widget action. Actions
-are authenticated POST requests:
+Pairing profiles are stored as a device list. Each Windows, macOS or cloud
+server Bridge keeps its own device id, route and token; use the Devices control
+to switch the active profile. The native ColorOS card is interactive: tapping
+the body opens the current conversation and the action controls send
+authenticated POST requests:
 
 - `POST /v1/sessions/{id}/activate`
 - `POST /v1/sessions/{id}/input` with `{ "text": "继续" }`
+
+The foreground sync service keeps the selected profile live while the app is in
+the background and refreshes every installed card as timeline events arrive.
 
 The desktop app remains the authority for Codex process discovery, PowerShell
 focus, `codex resume`, and terminal input. The Android client is deliberately a
