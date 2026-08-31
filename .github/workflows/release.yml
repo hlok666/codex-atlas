@@ -40,12 +40,30 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
       - run: chmod +x android/gradlew
-      - run: android/gradlew --no-daemon -p android assembleDebug
-      - run: cp android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/debug/codex-atlas-android.apk
+      - name: Prepare Android signing key
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/codex-atlas-release.jks
+      - name: Build Android companion package
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/codex-atlas-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -f "$ANDROID_KEYSTORE_PATH" ]; then
+            android/gradlew --no-daemon -p android assembleRelease
+            cp android/app/build/outputs/apk/release/app-release.apk android/app/build/outputs/apk/release/codex-atlas-android.apk
+          else
+            echo "::warning::Android signing secrets are not configured; producing a debug APK that cannot receive seamless updates."
+            android/gradlew --no-daemon -p android assembleDebug
+            cp android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/debug/codex-atlas-android.apk
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: codex-atlas-android
-          path: android/app/build/outputs/apk/debug/codex-atlas-android.apk
+          path: android/app/build/outputs/apk/**/codex-atlas-android.apk
           if-no-files-found: error
 
   publish:

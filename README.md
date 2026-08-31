@@ -132,4 +132,4 @@ git tag v0.1.2
 git push origin v0.1.2
 ```
 
-正式 Android 发布建议配置签名密钥后，将 workflow 中的 `assembleDebug` 换成签名的 `assembleRelease`；当前 workflow 产出的 debug APK 方便预览和测试。
+Android Release 使用固定的 release keystore（由 GitHub Actions secrets 注入），因此后续版本可以直接覆盖更新。旧版 debug APK 或由其他密钥签名的 APK 无法被 Android 覆盖安装，首次迁移时需要卸载一次旧版；Atlas 更新器会在安装前识别并提示这个情况。未配置签名 secrets 时 workflow 会回退为 debug APK，并在构建日志中警告该 APK 不支持无感更新。

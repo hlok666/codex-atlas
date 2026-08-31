@@ -5,6 +5,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val androidKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH").orEmpty()
+val androidKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD").orEmpty()
+val androidKeyAlias = System.getenv("ANDROID_KEY_ALIAS").orEmpty()
+val androidKeyPassword = System.getenv("ANDROID_KEY_PASSWORD").orEmpty()
+val hasReleaseSigning = androidKeystorePath.isNotBlank() &&
+    androidKeystorePassword.isNotBlank() && androidKeyAlias.isNotBlank() && androidKeyPassword.isNotBlank()
+
 android {
     namespace = "com.codexatlas.mobile"
     compileSdk = 35
@@ -13,13 +20,28 @@ android {
         applicationId = "com.codexatlas.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.1.4"
+        versionCode = 6
+        versionName = "0.1.5"
     }
 
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(androidKeystorePath)
+                storePassword = androidKeystorePassword
+                keyAlias = androidKeyAlias
+                keyPassword = androidKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
