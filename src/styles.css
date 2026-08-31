@@ -2800,6 +2800,106 @@ html.floating-window #root {
   .app-shell .skill-detail { inset: 64px 16px 16px; }
 }
 
+/* Session archive: keep the action column stable and scroll the complete row
+   when the inspector or a narrow window leaves less horizontal space. */
+.app-shell .session-table { overflow-x: auto; overflow-y: hidden; }
+.app-shell .archive-list { overflow-x: auto; overflow-y: hidden; }
+.app-shell .archive-list > .table-head,
+.app-shell .archive-list > .session-row { min-width: 1000px; }
+.app-shell .table-head,
+.app-shell .session-row { grid-template-columns: minmax(260px, 1.4fr) minmax(180px, 1fr) 144px 104px 236px; }
+.app-shell .session-row > * { min-width: 0; }
+.app-shell .session-actions { min-width: 236px; display: flex; align-items: center; justify-content: flex-start; flex-wrap: nowrap; }
+.app-shell .session-actions .resume-button { flex: 0 0 auto; }
+.app-shell .session-main strong,
+.app-shell .session-main small,
+.app-shell .workspace-cell strong,
+.app-shell .workspace-cell small,
+.app-shell .model-chip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A linear scale is shared by the main preview and the native floating
+   window. The size ratio and the user's font preference are both continuous. */
+.desktop-tv-screen-head { font-size: clamp(9px, calc(10px * var(--floating-font-scale, 1)), 24px); }
+.desktop-tv-screen-head b { font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 22px); }
+.desktop-tv-brand { font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 22px); }
+.desktop-tv-top-balance { font-size: clamp(8px, calc(10px * var(--floating-font-scale, 1)), 22px); }
+.desktop-tv-session-meta strong { font-size: clamp(10px, calc(12px * var(--floating-font-scale, 1)), 26px); }
+.desktop-tv-session-meta small { font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 20px); }
+.desktop-tv-output { font-size: clamp(9px, calc(11px * var(--floating-font-scale, 1)), 25px); }
+.desktop-tv-drag-handle span { font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 20px); }
+.app-shell .floating-crt-preview-screen > div { font-size: clamp(9px, calc(10px * var(--floating-font-scale, 1)), 22px); }
+.app-shell .floating-crt-preview-screen > div b { font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 20px); }
+.app-shell .floating-crt-preview-screen > strong { font-size: clamp(10px, calc(13px * var(--floating-font-scale, 1)), 26px); }
+.app-shell .floating-crt-preview-screen > small { font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 20px); }
+.app-shell .floating-crt-preview-screen > p { font-size: clamp(9px, calc(10px * var(--floating-font-scale, 1)), 22px); }
+.app-shell .floating-crt-preview-footer span { font-size: clamp(8px, calc(10px * var(--floating-font-scale, 1)), 20px); }
+.desktop-tv-quick-input { display: grid; align-content: stretch; align-items: stretch; gap: 5px; min-height: 0; }
+.desktop-tv-quick-input textarea { width: 100%; min-height: 32px; max-height: 26%; resize: none; padding: 6px 8px; border: 1px solid rgba(174,222,177,.55); border-radius: 7px; color: #d8f6da; background: rgba(9,25,13,.8); font: 500 clamp(9px, calc(10px * var(--floating-font-scale, 1)), 22px)/1.3 'Geist Variable', 'Microsoft YaHei UI', sans-serif; outline: none; -webkit-app-region: no-drag; }
+.desktop-tv-quick-input textarea:focus { border-color: #c2efbd; box-shadow: 0 0 0 2px rgba(145,220,149,.14); }
+.desktop-tv-quick-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.desktop-tv-quick-modes button { min-height: 20px; padding: 2px 5px; border: 1px solid rgba(174,222,177,.5); border-radius: 6px; color: #a9d7ad; background: rgba(9,25,13,.45); font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 18px); cursor: pointer; -webkit-app-region: no-drag; }
+.desktop-tv-quick-modes button.selected { color: #17321c; background: #bfe7b8; }
+.desktop-tv-quick-attachments { display: flex; gap: 4px; max-height: 26px; overflow-x: auto; scrollbar-width: thin; }
+.desktop-tv-quick-attachments > span { min-width: 0; display: inline-flex; align-items: center; gap: 3px; padding: 2px 4px; border: 1px solid rgba(174,222,177,.45); border-radius: 5px; color: #c7ebca; background: rgba(9,25,13,.5); font-size: clamp(7px, calc(8px * var(--floating-font-scale, 1)), 16px); white-space: nowrap; }
+.desktop-tv-quick-attachments i { display: inline-flex; color: #bfe7b8; }
+.desktop-tv-quick-attachments button { display: inline-grid; place-items: center; width: 13px; height: 13px; padding: 0; border: 0; color: #bfe7b8; background: transparent; cursor: pointer; -webkit-app-region: no-drag; }
+.desktop-tv-quick-tools { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.desktop-tv-quick-tools > span { min-width: 0; flex: 1; overflow: hidden; color: rgba(183,232,187,.74); font-size: clamp(7px, calc(8px * var(--floating-font-scale, 1)), 16px); text-overflow: ellipsis; white-space: nowrap; }
+.desktop-tv-file-button { width: 24px; height: 22px; display: grid; place-items: center; flex: 0 0 24px; border: 1px solid rgba(174,222,177,.6); border-radius: 6px; color: #bfe7b8; background: rgba(9,25,13,.58); cursor: pointer; -webkit-app-region: no-drag; }
+.desktop-tv-file-button:hover { color: #17321c; background: #bfe7b8; }
+.desktop-tv-file-button input { display: none; }
+.desktop-tv-quick-tools > button { width: 27px; height: 24px; display: grid; place-items: center; flex: 0 0 27px; padding: 0; border: 1px solid rgba(174,222,177,.7); border-radius: 7px; color: #17321c; background: #bfe7b8; cursor: pointer; -webkit-app-region: no-drag; }
+.desktop-tv-quick-tools > button:disabled { opacity: .48; cursor: default; }
+
+/* Form presets change the silhouette and control layout, not only the color. */
+.desktop-tv-widget.skin-imac .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-imac { border-radius: 30px 30px 16px 16px; border-color: #c9d1c8; background: linear-gradient(145deg, #fbfffb 0%, #e4e9e4 72%, #cfd8cf 100%); }
+.desktop-tv-widget.skin-imac .desktop-tv-top { height: 18%; flex-basis: 18%; padding-inline: 8%; border-bottom: 0; }
+.desktop-tv-widget.skin-imac .desktop-tv-body { padding: 4% 8% 2%; }
+.desktop-tv-widget.skin-imac .desktop-tv-screen-frame { padding: 4px; border-radius: 18px; background: #d7ddd6; }
+.desktop-tv-widget.skin-imac .desktop-tv-screen { border-radius: 14px; }
+.desktop-tv-widget.skin-imac .desktop-tv-footer { height: 16%; flex-basis: 16%; padding-inline: 8%; }
+.app-shell .floating-crt-preview.skin-imac .floating-crt-preview-top { height: 24px; border-bottom: 0; }
+.app-shell .floating-crt-preview.skin-imac .floating-crt-preview-body { padding: 7px 15px 5px; }
+.app-shell .floating-crt-preview.skin-imac .floating-crt-preview-screen { border-radius: 10px; }
+.app-shell .floating-crt-preview.skin-imac .floating-crt-preview-footer { border-top: 0; padding-inline: 15px; }
+
+.desktop-tv-widget.skin-workstation .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-workstation { border-radius: 8px; border-color: #bac4bb; background: #e7ebe7; }
+.desktop-tv-widget.skin-workstation .desktop-tv-top { height: 14%; flex-basis: 14%; padding-inline: 5%; background: #d5dbd5; }
+.desktop-tv-widget.skin-workstation .desktop-tv-body { padding: 3% 5% 1%; }
+.desktop-tv-widget.skin-workstation .desktop-tv-screen-frame { padding: 3px; border-radius: 3px; background: #b5c0b6; }
+.desktop-tv-widget.skin-workstation .desktop-tv-screen { border-radius: 2px; }
+.desktop-tv-widget.skin-workstation .desktop-tv-footer { height: 20%; flex-basis: 20%; padding-inline: 5%; border-top: 1px solid #bcc6bc; background: #d5dbd5; }
+.desktop-tv-widget.skin-workstation .desktop-tv-action { border-radius: 4px; }
+.app-shell .floating-crt-preview.skin-workstation .floating-crt-preview-top { height: 24px; padding-inline: 10px; background: #d5dbd5; }
+.app-shell .floating-crt-preview.skin-workstation .floating-crt-preview-body { padding: 7px 10px 4px; }
+.app-shell .floating-crt-preview.skin-workstation .floating-crt-preview-screen { border-radius: 3px; }
+.app-shell .floating-crt-preview.skin-workstation .floating-crt-preview-footer { min-height: 42px; padding-inline: 10px; border-top: 1px solid #bcc6bc; background: #d5dbd5; }
+
+.desktop-tv-widget.skin-pocket .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-pocket { border-radius: 12px; border-color: #adb9b1; background: linear-gradient(155deg, #eef3ef, #c4cec6); }
+.desktop-tv-widget.skin-pocket .desktop-tv-top { height: 12%; flex-basis: 12%; padding-inline: 6%; }
+.desktop-tv-widget.skin-pocket .desktop-tv-body { padding: 5% 6% 2%; }
+.desktop-tv-widget.skin-pocket .desktop-tv-screen-frame { padding: 2px; border-radius: 6px; background: #9daa9f; }
+.desktop-tv-widget.skin-pocket .desktop-tv-screen { border-radius: 5px; padding: 7px 8px; }
+.desktop-tv-widget.skin-pocket .desktop-tv-footer { height: 18%; flex-basis: 18%; padding-inline: 6%; }
+.desktop-tv-widget.skin-pocket .desktop-tv-action { width: 22px; height: 22px; border-radius: 6px; }
+.app-shell .floating-crt-preview.skin-pocket .floating-crt-preview-top { height: 22px; padding-inline: 10px; }
+.app-shell .floating-crt-preview.skin-pocket .floating-crt-preview-body { padding: 6px 10px 4px; }
+.app-shell .floating-crt-preview.skin-pocket .floating-crt-preview-screen { min-height: 148px; border-radius: 5px; padding: 9px 10px; }
+.app-shell .floating-crt-preview.skin-pocket .floating-crt-preview-footer { min-height: 34px; padding-inline: 9px; }
+
+.app-shell .floating-skin-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.app-shell .floating-skin-option.skin-imac i { border-radius: 8px; background: linear-gradient(135deg, #f9fbf9, #bfc9c0); }
+.app-shell .floating-skin-option.skin-workstation i { border-radius: 4px; background: linear-gradient(135deg, #e9eee9, #aebbb0); }
+.app-shell .floating-skin-option.skin-pocket i { border-radius: 6px; background: linear-gradient(135deg, #edf4ef, #9faea3); }
+
+@media (max-width: 680px) {
+  .app-shell .archive-list > .table-head,
+  .app-shell .archive-list > .session-row { min-width: 720px; }
+}
+
 .app-shell .running-sessions-panel { margin: 0 32px 24px; }
 .app-shell .running-sessions-panel .panel-head { align-items: center; }
 .app-shell .running-session-list { display: grid; gap: 8px; }
@@ -3073,3 +3173,314 @@ html.floating-window #root {
   .app-shell .skill-repository-panel { align-items: stretch; flex-direction: column; }
   .app-shell .skill-repository-panel .secondary-button { width: 100%; justify-content: center; }
 }
+
+/* Hardware-form CRT skins. These rules deliberately change the silhouette,
+   screen geometry and control placement while keeping the live controls in
+   the same DOM, so every skin remains interactive at any widget size. */
+.desktop-tv-shell,
+.app-shell .floating-crt-preview {
+  position: relative;
+  isolation: isolate;
+  box-shadow: 0 3px 10px rgba(43, 56, 44, .12), inset 0 1px rgba(255,255,255,.8);
+}
+.desktop-tv-shell > *,
+.app-shell .floating-crt-preview > * { position: relative; z-index: 1; }
+.desktop-tv-shell::before,
+.desktop-tv-shell::after,
+.app-shell .floating-crt-preview::before,
+.app-shell .floating-crt-preview::after {
+  content: '';
+  position: absolute;
+  display: block;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* Television set: a broad bezel with a dedicated right-side tuner bay. */
+.desktop-tv-widget.skin-television .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-television {
+  border-radius: 17px 17px 12px 12px;
+  border-color: #c7cec6;
+  background: #eef1ed;
+}
+.desktop-tv-widget.skin-television .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-television .floating-crt-preview-top {
+  height: 13%;
+  flex-basis: 13%;
+  padding-inline: 7%;
+  border-bottom: 1px solid #d3d9d1;
+  background: linear-gradient(#f8faf7, #e5eae4);
+}
+.desktop-tv-widget.skin-television .desktop-tv-body,
+.app-shell .floating-crt-preview.skin-television .floating-crt-preview-body {
+  padding-right: 22%;
+}
+.desktop-tv-widget.skin-television .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-television .floating-crt-preview-body {
+  border-radius: 9px;
+}
+.desktop-tv-widget.skin-television .desktop-tv-shell::before,
+.app-shell .floating-crt-preview.skin-television::before {
+  top: 23%;
+  right: 5%;
+  bottom: 17%;
+  width: 13%;
+  border: 1px solid #c1cbc0;
+  border-radius: 8px;
+  background: linear-gradient(90deg, transparent 0 18%, rgba(150,164,148,.35) 19% 22%, transparent 23% 100%), repeating-linear-gradient(to bottom, #f7f9f5 0 7px, #d9e0d7 8px 9px);
+}
+.desktop-tv-widget.skin-television .desktop-tv-shell::after,
+.app-shell .floating-crt-preview.skin-television::after {
+  top: 29%;
+  right: 7.4%;
+  width: 8%;
+  height: 22%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 15%, #f8faf7 0 10%, #9ca99a 11% 17%, transparent 18%), radial-gradient(circle at 50% 52%, #fbfcfa 0 15%, #9ca99a 16% 23%, transparent 24%), radial-gradient(circle at 50% 89%, #8ec493 0 13%, #66806a 14% 22%, transparent 23%);
+}
+.app-shell .floating-crt-preview.skin-television .floating-crt-preview-body { padding-left: 13px; padding-top: 9px; }
+
+/* Arcade cabinet: a slanted screen hood and a pronounced lower control deck. */
+.desktop-tv-widget.skin-arcade .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-arcade {
+  border-radius: 22px 22px 8px 8px;
+  border-color: #c9c3b8;
+  background: linear-gradient(160deg, #f7f3ec 0 58%, #ded8cc 59% 100%);
+}
+.desktop-tv-widget.skin-arcade .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-arcade .floating-crt-preview-top {
+  height: 11%;
+  flex-basis: 11%;
+  padding-inline: 8%;
+  border-bottom: 0;
+}
+.desktop-tv-widget.skin-arcade .desktop-tv-body,
+.app-shell .floating-crt-preview.skin-arcade .floating-crt-preview-body {
+  padding: 3% 8% 19%;
+}
+.desktop-tv-widget.skin-arcade .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-arcade .floating-crt-preview-screen {
+  border-radius: 11px 11px 4px 4px;
+}
+.desktop-tv-widget.skin-arcade .desktop-tv-screen-frame { transform: perspective(240px) rotateX(1.5deg); }
+.desktop-tv-widget.skin-arcade .desktop-tv-shell::before,
+.app-shell .floating-crt-preview.skin-arcade::before {
+  left: 5%;
+  right: 5%;
+  bottom: 7%;
+  height: 12%;
+  border: 1px solid #c2b8a8;
+  border-radius: 7px;
+  background: linear-gradient(90deg, transparent 0 8%, rgba(122,111,93,.16) 8% 9%, transparent 9% 72%, rgba(122,111,93,.16) 72% 73%, transparent 73%), #ebe5da;
+}
+.desktop-tv-widget.skin-arcade .desktop-tv-shell::after,
+.app-shell .floating-crt-preview.skin-arcade::after {
+  right: 12%;
+  bottom: 10.2%;
+  width: 14%;
+  height: 5%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 20% 50%, #d6655d 0 18%, transparent 19%), radial-gradient(circle at 50% 50%, #e0b04c 0 18%, transparent 19%), radial-gradient(circle at 80% 50%, #61a776 0 18%, transparent 19%);
+}
+.app-shell .floating-crt-preview.skin-arcade .floating-crt-preview-body { padding-bottom: 26px; }
+.app-shell .floating-crt-preview.skin-arcade .floating-crt-preview-footer { padding-inline: 13px; }
+
+/* Terminal keyboard: tall hood up top and a visible keybed under the glass. */
+.desktop-tv-widget.skin-terminal .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-terminal {
+  border-radius: 9px 9px 5px 5px;
+  border-color: #b9c2ba;
+  background: #e2e7e2;
+}
+.desktop-tv-widget.skin-terminal .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-terminal .floating-crt-preview-top {
+  height: 16%;
+  flex-basis: 16%;
+  padding-inline: 6%;
+  background: #d4dbd4;
+}
+.desktop-tv-widget.skin-terminal .desktop-tv-body,
+.app-shell .floating-crt-preview.skin-terminal .floating-crt-preview-body {
+  padding: 2% 6% 18%;
+}
+.desktop-tv-widget.skin-terminal .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-terminal .floating-crt-preview-screen {
+  border-radius: 4px;
+}
+.desktop-tv-widget.skin-terminal .desktop-tv-shell::before,
+.app-shell .floating-crt-preview.skin-terminal::before {
+  left: 6%;
+  right: 6%;
+  bottom: 5%;
+  height: 12%;
+  border: 1px solid #b8c1b8;
+  border-radius: 4px;
+  background: repeating-linear-gradient(90deg, #c1c9c0 0 5%, #edf0ec 5% 7%, #c1c9c0 7% 12%, #edf0ec 12% 14%);
+}
+.desktop-tv-widget.skin-terminal .desktop-tv-shell::after,
+.app-shell .floating-crt-preview.skin-terminal::after {
+  left: 10%;
+  right: 10%;
+  bottom: 8.5%;
+  height: 2px;
+  background: #8fa08f;
+  opacity: .55;
+}
+.app-shell .floating-crt-preview.skin-terminal .floating-crt-preview-body { padding-bottom: 23px; }
+
+/* Tower workstation: recessed glass with two vertical structural rails. */
+.desktop-tv-widget.skin-tower .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-tower {
+  border-radius: 6px;
+  border-color: #aeb9b0;
+  background: #dbe1dc;
+}
+.desktop-tv-widget.skin-tower .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-tower .floating-crt-preview-top {
+  height: 12%;
+  flex-basis: 12%;
+  padding-inline: 9%;
+  border-bottom: 1px solid #b9c3b9;
+  background: #cbd3cc;
+}
+.desktop-tv-widget.skin-tower .desktop-tv-body,
+.app-shell .floating-crt-preview.skin-tower .floating-crt-preview-body {
+  padding: 4% 13% 3%;
+}
+.desktop-tv-widget.skin-tower .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-tower .floating-crt-preview-screen {
+  border-radius: 3px;
+}
+.desktop-tv-widget.skin-tower .desktop-tv-shell::before,
+.app-shell .floating-crt-preview.skin-tower::before {
+  top: 17%;
+  bottom: 14%;
+  left: 4%;
+  width: 5%;
+  border-radius: 3px;
+  background: repeating-linear-gradient(to bottom, #a4b0a5 0 6px, #dfe5df 6px 10px);
+  box-shadow: 0 0 0 1px rgba(132,148,135,.2);
+}
+.desktop-tv-widget.skin-tower .desktop-tv-shell::after,
+.app-shell .floating-crt-preview.skin-tower::after {
+  top: 17%;
+  right: 4%;
+  bottom: 14%;
+  width: 5%;
+  border-radius: 3px;
+  background: repeating-linear-gradient(to bottom, #a4b0a5 0 6px, #dfe5df 6px 10px);
+  box-shadow: 0 0 0 1px rgba(132,148,135,.2);
+}
+.app-shell .floating-crt-preview.skin-tower .floating-crt-preview-body { padding: 8px 25px 5px; }
+
+/* Wide console: a floating monitor shelf with a separate horizontal status
+   strip under the screen. */
+.desktop-tv-widget.skin-console .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-console {
+  border-radius: 13px 13px 5px 5px;
+  border-color: #c1cbc2;
+  background: linear-gradient(#f5f8f4 0 72%, #dce4dc 73% 100%);
+}
+.desktop-tv-widget.skin-console .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-console .floating-crt-preview-top {
+  height: 10%;
+  flex-basis: 10%;
+  padding-inline: 5%;
+  border-bottom: 0;
+}
+.desktop-tv-widget.skin-console .desktop-tv-body,
+.app-shell .floating-crt-preview.skin-console .floating-crt-preview-body {
+  padding: 2% 5% 5%;
+}
+.desktop-tv-widget.skin-console .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-console .floating-crt-preview-screen {
+  border-radius: 5px;
+}
+.desktop-tv-widget.skin-console .desktop-tv-shell::before,
+.app-shell .floating-crt-preview.skin-console::before {
+  left: 5%;
+  right: 5%;
+  bottom: 4%;
+  height: 12%;
+  border-top: 1px solid #bdc8bd;
+  border-radius: 2px;
+  background: repeating-linear-gradient(90deg, transparent 0 7%, rgba(132,151,134,.35) 7.5% 8.5%, transparent 9% 16%);
+}
+.desktop-tv-widget.skin-console .desktop-tv-shell::after,
+.app-shell .floating-crt-preview.skin-console::after {
+  left: 40%;
+  right: 40%;
+  bottom: 7%;
+  height: 3px;
+  border-radius: 50%;
+  background: #8cb793;
+}
+.app-shell .floating-crt-preview.skin-console .floating-crt-preview-body { padding-bottom: 7px; }
+
+/* Portable wide: handle ridge, shallow body and a battery bay on the side. */
+.desktop-tv-widget.skin-portable .desktop-tv-shell,
+.app-shell .floating-crt-preview.skin-portable {
+  border-radius: 15px 15px 10px 10px;
+  border-color: #b8c9c0;
+  background: #edf3ef;
+}
+.desktop-tv-widget.skin-portable .desktop-tv-top,
+.app-shell .floating-crt-preview.skin-portable .floating-crt-preview-top {
+  height: 14%;
+  flex-basis: 14%;
+  padding-inline: 9%;
+  border-bottom: 0;
+}
+.desktop-tv-widget.skin-portable .desktop-tv-body,
+.app-shell .floating-crt-preview.skin-portable .floating-crt-preview-body {
+  padding: 2% 9% 9%;
+}
+.desktop-tv-widget.skin-portable .desktop-tv-screen-frame,
+.app-shell .floating-crt-preview.skin-portable .floating-crt-preview-screen {
+  border-radius: 7px;
+}
+.desktop-tv-widget.skin-portable .desktop-tv-shell::before,
+.app-shell .floating-crt-preview.skin-portable::before {
+  top: 4%;
+  left: 37%;
+  width: 26%;
+  height: 4%;
+  border: 1px solid #b6c4ba;
+  border-radius: 99px;
+  background: #d6dfd8;
+}
+.desktop-tv-widget.skin-portable .desktop-tv-shell::after,
+.app-shell .floating-crt-preview.skin-portable::after {
+  top: 28%;
+  right: 4%;
+  width: 3%;
+  height: 32%;
+  border-radius: 3px;
+  background: repeating-linear-gradient(to bottom, #a4b9aa 0 5px, #dbe7dd 5px 9px);
+}
+.app-shell .floating-crt-preview.skin-portable .floating-crt-preview-body { padding-inline: 13px; }
+
+/* Shape language for picker swatches: the silhouette is visible before a
+   skin is applied, which makes the options distinguishable at a glance. */
+.app-shell .floating-skin-option { overflow: hidden; }
+.app-shell .floating-skin-option i { position: relative; overflow: hidden; }
+.app-shell .floating-skin-option.skin-television i { border-radius: 4px; background: linear-gradient(90deg, #f4f6f3 0 72%, #bbc6bb 73% 100%); }
+.app-shell .floating-skin-option.skin-television i::after { content: ''; position: absolute; top: 4px; right: 2px; width: 4px; height: 12px; border-radius: 3px; background: radial-gradient(circle, #7d927e 0 1px, transparent 2px) center/4px 5px; }
+.app-shell .floating-skin-option.skin-arcade i { border-radius: 6px 6px 2px 2px; background: linear-gradient(155deg, #f3ede4 0 67%, #b9ad9c 68% 100%); }
+.app-shell .floating-skin-option.skin-arcade i::after { content: ''; position: absolute; left: 3px; right: 3px; bottom: 2px; height: 3px; border-radius: 2px; background: #9c8e7c; }
+.app-shell .floating-skin-option.skin-terminal i { border-radius: 3px; background: linear-gradient(#bfc9c0 0 25%, #f0f3ef 26% 73%, #aebbb0 74%); }
+.app-shell .floating-skin-option.skin-terminal i::after { content: ''; position: absolute; left: 4px; right: 4px; bottom: 2px; height: 3px; background: repeating-linear-gradient(90deg, #869588 0 2px, transparent 2px 4px); }
+.app-shell .floating-skin-option.skin-tower i { border-radius: 2px; background: linear-gradient(90deg, #9ca99e 0 18%, #dfe6df 19% 81%, #9ca99e 82%); }
+.app-shell .floating-skin-option.skin-console i { border-radius: 4px 4px 2px 2px; background: linear-gradient(#f7faf7 0 72%, #c3cec4 73%); }
+.app-shell .floating-skin-option.skin-console i::after { content: ''; position: absolute; left: 5px; right: 5px; bottom: 2px; height: 2px; background: repeating-linear-gradient(90deg, #8da38f 0 2px, transparent 2px 4px); }
+.app-shell .floating-skin-option.skin-portable i { border-radius: 5px; background: linear-gradient(#f3f8f4 0 18%, #c1d2c6 19% 22%, #ecf3ed 23% 100%); }
+.app-shell .floating-skin-option.skin-portable i::before { content: ''; position: absolute; top: 1px; left: 8px; right: 8px; height: 2px; border-radius: 2px; background: #a9bcae; }
+
+@media (max-width: 680px) {
+  .app-shell .floating-skin-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.desktop-update-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px; padding-top:12px; border-top:1px solid #dfe9e3; }
+.desktop-update-row > div:first-child { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.desktop-update-row strong { color:var(--app-ink, #24332d); font-size:13px; }
+.desktop-update-row small { color:var(--app-muted, #728078); font-size:11px; }
+.desktop-update-actions { display:flex; align-items:center; gap:8px; flex:0 0 auto; }

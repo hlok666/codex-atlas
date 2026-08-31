@@ -1,4 +1,27 @@
-# Codex Atlas 0.1.6 发布说明
+# Codex Atlas 0.1.10 发布说明
+
+本版本包含：
+
+- 修复固定 URL 模式下反向 SSH 通道未清理旧监听，导致 `remote port forwarding failed for listen port 15730` 的问题。
+- 服务器通道部署会保留可诊断的 SSH 错误，并兼容 `ss`、`lsof`、`fuser` 监听检查。
+- 主软件版本更新为 `0.1.10`；Android 伴侣更新为 `0.1.7`（versionCode `8`）。
+
+
+# Codex Atlas 0.1.9 发布说明
+
+本版本包含：
+
+- 主软件运行设置增加 Atlas 桌面端软件内更新：检查 GitHub Release、复用已下载安装包、下载并启动安装。
+- 修复 GitHub Release 发布流程，Android APK 会与 Windows 安装包一起上传为 Release 资产。
+- Android 伴侣版本更新为 `0.1.6`（versionCode `7`）。
+
+
+本版本包含：
+
+- 使用持久 Codex `app-server` WebSocket 连接处理 Atlas 会话的恢复、后台队列、立即打断和实时状态/输出通知。
+- 新建或恢复会话优先连接同一个 app-server；外部旧 CLI 会话保留 `codex queue` 和终端输入兼容回退。
+- 移除 Atlas 每次工具调用的旧 `PostToolUse` Hook，避免 `hook timed out after 5s`；用户已有的其他 Hook 不受影响。
+
 
 本版本包含：
 
@@ -17,6 +40,15 @@
 - 发布构建改用固定 release 签名，后续版本支持 Android 覆盖更新；从旧 debug 签名版本迁移需卸载一次。
 - 技能页增加中文摘要、结构化章节和原始文档查看，自动恢复 GitHub 仓库地址并支持一键打开或查找。
 - 全部会话页保留完整工作目录，支持快速打开工作区，长标题和预览内容改为可读的多行布局。
+- Atlas Mini 增加电视侧控、街机控制台、终端键盘、塔式工作站、宽屏控制台和便携横屏等结构化 CRT 外形；预览与桌面悬浮窗同步切换。
+- 悬浮窗支持通过 Codex 原生 `queue --thread` 在后台排队发送消息，并支持图片、文档和路径附件。
+- 悬浮窗增加排队与立即打断两种输入方式，以及模型、CLI 权限和思考程度快捷设置。
+- Codex 模型列表合并本地缓存、当前配置、CC Switch 当前供应商和供应商模型接口。
+
+当前限制：
+
+- “立即打断”仍使用 Windows 终端输入注入，提交时可能短暂激活对应终端；后续将迁移到 Codex app-server 协议。
+- 模型、权限和思考程度会立即写入 Codex 配置，但已在运行的当前 turn 是否热重载由 Codex CLI 决定。
 
 安装包：
 

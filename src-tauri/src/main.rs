@@ -9,11 +9,9 @@ fn main() {
         }
         return;
     }
-    // Keep hook installation usable from an already-built desktop binary. The
-    // command performs the same atomic, backed-up install as the Runtime page
-    // without opening a second Tauri window.
+    // Keep legacy hook cleanup usable from an already-built desktop binary.
     if std::env::args().skip(1).any(|arg| arg == "--install-hook") {
-        match codex_atlas_lib::install_codex_hook_now() {
+        match codex_atlas_lib::remove_codex_hook_now() {
             Ok(status) => {
                 println!(
                     "Codex Atlas hook installed: {} (enabled={})",
