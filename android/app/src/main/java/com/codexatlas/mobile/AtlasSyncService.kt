@@ -59,6 +59,15 @@ class AtlasSyncService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Android 15 terminates apps that do not promptly stop a timed-out
+        // foreground service. Current releases use remoteMessaging, but keep
+        // this guard for upgrades from an older dataSync service instance.
+        worker?.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     private suspend fun runLoop() {
@@ -199,7 +208,9 @@ class AtlasSyncService : Service() {
     }
 
     private fun startForegroundCompat(value: Notification) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, value, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, value, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIFICATION_ID, value)

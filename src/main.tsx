@@ -62,8 +62,11 @@ import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDeskt
 import type { DesktopUpdateInfo } from './lib/atlasBridge'
 import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
+import packageJson from '../package.json'
 import '@fontsource-variable/geist'
 import './styles.css'
+
+const ATLAS_VERSION = packageJson.version
 
 type Session = {
   id: string
@@ -1296,7 +1299,7 @@ function App() {
         <div className="brand-lockup">
           <div className="brand-mark"><img src="/codex-atlas-icon.svg" alt="" /></div>
           <div>
-            <div className="brand-name">CODEX ATLAS</div>
+            <div className="brand-name">CODEX ATLAS <span className="brand-version">v{ATLAS_VERSION}</span></div>
           </div>
         </div>
         <div className="topbar-center"><span className="pulse-dot" /> {runningSessionCount > 0 ? `${runningSessionCount} ${t('runningSessions')}` : t('localIndexSynced')}</div>
@@ -2833,7 +2836,7 @@ function FloatingMini() {
   return <main className={`desktop-tv-widget ${state} skin-${floatingSkin}`} style={{ opacity: floatingOpacity / 100, '--floating-font-scale': String(floatingSize / 252 * floatingFontScale / 100) } as React.CSSProperties} aria-label={`${t('statusPrefix')}: ${statusLabel}`} title={statusLabel} onContextMenu={openContextMenu}>
     <div className="desktop-tv-shell">
        <div className="desktop-tv-top">
-        <span className="desktop-tv-brand">ATLAS</span>
+        <span className="desktop-tv-brand">ATLAS <small className="desktop-tv-version">v{ATLAS_VERSION}</small></span>
         <span className="desktop-tv-top-right"><span className="desktop-tv-top-balance" title={currentBalance?.name || (language === 'zh' ? '当前供应商余额' : 'Current provider balance')}>{currentBalance?.remaining === undefined ? '--' : currentBalance.remaining.toFixed(2)}</span><span className="desktop-tv-leds"><i className="red" /><i className="yellow" /><i className="green" /></span></span>
       </div>
       <div className="desktop-tv-body">
@@ -2844,7 +2847,7 @@ function FloatingMini() {
               <div className="desktop-tv-session-meta" aria-hidden="true"><strong>{selectedItem?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{selectedItem ? `${selectedItem.folder} · ${selectedItem.model}` : ''}</small></div>
              {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite" onClick={(event) => event.stopPropagation()}><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input ref={approvalOtherInputRef} value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : quickInputOpen ? <form className="desktop-tv-quick-input" onSubmit={submitQuickInput} onClick={(event) => event.stopPropagation()}>
                 <div className="desktop-tv-quick-modes" role="group" aria-label={language === 'zh' ? '发送方式' : 'Send mode'}><button type="button" className={quickInputMode === 'queue' ? 'selected' : ''} onClick={() => setQuickInputMode('queue')}>{language === 'zh' ? '排队' : 'Queue'}</button><button type="button" className={quickInputMode === 'interrupt' ? 'selected' : ''} onClick={() => setQuickInputMode('interrupt')}>{language === 'zh' ? '打断' : 'Interrupt'}</button></div>
-                <textarea ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuickInputOpen(false); setQuickInput(''); setQuickAttachments([]) } if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={t('quickInputPlaceholder')} disabled={!selectedItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} rows={2} />
+                <textarea ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuickInputOpen(false); setQuickInput(''); setQuickAttachments([]); return } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={t('quickInputPlaceholder')} disabled={!selectedItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} rows={2} />
                 <div className="desktop-tv-quick-attachments">{quickAttachments.map((attachment, index) => <span key={`${attachment.name}:${index}`} title={attachment.path || attachment.name}><i>{attachment.kind === 'image' ? <ImageIcon size={10} /> : <FileText size={10} />}</i>{attachment.name}<button type="button" onClick={() => setQuickAttachments((current) => current.filter((_, currentIndex) => currentIndex !== index))} aria-label={language === 'zh' ? `移除 ${attachment.name}` : `Remove ${attachment.name}`}><X size={10} /></button></span>)}</div>
                 <div className="desktop-tv-quick-tools"><label className="desktop-tv-file-button" title={language === 'zh' ? '添加文档或图片' : 'Attach a document or image'}><Paperclip size={12} /><input ref={quickFileInputRef} type="file" multiple accept="image/*,.txt,.md,.pdf,.json,.csv,.doc,.docx,.xls,.xlsx" onChange={(event) => { addQuickFiles(event.target.files); event.currentTarget.value = '' }} /></label><span>{quickInputMode === 'queue' ? (language === 'zh' ? '等待当前任务完成' : 'Wait for current task') : (language === 'zh' ? '立即打断并提交' : 'Interrupt and submit')}</span><button type="submit" disabled={(!quickInput.trim() && quickAttachments.length === 0) || !selectedItem || actionBusy !== null} aria-label={t('quickInputSubmit')} title={t('quickInputSubmit')}>{actionBusy === 'input' ? <LoaderCircle className="spin" size={12} /> : <ArrowUpRight size={12} />}</button></div>
               </form> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}

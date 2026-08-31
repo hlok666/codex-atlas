@@ -3022,6 +3022,59 @@ html.floating-window #root {
 .desktop-tv-approval-other button { flex: 0 0 auto; min-height: 24px; padding: 3px 7px; border: 1px solid rgba(174,222,177,.6); border-radius: 6px; color: #17321c; background: #bfe7b8; font: 700 9px/1.2 'Geist Variable', 'Microsoft YaHei UI', sans-serif; white-space: normal; -webkit-app-region: no-drag; }
 .desktop-tv-approval-other button:disabled { opacity: .56; cursor: default; }
 
+/* Keep the live CRT content stable while the native window is resized. The
+   quick-input form is a grid item inside a flex column, so every nested row
+   needs an explicit width and the grid must not stretch empty space between
+   controls. */
+.desktop-tv-screen,
+.desktop-tv-screen-frame,
+.desktop-tv-screen-head,
+.desktop-tv-session-meta,
+.desktop-tv-output,
+.desktop-tv-quick-input { min-width: 0; }
+.desktop-tv-screen-head { flex: 0 0 auto; }
+.desktop-tv-screen-head span { min-width: 0; flex: 1 1 auto; }
+.desktop-tv-screen-head b { min-width: 0; max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-tv-session-meta { width: 100%; max-width: 100%; flex: 0 0 auto; }
+.desktop-tv-session-meta strong,
+.desktop-tv-session-meta small { width: 100%; min-width: 0; }
+.desktop-tv-session-meta strong { max-width: 100%; font-size: clamp(10px, calc(12px * var(--floating-font-scale, 1)), 20px); line-height: 1.15; }
+.desktop-tv-session-meta small { max-width: 100%; font-size: clamp(8px, calc(9px * var(--floating-font-scale, 1)), 14px); line-height: 1.15; }
+.desktop-tv-output { width: 100%; flex: 0 1 auto; }
+.desktop-tv-quick-input {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto;
+  align-content: start;
+  justify-items: stretch;
+  align-items: stretch;
+  gap: 5px;
+}
+.desktop-tv-quick-modes,
+.desktop-tv-quick-attachments,
+.desktop-tv-quick-tools { width: 100%; min-width: 0; }
+.desktop-tv-quick-modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.desktop-tv-quick-modes button { width: 100%; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.desktop-tv-quick-input textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: clamp(34px, calc(var(--floating-size, 252px) * .13), 84px);
+  min-height: 34px;
+  max-height: 84px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(174,222,177,.58) transparent;
+}
+.desktop-tv-quick-input textarea::-webkit-scrollbar { width: 6px; height: 6px; }
+.desktop-tv-quick-input textarea::-webkit-scrollbar-track { background: transparent; }
+.desktop-tv-quick-input textarea::-webkit-scrollbar-thumb { border-radius: 6px; background: rgba(174,222,177,.58); }
+.desktop-tv-quick-input textarea::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.brand-version { margin-left: 6px; color: var(--app-muted, #7b847e); font-size: .72em; font-weight: 560; letter-spacing: 0; }
+.desktop-tv-version { margin-left: 4px; color: #93a293; font: 500 .72em 'Cascadia Mono', 'SFMono-Regular', monospace; letter-spacing: 0; }
+
 /* Feature-page coherence pass. Keep low-content, loading, and failure states
    inside the same quiet white surface instead of turning whole sections red. */
 .app-shell .settings-panel,

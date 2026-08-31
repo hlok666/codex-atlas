@@ -9,6 +9,7 @@ import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import java.io.File
+import java.io.FileOutputStream
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -56,10 +57,16 @@ class AppUpdateManager(private val context: Context) {
                 val latest = normalizeVersion(tag)
                 if (latest.isBlank()) error("GitHub release has no version tag")
                 val assets = root["assets"]?.jsonArray.orEmpty()
-                val apk = assets.firstOrNull { asset ->
-                    val name = asset.jsonObject["name"]?.toString()?.trim('"')?.lowercase().orEmpty()
-                    name.endsWith(".apk")
-                }?.jsonObject?.get("browser_download_url")?.toString()?.trim('"')
+                val apk = assets
+                    .mapNotNull { asset ->
+                        val objectValue = asset.jsonObject
+                        val name = objectValue["name"]?.toString()?.trim('"').orEmpty()
+                        val url = objectValue["browser_download_url"]?.toString()?.trim('"')
+                        if (name.endsWith(".apk", ignoreCase = true) && !url.isNullOrBlank()) name to url else null
+                    }
+                    .sortedByDescending { (name, _) -> name.equals("codex-atlas-android.apk", ignoreCase = true) }
+                    .firstOrNull()
+                    ?.second
                 AtlasUpdate(
                     currentVersion = normalizeVersion(BuildConfig.VERSION_NAME),
                     latestVersion = latest,
@@ -80,19 +87,23 @@ class AppUpdateManager(private val context: Context) {
                 onProgress(100)
                 return@runCatching target
             }
-            target.delete()
             val partial = File(target.parentFile, "${target.name}.part")
-            partial.delete()
-            val request = Request.Builder().url(url).header("User-Agent", "Codex-Atlas-Android").get().build()
+            val existing = partial.length().takeIf { partial.isFile } ?: 0L
+            val requestBuilder = Request.Builder().url(url).header("User-Agent", "Codex-Atlas-Android").get()
+            if (existing > 0L) requestBuilder.header("Range", "bytes=$existing-")
+            val request = requestBuilder.build()
             http.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) error("Download returned HTTP ${response.code}")
                 val body = response.body ?: error("GitHub returned an empty APK")
-                val total = body.contentLength()
+                val append = existing > 0L && response.code == 206
+                if (!append && existing > 0L) partial.delete()
+                val copiedStart = if (append) existing else 0L
+                val total = body.contentLength().let { length -> if (length > 0L) length + copiedStart else 0L }
                 partial.parentFile?.mkdirs()
                 body.byteStream().use { input ->
-                    partial.outputStream().use { output ->
+                    FileOutputStream(partial, append).use { output ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                        var copied = 0L
+                        var copied = copiedStart
                         var read: Int
                         while (input.read(buffer).also { read = it } >= 0) {
                             if (read == 0) continue
@@ -103,6 +114,7 @@ class AppUpdateManager(private val context: Context) {
                     }
                 }
             }
+            target.delete()
             if (!partial.renameTo(target)) error("无法保存下载的 APK")
             if (!isUsableApk(target, update)) {
                 target.delete()
@@ -143,8 +155,11 @@ class AppUpdateManager(private val context: Context) {
             context.packageManager.getPackageArchiveInfo(file.absolutePath, PackageManager.GET_META_DATA)
         }.getOrNull() ?: return false
         if (info.packageName != context.packageName) return false
-        val expected = update?.latestVersion?.let(::normalizeVersion)
-        return expected.isNullOrBlank() || normalizeVersion(info.versionName.orEmpty()) == expected
+        val current = update?.currentVersion?.let(::normalizeVersion)
+        // The GitHub release tag tracks the desktop package. Android has its
+        // own versionName, so validate that the APK is newer than this app
+        // instead of requiring it to equal the desktop tag.
+        return current.isNullOrBlank() || compareVersions(info.versionName.orEmpty(), current) > 0
     }
 
     private fun isSignatureCompatible(file: File): Boolean {

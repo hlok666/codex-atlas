@@ -25,7 +25,7 @@ use tauri_plugin_notification::NotificationExt;
 use tiny_http::{Header, Method, Response, Server};
 use url::Url;
 use walkdir::WalkDir;
-use tungstenite::{connect, Message, WebSocket};
+use tungstenite::{client::IntoClientRequest, connect, http::HeaderValue, Message, WebSocket};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
@@ -6293,12 +6293,39 @@ fn app_server_read_until<S: Read + Write>(
     }
 }
 
+fn app_server_token_path() -> PathBuf {
+    codex_home().join("atlas-app-server-token")
+}
+
+fn app_server_token() -> Option<String> {
+    let path = app_server_token_path();
+    if let Ok(value) = fs::read_to_string(&path) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    let token = format!("atlas-app-{:x}-{:x}", now_ms(), std::process::id());
+    write_text_atomically(&path, &format!("{token}\n")).ok()?;
+    Some(token)
+}
+
 fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
     let port = listener.local_addr().ok()?.port();
     drop(listener);
     let endpoint = format!("ws://127.0.0.1:{port}");
-    let server_args = vec!["app-server".to_string(), "--listen".to_string(), endpoint.clone()];
+    let auth_token = app_server_token()?;
+    let token_path = app_server_token_path();
+    let server_args = vec![
+        "app-server".to_string(),
+        "--listen".to_string(),
+        endpoint.clone(),
+        "--ws-auth".to_string(),
+        "capability-token".to_string(),
+        "--ws-token-file".to_string(),
+        token_path.to_string_lossy().to_string(),
+    ];
     let mut command = command_for(&codex_executable(), &server_args).ok()?;
     command.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -6313,12 +6340,25 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
     let active_turns = Arc::new(Mutex::new(HashMap::new()));
     let turns_for_thread = active_turns.clone();
     let endpoint_for_thread = endpoint.clone();
+    let auth_token_for_thread = auth_token.clone();
     let app_for_thread = app.clone();
     thread::spawn(move || {
         let mut child = child;
         let mut connected = None;
         for _ in 0..80 {
-            match connect(endpoint_for_thread.as_str()) {
+            let mut request = match endpoint_for_thread.as_str().into_client_request() {
+                Ok(request) => request,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            };
+            let Ok(value) = HeaderValue::from_str(&format!("Bearer {auth_token_for_thread}")) else {
+                let _ = child.kill();
+                return;
+            };
+            request.headers_mut().insert("Authorization", value);
+            match connect(request) {
                 Ok((socket, _)) => {
                     connected = Some(socket);
                     break;
@@ -6421,19 +6461,55 @@ fn app_server_user_input(input: &str, attachments: &[FloatingAttachment]) -> Vec
 }
 
 fn app_server_send_message(state: &AppState, session: &SessionRecord, input: &str, mode: &str, attachments: &[FloatingAttachment]) -> Result<bool, String> {
+    let _ = mode;
     let items = app_server_user_input(input, attachments);
     if items.is_empty() { return Ok(false); }
-    if mode.eq_ignore_ascii_case("interrupt") {
-        if let Some(turn_id) = state.app_server.lock().ok().and_then(|server| server.as_ref().and_then(|server| server.active_turns.lock().ok().and_then(|turns| turns.get(&session.id).cloned()))) {
-            let _ = app_server_request(state, "turn/interrupt", serde_json::json!({"threadId":session.id,"turnId":turn_id}));
+    let client_message_id = format!("atlas-{}", now_ms());
+    // A newly-created app-server does not automatically hydrate threads that
+    // were started by the interactive CLI. Resume the exact thread first so
+    // turn/start and turn/steer operate on the same durable conversation.
+    let mut resume_params = serde_json::json!({
+        "threadId": session.id,
+        "excludeTurns": true,
+    });
+    if !session.cwd.trim().is_empty() {
+        resume_params["cwd"] = Value::String(session.cwd.clone());
+    }
+    app_server_request(state, "thread/resume", resume_params)?;
+
+    let active_turn = state
+        .app_server
+        .lock()
+        .ok()
+        .and_then(|server| server.as_ref().cloned())
+        .and_then(|server| server.active_turns.lock().ok().and_then(|turns| turns.get(&session.id).cloned()));
+    if let Some(turn_id) = active_turn {
+        let steer = app_server_request(
+            state,
+            "turn/steer",
+            serde_json::json!({
+                "threadId": session.id,
+                "expectedTurnId": turn_id,
+                "input": items,
+                "clientUserMessageId": client_message_id,
+            }),
+        );
+        if steer.is_ok() {
+            return Ok(true);
         }
-        let result = app_server_request(state, "turn/start", serde_json::json!({"threadId":session.id,"input":items}))?;
-        return Ok(!result.is_null());
+        // The turn may have completed between the notification and the
+        // request. A fresh turn is safe after that race.
     }
-    let result = app_server_request(state, "thread/queue/add", serde_json::json!({"threadId":session.id,"clientUserMessageId":format!("atlas-{}", now_ms()),"input":items}))?;
-    if !session.running {
-        let _ = app_server_request(state, "thread/queue/start", serde_json::json!({"threadId":session.id,"queuedSubmissionId":result.get("queuedSubmissionId").cloned().unwrap_or(Value::Null)}));
-    }
+    let result = app_server_request(
+        state,
+        "turn/start",
+        serde_json::json!({
+            "threadId": session.id,
+            "cwd": if session.cwd.trim().is_empty() { Value::Null } else { Value::String(session.cwd.clone()) },
+            "input": items,
+            "clientUserMessageId": client_message_id,
+        }),
+    )?;
     Ok(!result.is_null())
 }
 
@@ -6822,15 +6898,15 @@ fn send_session_input(
     let Some(session) = find_session(&session_id) else {
         return Ok(false);
     };
+    if queue_codex_message(&session, &input) {
+        return Ok(true);
+    }
     if app_server_send_message(&state, &session, &input, "queue", &[]).unwrap_or(false) {
         return Ok(true);
     }
     // `codex queue` is deliberately allowed for an exited thread too. This
     // persists the prompt without opening or focusing a terminal; the user
     // can activate the queued thread separately when needed.
-    if queue_codex_message(&session, &input) {
-        return Ok(true);
-    }
     if focus_terminal.unwrap_or(false) || is_continue_prompt(&input) {
         return send_text_to_terminal(&session, &input, focus_terminal.unwrap_or(false))
             .map(|_| true);
@@ -6874,22 +6950,28 @@ fn send_floating_message(state: State<'_, AppState>, request: FloatingMessageReq
     if input.trim().is_empty() && request.attachments.is_empty() {
         return Ok(false);
     }
-    if app_server_send_message(&state, &session, &input, &request.mode, &request.attachments).unwrap_or(false) {
+    if request.mode.trim().eq_ignore_ascii_case("interrupt") {
+        if app_server_send_message(&state, &session, &input, "interrupt", &request.attachments).unwrap_or(false) {
+            return Ok(true);
+        }
+        if !session.running && terminal_window_for_session(&session).is_none() {
+            return Err("the session is not running and no matching terminal was found".to_string());
+        }
+        return send_text_to_terminal(&session, &input, true).map(|_| true);
+    }
+    if queue_codex_message_with_attachments(&session, &input, &request.attachments) {
         return Ok(true);
     }
-    match request.mode.trim().to_ascii_lowercase().as_str() {
-        "interrupt" => {
-            if !session.running && terminal_window_for_session(&session).is_none() {
-                return Err("the session is not running and no matching terminal was found".to_string());
-            }
-            send_text_to_terminal(&session, &input, true).map(|_| true)
-        }
-        _ => Ok(queue_codex_message_with_attachments(
-            &session,
-            &input,
-            &request.attachments,
-        )),
+    if app_server_send_message(&state, &session, &input, "queue", &request.attachments).unwrap_or(false) {
+        return Ok(true);
     }
+    // `codex queue` is not present in older CLI releases. In that case use the
+    // same real terminal input path as the explicit continue action so the
+    // floating widget still submits the message and Enter reliably.
+    if session.running || terminal_window_for_session(&session).is_some() {
+        return send_text_to_terminal(&session, &input, true).map(|_| true);
+    }
+    Ok(false)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -7300,7 +7382,7 @@ async fn download_voice_archive_with_reqwest(
 ) -> Result<(u64, Option<u64>), String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(7_200))
         .build()
         .map_err(|error| format!("创建语音下载器失败: {error}"))?;
     let mut last_error = String::new();
@@ -7405,45 +7487,78 @@ async fn download_voice_archive_with_reqwest(
 }
 
 #[cfg(target_os = "windows")]
-fn download_voice_archive_with_powershell(url: &str, temp_path: &Path) -> Result<u64, String> {
-    let escaped_url = powershell_single_quote(url);
-    let escaped_path = powershell_single_quote(&temp_path.to_string_lossy());
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; $url = '{escaped_url}'; $target = '{escaped_path}'; $parent = Split-Path -Parent $target; if ($parent) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}; $done = $false; $last = $null; for ($attempt = 1; $attempt -le 3 -and -not $done; $attempt++) {{ try {{ Invoke-WebRequest -Uri $url -OutFile $target -Resume; $done = $true }} catch {{ $last = $_.Exception.Message; if ($attempt -lt 3) {{ Start-Sleep -Seconds ([Math]::Min(8, [Math]::Pow(2, $attempt))) }} }} }}; if (-not $done) {{ throw $last }}",
-    );
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoLogo",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        &script,
-    ]);
-    command.stdin(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
+fn download_voice_archive_with_curl(url: &str, temp_path: &Path) -> Result<u64, String> {
+    // PowerShell 5.1 does not implement Invoke-WebRequest -Resume. Windows
+    // ships curl.exe on supported releases, and curl handles GitHub redirects,
+    // proxies, retries, and byte ranges without depending on the shell locale.
+    let parent = temp_path
+        .parent()
+        .ok_or_else(|| "语音模型下载路径无效".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("创建语音下载目录失败: {error}"))?;
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        let existing = fs::metadata(temp_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut command = Command::new("curl.exe");
+        command.args([
+            "--location",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "2",
+            "--retry-all-errors",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "7200",
+            "--speed-limit",
+            "1024",
+            "--speed-time",
+            "60",
+        ]);
+        if existing > 0 {
+            command.args(["--continue-at", "-"]);
+        }
+        command.args(["--output", &temp_path.to_string_lossy(), url]);
+        command.stdin(Stdio::null());
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                let size = fs::metadata(temp_path)
+                    .map(|metadata| metadata.len())
+                    .map_err(|error| format!("读取下载文件大小失败: {error}"))?;
+                if size > 0 {
+                    return Ok(size);
+                }
+                last_error = "curl 没有生成有效文件".to_string();
+            }
+            Ok(output) => {
+                let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                last_error = if detail.is_empty() {
+                    format!("curl 退出码 {}", output.status)
+                } else {
+                    detail
+                };
+                // HTTP servers that do not support byte ranges cannot resume a
+                // partial archive. Restart cleanly on the next attempt.
+                if output.status.code() == Some(33) {
+                    let _ = fs::remove_file(temp_path);
+                }
+            }
+            Err(error) => {
+                last_error = format!("启动 curl.exe 失败: {error}");
+            }
+        }
+        if attempt < 3 {
+            thread::sleep(Duration::from_secs((attempt * 2) as u64));
+        }
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("启动 Windows 系统下载器失败: {error}"))?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!("PowerShell 下载失败: {}", output.status)
-        } else {
-            detail
-        });
-    }
-    let size = fs::metadata(temp_path)
-        .map(|metadata| metadata.len())
-        .map_err(|error| format!("读取下载文件大小失败: {error}"))?;
-    if size == 0 {
-        return Err("Windows 系统下载器没有生成有效文件".to_string());
-    }
-    Ok(size)
+    Err(last_error)
 }
 
 async fn async_sleep(duration: Duration) {
@@ -7503,7 +7618,7 @@ async fn download_voice_model(spec: &'static VoiceModelSpec, step: u8) -> Result
                 let url = spec.archive_url.to_string();
                 let fallback_path = temp_path.clone();
                 let fallback = tauri::async_runtime::spawn_blocking(move || {
-                    download_voice_archive_with_powershell(&url, &fallback_path)
+                    download_voice_archive_with_curl(&url, &fallback_path)
                 })
                 .await
                 .map_err(|error| format!("Windows 下载任务失败: {error}"))?;

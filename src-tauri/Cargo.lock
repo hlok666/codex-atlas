@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "codex-atlas"
-version = "0.1.10"
+version = "0.1.13"
 dependencies = [
  "dirs",
  "keyring",

@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.13 发布说明
+
+- 修复悬浮窗发送调用已移除的 `thread/queue/*` app-server 方法，改用 Codex 0.151 支持的 `thread/resume`、`turn/start` 和 `turn/steer`。
+- 为 Atlas 内置 app-server 增加 capability token 握手，修复本地 WebSocket 连接被 401/403 拒绝导致的发送无效。
+- 悬浮窗排队发送继续优先使用 Codex 原生 `codex queue`，旧版本 CLI 保留终端输入回退。
+- 桌面版本更新为 `0.1.13`；Android 伴侣更新为 `0.1.9`（versionCode `10`）。
+
 # Codex Atlas 0.1.10 发布说明
 
 本版本包含：

@@ -992,38 +992,44 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                 },
                             )
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank()) {
-                                Text(if (zh) "发送" else "Send")
-                            }
-                            TextButton(onClick = {
-                                pendingVoiceMode = false
-                                if (!voiceController.isAvailable()) {
-                                    Toast.makeText(context, if (zh) "系统不支持语音识别" else "Speech recognition is unavailable", Toast.LENGTH_SHORT).show()
-                                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                                    voiceController.start(message, continuous = false)
-                                } else {
-                                    audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank(), modifier = Modifier.weight(1f)) {
+                                    Text(if (zh) "发送" else "Send")
                                 }
-                            }, enabled = voiceController.isAvailable() && !messageBusy && !voiceSnapshot.active) { Text(if (zh) "语音输入" else "Dictate") }
-                            OutlinedButton(onClick = {
-                                pendingVoiceMode = true
-                                if (!voiceController.isAvailable()) {
-                                    Toast.makeText(context, if (zh) "系统不支持语音识别" else "Speech recognition is unavailable", Toast.LENGTH_SHORT).show()
-                                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                                    voiceController.start(message, continuous = true)
-                                } else {
-                                    audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                OutlinedButton(onClick = { createVisible = !createVisible }, modifier = Modifier.weight(1f)) {
+                                    Text(if (zh) "新建会话" else "New session")
                                 }
-                            }, enabled = voiceController.isAvailable() && !messageBusy && !voiceSnapshot.active) { Text(if (zh) "连续语音" else "Voice mode") }
-                            TextButton(onClick = {
-                                readRepliesAloud = !readRepliesAloud
-                                BridgePreferences.saveReadRepliesAloud(context, readRepliesAloud)
-                                if (!readRepliesAloud) speechOutput.stop()
-                            }) {
-                                Text(if (readRepliesAloud) { if (zh) "朗读中" else "Read on" } else { if (zh) "朗读" else "Read" })
                             }
-                            OutlinedButton(onClick = { createVisible = !createVisible }) { Text(if (zh) "新建会话" else "New session") }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                TextButton(onClick = {
+                                    pendingVoiceMode = false
+                                    if (!voiceController.isAvailable()) {
+                                        Toast.makeText(context, if (zh) "系统不支持语音识别" else "Speech recognition is unavailable", Toast.LENGTH_SHORT).show()
+                                    } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                        voiceController.start(message, continuous = false)
+                                    } else {
+                                        audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                }, enabled = voiceController.isAvailable() && !messageBusy && !voiceSnapshot.active, modifier = Modifier.weight(1f)) { Text(if (zh) "语音输入" else "Dictate") }
+                                OutlinedButton(onClick = {
+                                    pendingVoiceMode = true
+                                    if (!voiceController.isAvailable()) {
+                                        Toast.makeText(context, if (zh) "系统不支持语音识别" else "Speech recognition is unavailable", Toast.LENGTH_SHORT).show()
+                                    } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                        voiceController.start(message, continuous = true)
+                                    } else {
+                                        audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                }, enabled = voiceController.isAvailable() && !messageBusy && !voiceSnapshot.active, modifier = Modifier.weight(1f)) { Text(if (zh) "连续语音" else "Voice mode") }
+                                TextButton(onClick = {
+                                    readRepliesAloud = !readRepliesAloud
+                                    BridgePreferences.saveReadRepliesAloud(context, readRepliesAloud)
+                                    if (!readRepliesAloud) speechOutput.stop()
+                                }, modifier = Modifier.weight(1f)) {
+                                    Text(if (readRepliesAloud) { if (zh) "朗读中" else "Read on" } else { if (zh) "朗读" else "Read" })
+                                }
+                            }
                         }
                         if (queuedMessageCount > 0) {
                             Text(
@@ -1285,53 +1291,62 @@ private fun ConversationMessage(item: AtlasMessage, chinese: Boolean) {
         isTool -> Color(0xFFFFF6E6)
         else -> Color(0xFFF7F9F6)
     }
-    Column(
-        modifier = Modifier.fillMaxWidth().background(surfaceColor, RoundedCornerShape(10.dp)).padding(11.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp),
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(roleLabel, color = roleColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-            if (item.timestampMs > 0) Text(formatConversationTime(item.timestampMs), color = Color(0xFF8A968B), style = MaterialTheme.typography.labelSmall)
-        }
-        if (isTool && !item.toolStatus.isNullOrBlank()) {
-            Text(
-                when (item.toolStatus?.lowercase()) {
-                    "completed", "done", "success" -> if (chinese) "已完成" else "Completed"
-                    "failed", "error" -> if (chinese) "失败" else "Failed"
-                    else -> if (chinese) "执行中" else "Running"
-                },
-                color = roleColor,
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
-        val content = item.text.ifBlank { item.toolDetail.orEmpty() }
-        if (content.isBlank()) {
-            Text(if (isTool) if (chinese) "工具调用" else "Tool call" else if (chinese) "正在生成…" else "Generating…", color = Color(0xFF69766B), style = MaterialTheme.typography.bodySmall)
-        } else {
-            parseConversationBlocks(content).forEach { block ->
-                when (block) {
-                    is ConversationBlock.Code -> Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF202A24), tonalElevation = 0.dp) {
-                        Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (block.language.isNotBlank()) Text(block.language, color = Color(0xFF9FC5A4), style = MaterialTheme.typography.labelSmall)
-                            Text(block.text, color = Color(0xFFE2F0E2), style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                        }
-                    }
-                    is ConversationBlock.Paragraph -> {
-                        block.text.split('\n').forEach { line ->
-                            val trimmed = line.trimStart()
-                            val isHeading = trimmed.startsWith("#")
-                            val isBullet = trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.startsWith("• ")
-                            val rendered = when {
-                                isBullet -> "• " + trimmed.drop(2).trimStart()
-                                isHeading -> trimmed.trimStart('#').trimStart()
-                                else -> line
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(if (isUser) .86f else .95f)
+                .background(surfaceColor, RoundedCornerShape(12.dp))
+                .border(1.dp, if (isUser) Color(0xFFD5E7D6) else Color(0xFFE5EAE5), RoundedCornerShape(12.dp))
+                .padding(horizontal = 13.dp, vertical = 11.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(roleLabel, color = roleColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                if (item.timestampMs > 0) Text(formatConversationTime(item.timestampMs), color = Color(0xFF8A968B), style = MaterialTheme.typography.labelSmall)
+            }
+            if (isTool && !item.toolStatus.isNullOrBlank()) {
+                Text(
+                    when (item.toolStatus?.lowercase()) {
+                        "completed", "done", "success" -> if (chinese) "已完成" else "Completed"
+                        "failed", "error" -> if (chinese) "失败" else "Failed"
+                        else -> if (chinese) "执行中" else "Running"
+                    },
+                    color = roleColor,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            val content = item.text.ifBlank { item.toolDetail.orEmpty() }
+            if (content.isBlank()) {
+                Text(if (isTool) if (chinese) "工具调用" else "Tool call" else if (chinese) "正在生成…" else "Generating…", color = Color(0xFF69766B), style = MaterialTheme.typography.bodySmall)
+            } else {
+                parseConversationBlocks(content).forEach { block ->
+                    when (block) {
+                        is ConversationBlock.Code -> Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF202A24), tonalElevation = 0.dp) {
+                            Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (block.language.isNotBlank()) Text(block.language, color = Color(0xFF9FC5A4), style = MaterialTheme.typography.labelSmall)
+                                Text(block.text, color = Color(0xFFE2F0E2), style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                             }
-                            Text(
-                                rendered,
-                                color = Color(0xFF334238),
-                                style = if (isHeading) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (isHeading) FontWeight.SemiBold else FontWeight.Normal,
-                            )
+                        }
+                        is ConversationBlock.Paragraph -> {
+                            block.text.split('\n').forEach { line ->
+                                val trimmed = line.trimStart()
+                                val isHeading = trimmed.startsWith("#")
+                                val isBullet = trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.startsWith("• ")
+                                val rendered = when {
+                                    isBullet -> "• " + trimmed.drop(2).trimStart()
+                                    isHeading -> trimmed.trimStart('#').trimStart()
+                                    else -> line
+                                }
+                                Text(
+                                    rendered,
+                                    color = Color(0xFF334238),
+                                    style = if (isHeading) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (isHeading) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                            }
                         }
                     }
                 }
