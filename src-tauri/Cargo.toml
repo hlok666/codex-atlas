@@ -1,6 +1,6 @@
 [package]
 name = "codex-atlas"
-version = "0.1.13"
+version = "0.1.16"
 description = "Codex Atlas desktop session control plane"
 authors = ["Codex Atlas"]
 edition = "2021"
@@ -30,6 +30,7 @@ tungstenite = "0.30"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",

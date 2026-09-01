@@ -155,11 +155,24 @@ class AppUpdateManager(private val context: Context) {
             context.packageManager.getPackageArchiveInfo(file.absolutePath, PackageManager.GET_META_DATA)
         }.getOrNull() ?: return false
         if (info.packageName != context.packageName) return false
-        val current = update?.currentVersion?.let(::normalizeVersion)
-        // The GitHub release tag tracks the desktop package. Android has its
-        // own versionName, so validate that the APK is newer than this app
-        // instead of requiring it to equal the desktop tag.
-        return current.isNullOrBlank() || compareVersions(info.versionName.orEmpty(), current) > 0
+        val expected = update?.latestVersion?.let(::normalizeVersion).orEmpty()
+        if (expected.isNotBlank() && normalizeVersion(info.versionName.orEmpty()) != expected) return false
+        val installed = runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }.getOrNull()
+        val installedCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            installed?.longVersionCode ?: 0L
+        } else {
+            @Suppress("DEPRECATION") installed?.versionCode?.toLong() ?: 0L
+        }
+        val archiveCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION") info.versionCode.toLong()
+        }
+        // Both the human-readable version and the monotonic Android code must
+        // advance. This rejects stale assets from old desktop-only releases.
+        return archiveCode > installedCode && compareVersions(info.versionName.orEmpty(), BuildConfig.VERSION_NAME) > 0
     }
 
     private fun isSignatureCompatible(file: File): Boolean {

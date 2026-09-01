@@ -13,6 +13,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,19 +25,38 @@ import kotlinx.coroutines.launch
 
 /** Keeps the authenticated bridge alive when the Android activity is backgrounded. */
 class AtlasSyncService : Service() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, error ->
+            // A background exception must not take down the activity. The
+            // next START_STICKY delivery will recreate the worker and retry
+            // from the persisted cursor/outbox.
+            updateNotification("Codex Atlas", "连接暂时中断，正在重试")
+            android.util.Log.e("AtlasSyncService", "sync worker failed", error)
+        },
+    )
     private var worker: Job? = null
     private var cursorMs = 0L
     private var syncEpoch = ""
     private var afterSeq = 0L
+    private var foregroundReady = false
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForegroundCompat(notification("Codex Atlas", "正在保持连接"))
+        runCatching {
+            startForegroundCompat(notification("Codex Atlas", "正在保持连接"))
+            foregroundReady = true
+        }.onFailure { error ->
+            // Some vendor ROMs reject a foreground-service type after an app
+            // restore/update. Failing closed here prevents a delayed process
+            // crash; the next explicit connection attempt can start it again.
+            android.util.Log.e("AtlasSyncService", "foreground service start failed", error)
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!foregroundReady) return START_NOT_STICKY
         cursorMs = maxOf(cursorMs, BridgePreferences.syncCursor(this))
         syncEpoch = BridgePreferences.syncEpoch(this)
         afterSeq = maxOf(afterSeq, BridgePreferences.syncSeq(this))
@@ -209,7 +229,14 @@ class AtlasSyncService : Service() {
 
     private fun startForegroundCompat(value: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, value, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+            // A few vendor Android 14/15 builds reject remoteMessaging even
+            // when the manifest permission is present. Fall back to the
+            // declared dataSync type so the app remains usable on those ROMs.
+            runCatching {
+                startForeground(NOTIFICATION_ID, value, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+            }.getOrElse {
+                startForeground(NOTIFICATION_ID, value, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            }
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, value, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {

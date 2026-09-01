@@ -871,8 +871,7 @@ body { min-width: 0; background: #f3f6fb; }
 .floating-only-body .floating-action { margin-left: auto; }
 .floating-only-message { padding: 0 12px 11px; color: #4d9d3f; font-size: 9px; }
 
-/* Native desktop status object. The Tauri shell gives this route a transparent
-   always-on-top window; the page itself has no rectangular surface. */
+/* Legacy compact status object styles retained for older cached WebViews. */
 html.floating-window,
 html.floating-window body,
 html.floating-window #root {
@@ -885,10 +884,9 @@ html.floating-window #root {
   margin: 0 !important;
   padding: 0 !important;
   overflow: visible !important;
-  /* The native window is transparent; keep every page layer transparent too
-     so the CRT shell is the only visible surface. */
-  background: transparent !important;
-  background-color: transparent !important;
+  /* Keep the fallback surface light while the native window initializes. */
+  background: #f7faf6 !important;
+  background-color: #f7faf6 !important;
   background-image: none !important;
 }
 html.floating-window body { color: #171a17; }
@@ -1901,10 +1899,16 @@ html.floating-window #root {
   height: var(--floating-size, 252px) !important;
   min-height: var(--floating-size, 252px) !important;
   max-height: var(--floating-size, 252px) !important;
-  background: transparent !important;
-  background-color: transparent !important;
+  /* The native window is opaque to avoid WebView2 black compositing on some
+     Windows graphics drivers. Keep the page fill in the same white family
+     as the CRT bezel. */
+  background: #f7faf6 !important;
+  background-color: #f7faf6 !important;
   background-image: none !important;
 }
+html.floating-window-transparent,
+html.floating-window-transparent body,
+html.floating-window-transparent #root { background: transparent !important; }
 .desktop-tv-widget {
   position: relative;
   width: var(--floating-size, 252px);

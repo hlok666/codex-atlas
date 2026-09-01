@@ -277,7 +277,10 @@ export function classifyCodexFailure(errorText: string): CodexFailureKind {
   if (forbidden && balanceCause) {
     return 'insufficient-balance'
   }
-  if (/(408|409|425|429|500|502|503|504|timeout|timed out|temporar)/i.test(text)) {
+  // Gateways often return a prose-only limit error without an HTTP status.
+  // Treat those responses like 429s so the existing bounded auto-continue
+  // guard can retry the live session instead of leaving it waiting forever.
+  if (/(408|409|425|429|500|502|503|504|rate\s*limit|concurrency\s+limit|limit\s+exceeded|too\s+many\s+requests|please\s+retry\s+later|retry\s+after|timeout|timed out|temporar)/i.test(text)) {
     return 'retryable'
   }
   return 'fatal'
@@ -456,6 +459,11 @@ export async function setFloatingWindowVisible(visible: boolean): Promise<boolea
 
 export async function setFloatingWindowSize(size: number): Promise<number | null> {
   return invokeDesktop<number>('set_floating_window_size', { size })
+}
+
+/** Clips the native desktop widget to the selected CRT silhouette. */
+export async function setFloatingWindowShape(skin: string): Promise<string | null> {
+  return invokeDesktop<string>('set_floating_window_shape', { skin })
 }
 
 /** Matches CC Switch's get_balance Tauri command: base_url + api_key. */

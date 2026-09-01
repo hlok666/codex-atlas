@@ -1,3 +1,22 @@
+# Codex Atlas 0.1.16 发布说明
+
+- 启动时将 `hooks.json` 中所有 `SessionEnd` hook 的超时上限修复为 3 秒。
+- 自动隧道启动增加重试和错误保留，并支持 SSH 配置中的免密身份文件。
+- 悬浮窗消息优先通过 Codex app-server 的精确会话队列提交，避免假成功和终端注入丢失。
+- Android 会话页统一消息时间线、输入区和状态层级，支持中英文。
+
+# Codex Atlas 0.1.15 发布说明
+
+- 修复 Windows 桌面悬浮窗黑屏后改用不透明 WebView 带来的方形底色：原生窗口现在按 CRT 外观裁剪，边角真实透明且不会遮挡桌面点击。
+- 皮肤切换和无级尺寸调整会立即同步原生窗口轮廓，不需要重启悬浮窗。
+- 桌面主程序与 Android App 统一使用 `0.1.15`，Android `versionCode` 更新为 `12`。
+
+# Codex Atlas 0.1.14 发布说明
+
+- 桌面主程序与 Android App 统一使用 `0.1.14` 版本号，避免更新检测、下载和发布页出现版本错位。
+- Android `versionCode` 更新为 `11`，支持从已安装版本正常升级。
+- 包含 `0.1.13` 的悬浮窗消息发送、Codex app-server 鉴权、Android 后台同步和界面修复。
+
 # Codex Atlas 0.1.13 发布说明
 
 - 修复悬浮窗发送调用已移除的 `thread/queue/*` app-server 方法，改用 Codex 0.151 支持的 `thread/resume`、`turn/start` 和 `turn/steer`。

@@ -58,7 +58,7 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
 import type { DesktopUpdateInfo } from './lib/atlasBridge'
 import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
@@ -856,8 +856,12 @@ function App() {
     // command deliver `continue` to the already-running session.
     for (const record of records) {
       const errorText = record.lastError
-      if (!record.running || !errorText) continue
+      // A rate-limit response can finish the turn and briefly make the
+      // process look idle, while the thread remains resumable. Do not require
+      // a live PID before applying the bounded recovery policy.
+      if (!errorText) continue
       const matchingSession = sessionItemsRef.current.find((item) => item.id === record.sessionId)
+      if (!record.running && !matchingSession) continue
       const marker = `${record.sessionId}:${record.failureKey || `${record.lastEventAtMs}:${errorText}`}`
       if (classifyCodexFailure(errorText) === 'insufficient-balance'
         && matchingSession
@@ -1801,6 +1805,7 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
   const updateFloatingSkin = (skin: FloatingSkin) => {
     setFloatingSkin(skin)
     writeStored('floatingSkin', skin)
+    void setFloatingWindowShape(skin)
   }
   return <>
     <section className="page-heading compact floating-page-heading">
@@ -2551,6 +2556,16 @@ function FloatingMini() {
     return () => window.removeEventListener('storage', syncSettings)
   }, [])
   useEffect(() => {
+    const onCommandError = (event: Event) => {
+      const detail = (event as CustomEvent<DesktopCommandError>).detail
+      if (!detail || !['send_floating_message', 'send_session_input', 'send_terminal_input'].includes(detail.command)) return
+      setMessage(detail.error || (language === 'zh' ? '消息提交失败' : 'Message could not be delivered'))
+      window.setTimeout(() => setMessage(''), 4500)
+    }
+    window.addEventListener('codex-atlas:command-error', onCommandError)
+    return () => window.removeEventListener('codex-atlas:command-error', onCommandError)
+  }, [language])
+  useEffect(() => {
     document.documentElement.classList.add('floating-window')
     document.body.classList.add('floating-window')
     document.documentElement.style.setProperty('--floating-size', `${floatingSize}px`)
@@ -2562,6 +2577,12 @@ function FloatingMini() {
       document.documentElement.style.removeProperty('--floating-font-scale')
     }
   }, [floatingSize, floatingFontScale])
+  useEffect(() => {
+    const syncNativeShape = () => void setFloatingWindowShape(floatingSkin)
+    syncNativeShape()
+    window.addEventListener('resize', syncNativeShape)
+    return () => window.removeEventListener('resize', syncNativeShape)
+  }, [floatingSkin])
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | null = null
@@ -2889,6 +2910,7 @@ const showFloating = new URLSearchParams(window.location.search).get('view') ===
 // cannot flash or remain on its platform default black background.
 if (showFloating) {
   document.documentElement.classList.add('floating-window')
+  document.documentElement.classList.add(navigator.userAgent.includes('Windows') ? 'floating-window-windows' : 'floating-window-transparent')
   document.body.classList.add('floating-window')
 }
 document.title = showPrototypes ? 'Codex Atlas · Prototypes' : showFloating ? 'Atlas Mini' : 'Codex Atlas'

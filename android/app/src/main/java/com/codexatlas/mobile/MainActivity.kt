@@ -277,12 +277,12 @@ private fun AtlasTheme(content: @Composable () -> Unit) {
             onPrimary = Color.White,
             secondary = Color(0xFF7B9C7E),
             onSecondary = Color.White,
-            background = Color(0xFFF4F7F2),
-            onBackground = Color(0xFF243025),
+            background = Color(0xFFF7F8FA),
+            onBackground = Color(0xFF172018),
             surface = Color.White,
-            onSurface = Color(0xFF243025),
-            surfaceVariant = Color(0xFFE9EEE7),
-            onSurfaceVariant = Color(0xFF667466),
+            onSurface = Color(0xFF172018),
+            surfaceVariant = Color(0xFFF0F2F0),
+            onSurfaceVariant = Color(0xFF667085),
             error = Color(0xFFB44A45),
             onError = Color.White,
         ),
@@ -629,7 +629,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         return
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFF7F9F6)) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFF7F8FA)) {
         Column(
             modifier = if (conversationPage) {
                 Modifier.fillMaxSize()
@@ -675,7 +675,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     }
                 }
             }
-            Surface(shape = RoundedCornerShape(16.dp), color = Color.White, tonalElevation = 0.dp) {
+            Surface(shape = RoundedCornerShape(12.dp), color = Color.White, tonalElevation = 0.dp) {
                 Column(modifier = Modifier.padding(18.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text(if (zh) "设备" else "Devices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
@@ -684,7 +684,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         }
                     }
                     if (deviceManagerVisible) {
-                        Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFFF4F7F2), tonalElevation = 0.dp) {
+                        Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFFF0F2F0), tonalElevation = 0.dp) {
                             Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 deviceProfiles.forEach { profile ->
                                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -800,7 +800,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     if (messages.isNotEmpty()) messageScrollState.animateScrollTo(messageScrollState.maxValue)
                 }
                 if (!conversationPage && sessions.isNotEmpty()) {
-                    Surface(shape = RoundedCornerShape(16.dp), color = Color.White, tonalElevation = 0.dp) {
+                    Surface(shape = RoundedCornerShape(12.dp), color = Color.White, tonalElevation = 0.dp) {
                         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                 Text(if (zh) "会话" else "Sessions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
@@ -863,7 +863,11 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 }
                 if (conversationPage) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.White)
+                            .border(1.dp, Color(0xFFE5EAE5), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
@@ -925,8 +929,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     )
                 }
                 if (conversationPage) {
-                Surface(modifier = Modifier.fillMaxWidth().weight(1f), shape = RoundedCornerShape(16.dp), color = Color.White, tonalElevation = 0.dp) {
-                    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (selectedSession?.requiresAttention == true) {
                             ApprovalActions(
                                 chinese = zh,
@@ -968,7 +971,32 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             )
                             AtlasSyncService.start(context)
                         }
-                        OutlinedTextField(value = message, onValueChange = { message = it }, modifier = Modifier.fillMaxWidth(), label = { Text(if (zh) "发送消息" else "Send a message") }, minLines = 2, maxLines = 5)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color.White, RoundedCornerShape(12.dp))
+                                .border(1.dp, Color(0xFFE1E8E1), RoundedCornerShape(12.dp))
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedTextField(
+                                value = message,
+                                onValueChange = { message = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = { Text(if (zh) "输入消息" else "Write a message") },
+                                minLines = 2,
+                                maxLines = 5,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank() && !messageBusy, modifier = Modifier.weight(1f)) {
+                                    if (messageBusy) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                                    else Text(if (zh) "发送" else "Send")
+                                }
+                                OutlinedButton(onClick = { createVisible = !createVisible }, modifier = Modifier.weight(1f)) {
+                                    Text(if (zh) "新建会话" else "New session")
+                                }
+                            }
+                        }
                         if (voiceSnapshot.active) {
                             VoiceInputPanel(
                                 chinese = zh,
@@ -993,14 +1021,6 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             )
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank(), modifier = Modifier.weight(1f)) {
-                                    Text(if (zh) "发送" else "Send")
-                                }
-                                OutlinedButton(onClick = { createVisible = !createVisible }, modifier = Modifier.weight(1f)) {
-                                    Text(if (zh) "新建会话" else "New session")
-                                }
-                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 TextButton(onClick = {
                                     pendingVoiceMode = false
@@ -1073,7 +1093,6 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             }
                         }
                     }
-                }
                 }
             }
             if (!conversationPage) {
@@ -1276,20 +1295,28 @@ private fun ConversationMessage(item: AtlasMessage, chinese: Boolean) {
     val role = item.role.lowercase()
     val isUser = role == "user"
     val isTool = role == "tool" || item.kind.equals("tool", ignoreCase = true)
+    val isQueued = item.kind.equals("queued", ignoreCase = true)
+    val isFailed = item.kind.equals("failed", ignoreCase = true) || item.toolStatus.equals("failed", ignoreCase = true)
     val roleLabel = when {
+        isQueued -> if (chinese) "等待发送" else "Pending"
+        isFailed -> if (chinese) "发送失败" else "Failed"
         isUser -> if (chinese) "你" else "You"
         isTool -> if (chinese) "工具" else "Tool"
         else -> "Codex"
     }
     val roleColor = when {
+        isFailed -> Color(0xFFB44A45)
+        isQueued -> Color(0xFF9A6B2F)
         isUser -> Color(0xFF2F7C3B)
         isTool -> Color(0xFF9A6B2F)
         else -> Color(0xFF69766B)
     }
     val surfaceColor = when {
+        isFailed -> Color(0xFFFFF4F2)
+        isQueued -> Color(0xFFFFF8EA)
         isUser -> Color(0xFFEAF5EB)
         isTool -> Color(0xFFFFF6E6)
-        else -> Color(0xFFF7F9F6)
+        else -> Color.Transparent
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1297,15 +1324,30 @@ private fun ConversationMessage(item: AtlasMessage, chinese: Boolean) {
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(if (isUser) .86f else .95f)
-                .background(surfaceColor, RoundedCornerShape(12.dp))
-                .border(1.dp, if (isUser) Color(0xFFD5E7D6) else Color(0xFFE5EAE5), RoundedCornerShape(12.dp))
-                .padding(horizontal = 13.dp, vertical = 11.dp),
+                .fillMaxWidth(if (isUser) .86f else 1f)
+                .then(
+                    if (isUser || isTool) Modifier
+                        .background(surfaceColor, RoundedCornerShape(12.dp))
+                        .border(
+                            1.dp,
+                            when {
+                                isFailed -> Color(0xFFF0D1CE)
+                                isQueued -> Color(0xFFEEDDB9)
+                                isUser -> Color(0xFFD5E7D6)
+                                else -> Color(0xFFE8E0D1)
+                            },
+                            RoundedCornerShape(12.dp),
+                        )
+                    else Modifier
+                )
+                .padding(horizontal = if (isUser || isTool) 13.dp else 2.dp, vertical = if (isUser || isTool) 11.dp else 7.dp),
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(roleLabel, color = roleColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                if (item.timestampMs > 0) Text(formatConversationTime(item.timestampMs), color = Color(0xFF8A968B), style = MaterialTheme.typography.labelSmall)
+            if (isUser || isTool) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(roleLabel, color = roleColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    if (item.timestampMs > 0) Text(formatConversationTime(item.timestampMs), color = Color(0xFF8A968B), style = MaterialTheme.typography.labelSmall)
+                }
             }
             if (isTool && !item.toolStatus.isNullOrBlank()) {
                 Text(
