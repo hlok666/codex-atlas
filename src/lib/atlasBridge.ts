@@ -137,6 +137,22 @@ export type FloatingAttachment = {
   path?: string
 }
 
+export type FloatingMessageRequest = {
+  sessionId: string
+  input: string
+  mode: FloatingInputMode
+  attachments: FloatingAttachment[]
+}
+
+export function floatingMessageCommandArgs(
+  sessionId: string,
+  input: string,
+  mode: FloatingInputMode,
+  attachments: FloatingAttachment[] = [],
+): { request: FloatingMessageRequest } {
+  return { request: { sessionId, input, mode, attachments } }
+}
+
 export type VoiceServiceStatus = {
   serviceInstalled: boolean
   serviceVersion?: string
@@ -627,12 +643,10 @@ export async function sendFloatingMessage(
   mode: FloatingInputMode,
   attachments: FloatingAttachment[] = [],
 ): Promise<boolean> {
-  const result = await invokeDesktop<boolean>('send_floating_message', {
-    sessionId,
-    input,
-    mode,
-    attachments,
-  })
+  const result = await invokeDesktop<boolean>(
+    'send_floating_message',
+    floatingMessageCommandArgs(sessionId, input, mode, attachments),
+  )
   return result ?? false
 }
 

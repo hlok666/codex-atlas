@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.19 发布说明
+
+- 修复桌面悬浮窗发送命令缺少 Tauri `request` 参数层级，导致消息在进入 Rust 后端前就被拒绝的问题。
+- 普通消息与“继续”现在优先通过官方 `codex queue --thread` 投递，并校验提交 ID 与目标会话回执，不再把空响应显示为发送成功。
+- Atlas app-server 回退会校验 `queuedSubmission`；排队模式不会再被误当成 `turn/steer` 打断当前任务。
+- 桌面端与 Android 端统一更新至 `0.1.19`，Android `versionCode` 更新为 `16`。
+
 # Codex Atlas 0.1.18 发布说明
 
 - Android 15 / ColorOS 页面完整适配状态栏、底部手势区和输入法安全区，会话页不再被系统栏或键盘遮挡。

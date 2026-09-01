@@ -6656,7 +6656,6 @@ fn app_server_send_message(
     mode: &str,
     attachments: &[FloatingAttachment],
 ) -> Result<bool, String> {
-    let _ = mode;
     let items = app_server_user_input(input, attachments);
     if items.is_empty() {
         return Ok(false);
@@ -6674,34 +6673,37 @@ fn app_server_send_message(
     }
     app_server_request(state, "thread/resume", resume_params)?;
 
-    let active_turn = state
-        .app_server
-        .lock()
-        .ok()
-        .and_then(|server| server.as_ref().cloned())
-        .and_then(|server| {
-            server
-                .active_turns
-                .lock()
-                .ok()
-                .and_then(|turns| turns.get(&session.id).cloned())
-        });
-    if let Some(turn_id) = active_turn {
-        let steer = app_server_request(
-            state,
-            "turn/steer",
-            serde_json::json!({
-                "threadId": session.id,
-                "expectedTurnId": turn_id,
-                "input": items,
-                "clientUserMessageId": client_message_id,
-            }),
-        );
-        if steer.is_ok() {
-            return Ok(true);
+    if mode.trim().eq_ignore_ascii_case("interrupt") {
+        let active_turn = state
+            .app_server
+            .lock()
+            .ok()
+            .and_then(|server| server.as_ref().cloned())
+            .and_then(|server| {
+                server
+                    .active_turns
+                    .lock()
+                    .ok()
+                    .and_then(|turns| turns.get(&session.id).cloned())
+            });
+        if let Some(turn_id) = active_turn {
+            let steer = app_server_request(
+                state,
+                "turn/steer",
+                serde_json::json!({
+                    "threadId": session.id,
+                    "expectedTurnId": turn_id,
+                    "input": items,
+                    "clientUserMessageId": client_message_id,
+                }),
+            );
+            if steer.is_ok() {
+                return Ok(true);
+            }
         }
-        // The turn may have completed between the notification and the
-        // request. A fresh turn is safe after that race.
+        return Err(
+            "the Atlas app-server does not own an active turn for this session".to_string(),
+        );
     }
     let result = app_server_request(
         state,
@@ -6721,10 +6723,9 @@ fn app_server_send_message(
     Ok(true)
 }
 
-/// Queue through the same app-server that owns Atlas's runtime view. This is
-/// preferred to spawning `codex queue`: it returns a canonical queued
-/// submission for the exact resumed thread and does not depend on a terminal
-/// window accepting synthetic keyboard input.
+/// Queue through Atlas's app-server after the official `codex queue` command
+/// is unavailable. The response is validated so an empty JSON-RPC success can
+/// never be reported to the floating window as a delivered message.
 fn app_server_queue_message(
     state: &AppState,
     session: &SessionRecord,
@@ -6744,15 +6745,32 @@ fn app_server_queue_message(
     }
     app_server_request(state, "thread/resume", resume_params)?;
     let client_message_id = format!("atlas-queue-{}", now_ms());
-    let _ = app_server_request(
+    let result = app_server_request(
         state,
         "thread/queue/add",
         serde_json::json!({
             "threadId": session.id,
             "input": items,
-            "clientUserMessageId": client_message_id,
+            "clientUserMessageId": client_message_id.clone(),
         }),
     )?;
+    let queued = result
+        .get("queuedSubmission")
+        .ok_or_else(|| "thread/queue/add returned no queued submission".to_string())?;
+    let submission_id = queued
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "thread/queue/add returned no submission id".to_string())?;
+    let response_client_id = queued
+        .get("clientUserMessageId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "thread/queue/add returned no client message id".to_string())?;
+    if response_client_id != client_message_id {
+        return Err(format!(
+            "thread/queue/add acknowledged a different message: {submission_id}"
+        ));
+    }
     Ok(true)
 }
 
@@ -6809,7 +6827,14 @@ fn queue_codex_message_with_attachments_detailed(
         .output()
         .map_err(|error| format!("start codex queue: {error}"))?;
     if output.status.success() {
-        return Ok(());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if codex_queue_receipt(&stdout, &session.id).is_some() {
+            return Ok(());
+        }
+        return Err(format!(
+            "codex queue returned success without a verifiable receipt: {}",
+            stdout.trim()
+        ));
     }
     let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if detail.is_empty() {
@@ -6817,6 +6842,16 @@ fn queue_codex_message_with_attachments_detailed(
     } else {
         Err(detail)
     }
+}
+
+fn codex_queue_receipt(output: &str, thread_id: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let receipt = line.trim().strip_prefix("Queued message ")?;
+        let (submission_id, reported_thread) = receipt.split_once(" for thread ")?;
+        let reported_thread = reported_thread.trim().trim_end_matches('.');
+        (reported_thread == thread_id && session_id_like(submission_id.trim()))
+            .then(|| submission_id.trim().to_string())
+    })
 }
 
 fn is_continue_prompt(input: &str) -> bool {
@@ -7198,10 +7233,10 @@ fn send_session_input(
     let Some(session) = find_session(&session_id) else {
         return Ok(false);
     };
-    if app_server_queue_message(&state, &session, &input, &[]).unwrap_or(false) {
+    if queue_codex_message(&session, &input) {
         return Ok(true);
     }
-    if queue_codex_message(&session, &input) {
+    if app_server_queue_message(&state, &session, &input, &[]).unwrap_or(false) {
         return Ok(true);
     }
     if app_server_send_message(&state, &session, &input, "queue", &[]).unwrap_or(false) {
@@ -7274,14 +7309,14 @@ fn send_floating_message(
             .map(|_| true)
             .map_err(|error| format!("{}; terminal: {error}", delivery_errors.join("; ")));
     }
+    match queue_codex_message_with_attachments_detailed(&session, &input, &request.attachments) {
+        Ok(()) => return Ok(true),
+        Err(error) => delivery_errors.push(format!("codex queue: {error}")),
+    }
     match app_server_queue_message(&state, &session, &input, &request.attachments) {
         Ok(true) => return Ok(true),
         Ok(false) => delivery_errors.push("app-server did not accept the message".to_string()),
         Err(error) => delivery_errors.push(format!("app-server queue: {error}")),
-    }
-    match queue_codex_message_with_attachments_detailed(&session, &input, &request.attachments) {
-        Ok(()) => return Ok(true),
-        Err(error) => delivery_errors.push(format!("codex queue: {error}")),
     }
     match app_server_send_message(&state, &session, &input, "queue", &request.attachments) {
         Ok(true) => return Ok(true),
@@ -10241,6 +10276,22 @@ mod runtime_probe_tests {
         assert!(is_continue_prompt("  CONTINUE\n"));
         assert!(is_continue_prompt("继续"));
         assert!(!is_continue_prompt("resume"));
+    }
+
+    #[test]
+    fn codex_queue_receipt_must_match_the_target_thread() {
+        let submission_id = "01a05cb1-acc2-7783-a6c2-6007ccf4ed27";
+        let thread_id = "01a04c76-7180-7e93-aaa8-cceb7cc3ad40";
+        let output = format!("Queued message {submission_id} for thread {thread_id}.\n");
+        assert_eq!(
+            codex_queue_receipt(&output, thread_id).as_deref(),
+            Some(submission_id)
+        );
+        assert_eq!(
+            codex_queue_receipt(&output, "01a04645-5ce2-7e92-a076-cf4302ed2492"),
+            None
+        );
+        assert_eq!(codex_queue_receipt("queued", thread_id), None);
     }
 
     #[test]

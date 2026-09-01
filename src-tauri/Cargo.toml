@@ -1,6 +1,6 @@
 [package]
 name = "codex-atlas"
-version = "0.1.18"
+version = "0.1.19"
 description = "Codex Atlas desktop session control plane"
 authors = ["Codex Atlas"]
 edition = "2021"
