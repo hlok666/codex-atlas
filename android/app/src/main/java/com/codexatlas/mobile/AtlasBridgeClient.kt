@@ -5,18 +5,61 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+
+private object BridgeTransport {
+    val http: OkHttpClient = OkHttpClient.Builder()
+        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
+    private val successful = ConcurrentHashMap.newKeySet<String>()
+    private val failedUntilMs = ConcurrentHashMap<String, Long>()
+
+    fun order(candidates: List<String>): List<String> {
+        val now = System.currentTimeMillis()
+        return candidates.withIndex()
+            .sortedWith(
+                compareBy<IndexedValue<String>>(
+                    { candidate ->
+                        when {
+                            successful.contains(candidate.value) -> 0
+                            failedUntilMs.getOrDefault(candidate.value, 0L) > now -> 2
+                            else -> 1
+                        }
+                    },
+                    { it.index },
+                ),
+            )
+            .map { it.value }
+    }
+
+    fun succeeded(candidate: String) {
+        failedUntilMs.remove(candidate)
+        successful.add(candidate)
+    }
+
+    fun failed(candidate: String) {
+        successful.remove(candidate)
+        failedUntilMs[candidate] = System.currentTimeMillis() + 30_000L
+    }
+}
 
 private fun bridgeCandidates(primary: String, fallback: String): List<String> {
     val bases = listOf(primary, fallback)
         .map { it.trimEnd('/') }
         .filter { it.isNotBlank() }
         .distinct()
-    return buildList {
+    return BridgeTransport.order(buildList {
         bases.forEach { candidate ->
             add(candidate)
             val uri = runCatching { URI(candidate) }.getOrNull() ?: return@forEach
@@ -40,19 +83,14 @@ private fun bridgeCandidates(primary: String, fallback: String): List<String> {
                 if (!publicPath.isNullOrBlank()) add(publicPath)
             }
         }
-    }.distinct()
+    }.distinct())
 }
 
 class AtlasBridgeClient(
     private val baseUrl: String,
     private val token: String,
 ) {
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val http = BridgeTransport.http
     private val json = Json { ignoreUnknownKeys = true }
 
     fun snapshot(): AtlasSnapshot {
@@ -71,7 +109,12 @@ class AtlasBridgeClient(
         val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
-            try { return AtlasBridgeClient(candidate, token).snapshot() } catch (error: Throwable) {
+            try {
+                val snapshot = AtlasBridgeClient(candidate, token).snapshot()
+                BridgeTransport.succeeded(candidate)
+                return snapshot
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
                 failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
@@ -105,9 +148,12 @@ class AtlasBridgeClient(
                     .build()
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
-                    return json.decodeFromString(response.body?.string().orEmpty())
+                    val result = json.decodeFromString<AtlasSyncResponse>(response.body?.string().orEmpty())
+                    BridgeTransport.succeeded(candidate)
+                    return result
                 }
             } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
                 failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
@@ -126,9 +172,12 @@ class AtlasBridgeClient(
                     .build()
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
-                    return json.decodeFromString(response.body?.string().orEmpty())
+                    val result = json.decodeFromString<List<AtlasSession>>(response.body?.string().orEmpty())
+                    BridgeTransport.succeeded(candidate)
+                    return result
                 }
             } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
                 failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
@@ -139,7 +188,7 @@ class AtlasBridgeClient(
         sessionId: String,
         fallbackUrl: String = "",
         afterSeq: Long = 0,
-        limit: Int = 0,
+        limit: Int = 200,
     ): List<AtlasMessage> {
         val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
@@ -156,9 +205,12 @@ class AtlasBridgeClient(
                     .build()
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
-                    return json.decodeFromString(response.body?.string().orEmpty())
+                    val result = json.decodeFromString<List<AtlasMessage>>(response.body?.string().orEmpty())
+                    BridgeTransport.succeeded(candidate)
+                    return result
                 }
             } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
                 failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
@@ -225,9 +277,12 @@ class AtlasBridgeClient(
                     .build()
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
-                    return json.decodeFromString(response.body?.string().orEmpty())
+                    val result = json.decodeFromString<AtlasDictationAck>(response.body?.string().orEmpty())
+                    BridgeTransport.succeeded(candidate)
+                    return result
                 }
             } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
                 failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }
@@ -243,8 +298,10 @@ class AtlasBridgeClient(
         for (candidate in candidates) {
             try {
                 AtlasBridgeClient(candidate, token).post(path, body)
+                BridgeTransport.succeeded(candidate)
                 return
             } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
                 failure = IllegalStateException("$candidate: ${error.message}", error)
             }
         }

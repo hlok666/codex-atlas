@@ -123,6 +123,9 @@ struct MobileMessageReceiptState {
 
 static MOBILE_MESSAGE_RECEIPTS: OnceLock<Mutex<MobileMessageReceiptState>> = OnceLock::new();
 
+const MOBILE_MESSAGE_PAGE_DEFAULT: usize = 200;
+const MOBILE_MESSAGE_PAGE_MAX: usize = 1_000;
+
 #[derive(Default)]
 struct ProcessSnapshotCache {
     snapshots: Vec<ProcessSnapshot>,
@@ -130,6 +133,7 @@ struct ProcessSnapshotCache {
 }
 
 static PROCESS_SNAPSHOT_CACHE: OnceLock<Mutex<ProcessSnapshotCache>> = OnceLock::new();
+static MOBILE_SESSION_CACHE: OnceLock<Mutex<RuntimeSessionCache>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -561,6 +565,55 @@ struct MobileSessionEventBatch {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct MobileSessionSummary {
+    id: String,
+    title: String,
+    preview: String,
+    cwd: String,
+    model: String,
+    permission: String,
+    running: bool,
+    live_state: String,
+    last_output: Option<String>,
+    requires_attention: bool,
+    last_error: Option<String>,
+    foreground: bool,
+    status_source: String,
+    last_event_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval: Option<MobileApprovalRequest>,
+}
+
+impl From<&SessionRecord> for MobileSessionSummary {
+    fn from(session: &SessionRecord) -> Self {
+        Self {
+            id: session.id.clone(),
+            title: session.title.chars().take(240).collect(),
+            preview: session.preview.chars().take(600).collect(),
+            cwd: session.cwd.clone(),
+            model: session.model.clone(),
+            permission: session.permission.clone(),
+            running: session.running,
+            live_state: session.live_state.clone(),
+            last_output: session
+                .last_output
+                .as_deref()
+                .map(|value| value.chars().take(1_200).collect()),
+            requires_attention: session.requires_attention,
+            last_error: session
+                .last_error
+                .as_deref()
+                .map(|value| value.chars().take(2_000).collect()),
+            foreground: session.foreground,
+            status_source: session.status_source.clone(),
+            last_event_at_ms: session.last_event_at_ms,
+            approval: session.approval.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MobileSyncResponse {
     /// Legacy wall-clock cursor retained for older mobile clients.
     cursor_ms: i64,
@@ -569,7 +622,7 @@ struct MobileSyncResponse {
     reset: bool,
     gap: bool,
     snapshot: Option<MobileStatusSnapshot>,
-    sessions: Vec<SessionRecord>,
+    sessions: Vec<MobileSessionSummary>,
     events: Vec<MobileSessionEventBatch>,
 }
 
@@ -1137,80 +1190,56 @@ fn server_tunnel_last_error() -> Option<String> {
         .and_then(|value| value.clone())
 }
 
-fn start_server_tunnel_process(settings: &ServerTunnelSettings) -> Result<(), String> {
-    validate_server_tunnel(settings)?;
-    if server_tunnel_running() {
-        return Ok(());
-    }
-    let key_path = server_identity_file(settings).or_else(|| {
-        let generated = server_tunnel_key_path();
-        generated.exists().then_some(generated)
-    });
-    let Some(key_path) = key_path else {
-        return Err("服务器通道专用 SSH 密钥尚未安装".to_string());
-    };
-    cleanup_stale_server_listener(settings, &key_path);
-    let destination = format!("{}@{}", settings.username.trim(), settings.host.trim());
+fn server_tunnel_forward_conflict(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("remote port forwarding failed")
+        || lower.contains("remote forward failure")
+        || lower.contains("cannot listen to port")
+        || lower.contains("address already in use")
+}
+
+fn spawn_server_tunnel_attempt(
+    settings: &ServerTunnelSettings,
+    key_path: &Path,
+    destination: &str,
+    reverse: &str,
+    log_path: &Path,
+) -> Result<Child, String> {
     let ssh = executable_candidate("ssh").unwrap_or_else(|| PathBuf::from("ssh"));
-    let mut preflight = Command::new(&ssh);
-    preflight
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=12",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-i",
-        ])
-        .arg(&key_path)
-        .arg("-p")
-        .arg(settings.port.to_string())
-        .arg(&destination)
-        .arg("true");
-    let preflight_output = preflight
-        .output()
-        .map_err(|error| format!("启动 SSH 预检失败: {error}"))?;
-    if !preflight_output.status.success() {
-        let detail = String::from_utf8_lossy(&preflight_output.stderr)
-            .trim()
-            .to_string();
-        return Err(if detail.is_empty() {
-            format!("SSH 预检失败，状态码 {}", preflight_output.status)
-        } else {
-            format!("SSH 预检失败: {detail}")
-        });
-    }
-    let reverse = format!(
-        "{}:{}:127.0.0.1:{}",
-        server_reverse_bind_host(settings),
-        settings.remote_port,
-        MOBILE_BRIDGE_PORT
-    );
-    let log_path = codex_home().join("atlas-server-tunnel.log");
     let log_file = OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(&log_path)
+        .write(true)
+        .truncate(true)
+        .open(log_path)
         .ok();
     let mut command = Command::new(&ssh);
     command
-        .args(["-N", "-T", "-p", &settings.port.to_string(), "-i"])
-        .arg(&key_path)
+        .args(["-N", "-T", "-p"])
+        .arg(settings.port.to_string())
+        .arg("-i")
+        .arg(key_path)
         .args([
             "-o",
             "BatchMode=yes",
             "-o",
             "ExitOnForwardFailure=yes",
             "-o",
-            "ServerAliveInterval=20",
+            "ConnectTimeout=8",
             "-o",
-            "ServerAliveCountMax=3",
+            "ConnectionAttempts=2",
+            "-o",
+            "TCPKeepAlive=yes",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=2",
+            "-o",
+            "IPQoS=throughput",
             "-o",
             "StrictHostKeyChecking=accept-new",
             "-R",
-            &reverse,
-            &destination,
+            reverse,
+            destination,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null());
@@ -1227,30 +1256,51 @@ fn start_server_tunnel_process(settings: &ServerTunnelSettings) -> Result<(), St
     let mut child = command
         .spawn()
         .map_err(|error| format!("启动反向 SSH 通道失败: {error}"))?;
-    thread::sleep(Duration::from_millis(650));
+    thread::sleep(Duration::from_millis(1_000));
     if let Some(status) = child
         .try_wait()
         .map_err(|error| format!("检查反向 SSH 通道失败: {error}"))?
     {
-        let detail = fs::read_to_string(&log_path)
+        let detail = fs::read_to_string(log_path)
             .ok()
-            .and_then(|content| {
-                content
-                    .lines()
-                    .rev()
-                    .take(5)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .map(str::to_string)
-                    .reduce(|left, right| format!("{left}\n{right}"))
-            })
             .filter(|content| !content.trim().is_empty());
         return Err(match detail {
-            Some(detail) => format!("反向 SSH 通道立即退出: {status}\n{detail}"),
+            Some(detail) => format!("反向 SSH 通道立即退出: {status}\n{}", detail.trim()),
             None => format!("反向 SSH 通道立即退出: {status}"),
         });
     }
+    Ok(child)
+}
+
+fn start_server_tunnel_process(settings: &ServerTunnelSettings) -> Result<(), String> {
+    validate_server_tunnel(settings)?;
+    if server_tunnel_running() {
+        return Ok(());
+    }
+    let key_path = server_identity_file(settings).or_else(|| {
+        let generated = server_tunnel_key_path();
+        generated.exists().then_some(generated)
+    });
+    let Some(key_path) = key_path else {
+        return Err("服务器通道专用 SSH 密钥尚未安装".to_string());
+    };
+    let destination = format!("{}@{}", settings.username.trim(), settings.host.trim());
+    let reverse = format!(
+        "{}:{}:127.0.0.1:{}",
+        server_reverse_bind_host(settings),
+        settings.remote_port,
+        MOBILE_BRIDGE_PORT
+    );
+    let log_path = codex_home().join("atlas-server-tunnel.log");
+    let child =
+        match spawn_server_tunnel_attempt(settings, &key_path, &destination, &reverse, &log_path) {
+            Ok(child) => child,
+            Err(error) if server_tunnel_forward_conflict(&error) => {
+                cleanup_stale_server_listener(settings, &key_path);
+                spawn_server_tunnel_attempt(settings, &key_path, &destination, &reverse, &log_path)?
+            }
+            Err(error) => return Err(error),
+        };
     if let Ok(mut slot) = server_tunnel_child().lock() {
         *slot = Some(child);
     }
@@ -1963,7 +2013,7 @@ fn assign_mobile_message_sequences(session_id: &str, messages: &mut [MobileSessi
     }
 }
 
-fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage> {
+fn cached_mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage> {
     let path = Path::new(&session.rollout_path);
     let size = fs::metadata(path)
         .map(|metadata| metadata.len())
@@ -1988,7 +2038,7 @@ fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage>
                 .then(|| cached.messages.clone())
         })
     });
-    let mut messages = cached.unwrap_or_else(|| {
+    cached.unwrap_or_else(|| {
         let parsed = mobile_session_messages_raw(session);
         if let Ok(mut state) = store.lock() {
             load_mobile_sync_state(&mut state);
@@ -2002,7 +2052,11 @@ fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage>
             );
         }
         parsed
-    });
+    })
+}
+
+fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage> {
+    let mut messages = cached_mobile_session_messages(session);
     assign_mobile_message_sequences(&session.id, &mut messages);
     messages
 }
@@ -2136,8 +2190,9 @@ fn mobile_approval_request(session: &SessionRecord) -> Option<MobileApprovalRequ
     })
 }
 
-fn mobile_status_snapshot() -> Option<MobileStatusSnapshot> {
-    let sessions = list_sessions_sync().ok()?;
+fn mobile_status_snapshot_from_sessions(
+    sessions: &[SessionRecord],
+) -> Option<MobileStatusSnapshot> {
     let session = sessions
         .iter()
         .filter(|session| session.running)
@@ -2197,9 +2252,17 @@ fn mobile_status_snapshot() -> Option<MobileStatusSnapshot> {
         foreground: session.foreground,
         status_source: session.status_source.clone(),
         last_event_at_ms: session.last_event_at_ms,
-        messages: mobile_session_messages(session),
+        // Conversation history is paged through `/messages`. Keeping status
+        // lightweight prevents one large rollout from blocking every bridge
+        // request that shares the reverse SSH connection.
+        messages: Vec::new(),
         approval: mobile_approval_request(session),
     })
+}
+
+fn mobile_status_snapshot() -> Option<MobileStatusSnapshot> {
+    let sessions = list_mobile_sessions_cached(750).ok()?;
+    mobile_status_snapshot_from_sessions(&sessions)
 }
 
 fn bridge_json_response<T: Serialize>(
@@ -2326,17 +2389,86 @@ fn release_mobile_message_claim(session_id: &str, client_message_id: &str) {
     state.in_flight.remove(&key);
 }
 
+fn mobile_sync_is_bootstrap(since_ms: i64, requested_epoch: Option<&str>, after_seq: u64) -> bool {
+    since_ms <= 0
+        && after_seq == 0
+        && requested_epoch
+            .map(str::trim)
+            .filter(|epoch| !epoch.is_empty())
+            .is_none()
+}
+
+fn mobile_session_changed_since(session: &SessionRecord, since_ms: i64) -> bool {
+    since_ms <= 0
+        || session.updated_at_ms > since_ms
+        || session.last_event_at_ms > since_ms
+        || (!session.rollout_path.trim().is_empty()
+            && file_modified_ms(Path::new(&session.rollout_path)) > since_ms)
+}
+
+fn paginate_mobile_messages(
+    messages: Vec<MobileSessionMessage>,
+    after_seq: u64,
+    requested_limit: usize,
+) -> Vec<MobileSessionMessage> {
+    let limit = if requested_limit == 0 {
+        MOBILE_MESSAGE_PAGE_DEFAULT
+    } else {
+        requested_limit.min(MOBILE_MESSAGE_PAGE_MAX)
+    };
+    if after_seq > 0 {
+        return messages
+            .into_iter()
+            .filter(|message| message.seq > after_seq)
+            .take(limit)
+            .collect();
+    }
+    let start = messages.len().saturating_sub(limit);
+    messages.into_iter().skip(start).collect()
+}
+
 fn mobile_sync_response(
     since_ms: i64,
     requested_epoch: Option<&str>,
     after_seq: u64,
 ) -> MobileSyncResponse {
     let sessions = list_sessions_sync().unwrap_or_default();
+    remember_mobile_sessions(&sessions);
     let _ = mobile_runtime_changed_since(&sessions, since_ms);
-    let session_messages = sessions
-        .iter()
-        .map(|session| (session.id.clone(), mobile_session_messages(session)))
-        .collect::<Vec<_>>();
+    let (initial_epoch, initial_next_seq, initial_oldest_seq) = mobile_sync_metadata();
+    let (initial_reset, initial_gap) = mobile_sync_window_flags(
+        requested_epoch,
+        &initial_epoch,
+        after_seq,
+        initial_next_seq,
+        initial_oldest_seq,
+    );
+    let mut events = Vec::new();
+    let bootstrap = mobile_sync_is_bootstrap(since_ms, requested_epoch, after_seq);
+    if !bootstrap && !initial_reset && !initial_gap {
+        let sequence_catch_up = after_seq > 0 && initial_next_seq > after_seq;
+        for session in sessions
+            .iter()
+            .filter(|session| sequence_catch_up || mobile_session_changed_since(session, since_ms))
+        {
+            let messages = mobile_session_messages(session)
+                .into_iter()
+                .filter(|message| {
+                    if after_seq > 0 && requested_epoch == Some(initial_epoch.as_str()) {
+                        message.seq > after_seq
+                    } else {
+                        message.timestamp_ms > since_ms
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !messages.is_empty() {
+                events.push(MobileSessionEventBatch {
+                    session_id: session.id.clone(),
+                    messages,
+                });
+            }
+        }
+    }
     let (sync_epoch, next_seq, oldest_seq) = mobile_sync_metadata();
     let (reset, gap) = mobile_sync_window_flags(
         requested_epoch,
@@ -2345,26 +2477,8 @@ fn mobile_sync_response(
         next_seq,
         oldest_seq,
     );
-    let include_all = reset || gap;
-    let mut events = Vec::new();
-    for (session_id, messages) in session_messages {
-        let messages = messages
-            .into_iter()
-            .filter(|message| {
-                include_all
-                    || if after_seq > 0 && requested_epoch == Some(sync_epoch.as_str()) {
-                        message.seq > after_seq
-                    } else {
-                        message.timestamp_ms > since_ms
-                    }
-            })
-            .collect::<Vec<_>>();
-        if !messages.is_empty() {
-            events.push(MobileSessionEventBatch {
-                session_id,
-                messages,
-            });
-        }
+    if reset || gap {
+        events.clear();
     }
     MobileSyncResponse {
         cursor_ms: now_ms(),
@@ -2372,14 +2486,14 @@ fn mobile_sync_response(
         next_seq,
         reset,
         gap,
-        snapshot: mobile_status_snapshot(),
-        sessions,
+        snapshot: mobile_status_snapshot_from_sessions(&sessions),
+        sessions: sessions.iter().map(MobileSessionSummary::from).collect(),
         events,
     }
 }
 
 fn mobile_sync_has_changes(since_ms: i64, requested_epoch: Option<&str>, after_seq: u64) -> bool {
-    let Ok(sessions) = list_sessions_sync() else {
+    let Ok(sessions) = list_mobile_sessions_cached(750) else {
         return false;
     };
     let (sync_epoch, next_seq, _) = mobile_sync_metadata();
@@ -2396,13 +2510,9 @@ fn mobile_sync_has_changes(since_ms: i64, requested_epoch: Option<&str>, after_s
     if mobile_runtime_changed_since(&sessions, since_ms) {
         return true;
     }
-    sessions.iter().any(|session| {
-        session.updated_at_ms > since_ms
-            || session.last_event_at_ms > since_ms
-            || mobile_session_messages(session)
-                .iter()
-                .any(|message| message.timestamp_ms > since_ms)
-    })
+    sessions
+        .iter()
+        .any(|session| mobile_session_changed_since(session, since_ms))
 }
 
 fn mobile_runtime_changed_since(sessions: &[SessionRecord], since_ms: i64) -> bool {
@@ -2524,9 +2634,13 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         return;
     }
     if method == Method::Get && url == "/v1/sessions" {
-        match list_sessions_sync() {
+        match list_mobile_sessions_cached(750) {
             Ok(sessions) => {
-                let _ = request.respond(bridge_json_response(&sessions, 200));
+                let summaries = sessions
+                    .iter()
+                    .map(MobileSessionSummary::from)
+                    .collect::<Vec<_>>();
+                let _ = request.respond(bridge_json_response(&summaries, 200));
             }
             Err(error) => {
                 let _ = request.respond(bridge_json_response(
@@ -2561,15 +2675,15 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         let limit = query_parameter(&url, "limit")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
-        let messages = mobile_session_messages(&session)
-            .into_iter()
-            .filter(|message| after_seq == 0 || message.seq > after_seq)
-            .take(if limit == 0 {
-                usize::MAX
-            } else {
-                limit.min(10_000)
-            })
-            .collect::<Vec<_>>();
+        let messages = if after_seq > 0 {
+            mobile_session_messages(&session)
+        } else {
+            // Opening a conversation must not advance the live event cursor
+            // across its entire history. Sequence numbers are assigned only
+            // when a client explicitly asks for sequence-based pagination.
+            cached_mobile_session_messages(&session)
+        };
+        let messages = paginate_mobile_messages(messages, after_seq, limit);
         let _ = request.respond(bridge_json_response(&messages, 200));
         return;
     }
@@ -6053,6 +6167,29 @@ fn enrich_sessions_with_mode(
 fn list_sessions_sync() -> Result<Vec<SessionRecord>, String> {
     let sessions = load_base_sessions();
     Ok(enrich_sessions(sessions).0)
+}
+
+fn list_mobile_sessions_cached(max_age_ms: i64) -> Result<Vec<SessionRecord>, String> {
+    let now = now_ms();
+    let store = MOBILE_SESSION_CACHE.get_or_init(|| Mutex::new(RuntimeSessionCache::default()));
+    let mut cache = store
+        .lock()
+        .map_err(|_| "mobile session cache is unavailable".to_string())?;
+    if cache.refreshed_at_ms > 0 && now.saturating_sub(cache.refreshed_at_ms) <= max_age_ms.max(0) {
+        return Ok(cache.sessions.clone());
+    }
+    let sessions = list_sessions_sync()?;
+    cache.sessions = sessions.clone();
+    cache.refreshed_at_ms = now_ms();
+    Ok(sessions)
+}
+
+fn remember_mobile_sessions(sessions: &[SessionRecord]) {
+    let store = MOBILE_SESSION_CACHE.get_or_init(|| Mutex::new(RuntimeSessionCache::default()));
+    if let Ok(mut cache) = store.lock() {
+        cache.sessions = sessions.to_vec();
+        cache.refreshed_at_ms = now_ms();
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -10322,6 +10459,48 @@ mod runtime_probe_tests {
         assert_eq!(
             mobile_sync_window_flags(None, "same", 0, 12, 5),
             (false, false)
+        );
+    }
+
+    #[test]
+    fn mobile_sync_bootstrap_never_requests_history() {
+        assert!(mobile_sync_is_bootstrap(0, None, 0));
+        assert!(mobile_sync_is_bootstrap(-1, Some("  "), 0));
+        assert!(!mobile_sync_is_bootstrap(1, None, 0));
+        assert!(!mobile_sync_is_bootstrap(0, Some("epoch"), 0));
+        assert!(!mobile_sync_is_bootstrap(0, None, 1));
+    }
+
+    #[test]
+    fn mobile_message_page_returns_the_recent_tail() {
+        let messages = (1..=5)
+            .map(|seq| MobileSessionMessage {
+                id: format!("message-{seq}"),
+                role: "assistant".to_string(),
+                text: format!("message {seq}"),
+                timestamp_ms: seq as i64,
+                kind: "assistant".to_string(),
+                seq,
+                seq_start: seq,
+                seq_end: seq,
+                source_seq_ranges: Vec::new(),
+                turn_id: None,
+                call_id: None,
+                tool_status: None,
+                tool_detail: None,
+                approval_id: None,
+                approval_options: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let recent = paginate_mobile_messages(messages.clone(), 0, 2);
+        assert_eq!(
+            recent.iter().map(|message| message.seq).collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        let after = paginate_mobile_messages(messages, 2, 2);
+        assert_eq!(
+            after.iter().map(|message| message.seq).collect::<Vec<_>>(),
+            vec![3, 4]
         );
     }
 

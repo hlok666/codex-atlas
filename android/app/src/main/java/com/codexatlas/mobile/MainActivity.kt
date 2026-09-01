@@ -109,8 +109,17 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         consumePairing(intent)
         consumeSessionIntent(intent)
-        if (BridgePreferences.token(this).isNotBlank()) AtlasSyncService.start(this)
         setContent { AtlasTheme { AtlasMobileApp(pairingFromIntent, sessionIdFromIntent) } }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        AtlasSyncService.setActivityVisible(this, true)
+    }
+
+    override fun onStop() {
+        AtlasSyncService.setActivityVisible(this, false)
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -118,7 +127,6 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         consumePairing(intent)
         consumeSessionIntent(intent)
-        if (BridgePreferences.token(this).isNotBlank()) AtlasSyncService.start(this)
     }
 
     private fun consumePairing(intent: Intent?) {
@@ -595,22 +603,34 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             syncAfterSeq = BridgePreferences.syncSeq(context)
             snapshot = BridgePreferences.cachedSnapshot(context)
             BridgePreferences.saveConnectionRoute(context, connectionRoute.key)
-            AtlasSyncService.start(context)
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val primary = primaryBridgeUrl(details, connectionRoute)
                     val fallback = fallbackBridgeUrl(details, connectionRoute)
                     if (primary.isBlank()) error(if (zh) "没有可用的服务器通道地址" else "No server route is available")
                     val client = AtlasBridgeClient(primary, details.token)
-                    val fresh = client.snapshotAny(fallback)
-                    val available = client.listSessionsAny(fallback)
-                    Triple(fresh, available, available.firstOrNull { it.id == fresh.sessionId }?.id ?: fresh.sessionId)
+                    val bootstrap = client.syncAny(0, fallback)
+                    val fresh = bootstrap.snapshot
+                        ?: error(if (zh) "桌面端没有可用会话" else "No session is available on the desktop")
+                    val preferredId = bootstrap.sessions.firstOrNull { it.id == fresh.sessionId }?.id ?: fresh.sessionId
+                    bootstrap to preferredId
                 }
             }
-            result.onSuccess { (freshSnapshot, available, preferredId) ->
+            result.onSuccess { (bootstrap, preferredId) ->
                 if (connectionRequestToken != requestToken) return@onSuccess
+                val freshSnapshot = bootstrap.snapshot ?: return@onSuccess
+                val available = bootstrap.sessions
                 snapshot = freshSnapshot
                 sessions = available
+                syncCursorMs = bootstrap.cursorMs
+                syncEpoch = bootstrap.syncEpoch
+                syncAfterSeq = bootstrap.nextSeq
+                if (syncEpoch.isNotBlank()) {
+                    BridgePreferences.saveSyncPosition(context, syncEpoch, syncAfterSeq, syncCursorMs)
+                } else {
+                    BridgePreferences.saveSyncCursor(context, syncCursorMs)
+                }
+                BridgePreferences.saveCachedSnapshot(context, freshSnapshot)
                 val requestedId = requestedSessionId.takeIf { requested -> available.any { it.id == requested } }
                     ?: initialSessionId.takeIf { requested -> available.any { it.id == requested } }
                 selectedSessionId = requestedId ?: preferredId.ifBlank { available.firstOrNull()?.id.orEmpty() }
@@ -618,13 +638,14 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 if (target.isNotBlank()) {
                     val loadedMessages = withContext(Dispatchers.IO) {
                         val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
-                        runCatching { AtlasBridgeClient(primary, details.token).messagesAny(target, fallback) }.getOrDefault(emptyList())
+                        runCatching { AtlasBridgeClient(primary, details.token).messagesAny(target, fallback, limit = 200) }.getOrDefault(emptyList())
                     }
                     if (connectionRequestToken == requestToken && selectedSessionId == target) {
                         messagesBySession = messagesBySession + (target to loadedMessages)
                     }
                 }
                 state = ConnectionState.Connected(freshSnapshot.title)
+                AtlasSyncService.start(context)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                 ) {
@@ -714,7 +735,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         runCatching {
                             val primary = primaryBridgeUrl(details, connectionRoute)
                             val fallback = fallbackBridgeUrl(details, connectionRoute)
-                            AtlasBridgeClient(primary, details.token).messagesAny(target, fallback)
+                            AtlasBridgeClient(primary, details.token).messagesAny(target, fallback, limit = 200)
                         }.getOrNull()
                     }
                     if (full != null) messagesBySession = messagesBySession + (target to full)
@@ -1063,7 +1084,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     messageRequestToken = requestToken
                     val loaded = withContext(Dispatchers.IO) {
                         val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
-                        runCatching { AtlasBridgeClient(primary, details.token).messagesAny(conversationId, fallback) }
+                        runCatching { AtlasBridgeClient(primary, details.token).messagesAny(conversationId, fallback, limit = 200) }
                             .getOrDefault(emptyList())
                     }
                     if (messageRequestToken == requestToken && selectedSessionId == conversationId) {

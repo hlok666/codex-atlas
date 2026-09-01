@@ -19,7 +19,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -61,7 +63,12 @@ class AtlasSyncService : Service() {
         cursorMs = maxOf(cursorMs, BridgePreferences.syncCursor(this))
         syncEpoch = BridgePreferences.syncEpoch(this)
         afterSeq = maxOf(afterSeq, BridgePreferences.syncSeq(this))
-        if (syncWorker?.isActive != true) syncWorker = serviceScope.launch { runSyncLoop() }
+        if (activityVisible) {
+            syncWorker?.cancel()
+            syncWorker = null
+        } else if (syncWorker?.isActive != true) {
+            syncWorker = serviceScope.launch { runSyncLoop() }
+        }
         if (queueWorker?.isActive != true) {
             AtlasMessageQueue.resetSending(this)
             queueWorker = serviceScope.launch { runQueueLoop() }
@@ -80,6 +87,7 @@ class AtlasSyncService : Service() {
         // ColorOS and similar launchers may remove the task without stopping
         // the foreground service. Re-issue the start request so a killed
         // process is recreated with the persisted pairing data.
+        activityVisible = false
         if (BridgePreferences.token(this).isNotBlank()) AtlasSyncService.start(this)
         super.onTaskRemoved(rootIntent)
     }
@@ -97,7 +105,7 @@ class AtlasSyncService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private suspend fun runQueueLoop() {
-        while (serviceScope.isActive) {
+        while (currentCoroutineContext().isActive) {
             val pairing = MainActivity.storedPairing(this)
             val details = MainActivity.parsePairing(pairing)
             val token = BridgePreferences.token(this).trim()
@@ -157,7 +165,7 @@ class AtlasSyncService : Service() {
     }
 
     private suspend fun runSyncLoop() {
-        while (serviceScope.isActive) {
+        while (currentCoroutineContext().isActive) {
             val pairing = MainActivity.storedPairing(this)
             val details = MainActivity.parsePairing(pairing)
             val token = BridgePreferences.token(this).trim()
@@ -183,31 +191,18 @@ class AtlasSyncService : Service() {
                     syncEpoch,
                     afterSeq,
                 )
-                var recoverySucceeded = true
-                if (sync.reset || sync.gap) {
-                    // The service does not render the timeline, but it must
-                    // validate a reset/gap before advancing the durable
-                    // cursor or the foreground activity could skip history.
-                    sync.sessions.forEach { session ->
-                        val loaded = runCatching {
-                            AtlasBridgeClient(primary, token).messagesAny(session.id, fallback)
-                        }.isSuccess
-                        if (!loaded) recoverySucceeded = false
-                    }
-                }
-                if (recoverySucceeded) {
-                    cursorMs = maxOf(cursorMs, sync.cursorMs)
-                    if (sync.syncEpoch.isNotBlank()) {
-                        afterSeq = if (sync.reset || (syncEpoch.isNotBlank() && syncEpoch != sync.syncEpoch)) {
-                            sync.nextSeq
-                        } else {
-                            maxOf(afterSeq, sync.nextSeq)
-                        }
-                        syncEpoch = sync.syncEpoch
-                        BridgePreferences.saveSyncPosition(this, syncEpoch, afterSeq, cursorMs)
+                currentCoroutineContext().ensureActive()
+                cursorMs = maxOf(cursorMs, sync.cursorMs)
+                if (sync.syncEpoch.isNotBlank()) {
+                    afterSeq = if (sync.reset || sync.gap || (syncEpoch.isNotBlank() && syncEpoch != sync.syncEpoch)) {
+                        sync.nextSeq
                     } else {
-                        BridgePreferences.saveSyncCursor(this, cursorMs)
+                        maxOf(afterSeq, sync.nextSeq)
                     }
+                    syncEpoch = sync.syncEpoch
+                    BridgePreferences.saveSyncPosition(this, syncEpoch, afterSeq, cursorMs)
+                } else {
+                    BridgePreferences.saveSyncCursor(this, cursorMs)
                 }
                 sync.snapshot?.let { BridgePreferences.saveCachedSnapshot(this, it) }
                 AtlasWidgetReceiver.requestRefresh(this)
@@ -215,12 +210,10 @@ class AtlasSyncService : Service() {
                 updateNotification(
                     "Codex Atlas",
                     when {
-                        !recoverySucceeded -> "正在补偿同步"
                         AtlasMessageQueue.count(this) > 0 -> "队列处理中"
                         else -> "已连接"
                     },
                 )
-                if (!recoverySucceeded) delay(750)
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 updateNotification("Codex Atlas", "连接重试中")
@@ -279,10 +272,16 @@ class AtlasSyncService : Service() {
         private const val CHANNEL_ID = "atlas_connection"
         private const val NOTIFICATION_ID = 8101
         const val ACTION_UPDATED = "com.codexatlas.mobile.action.SYNC_UPDATED"
+        @Volatile private var activityVisible = false
 
         fun start(context: Context) {
             val intent = Intent(context, AtlasSyncService::class.java)
             runCatching { ContextCompat.startForegroundService(context, intent) }
+        }
+
+        fun setActivityVisible(context: Context, visible: Boolean) {
+            activityVisible = visible
+            if (BridgePreferences.token(context).isNotBlank()) start(context)
         }
     }
 }
