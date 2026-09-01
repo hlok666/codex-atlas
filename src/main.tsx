@@ -59,7 +59,7 @@ import {
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
-import type { DesktopUpdateInfo } from './lib/atlasBridge'
+import type { DesktopUpdateInfo, DesktopUpdateProgress } from './lib/atlasBridge'
 import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
 import packageJson from '../package.json'
@@ -498,6 +498,16 @@ function relativeUpdated(timestamp: number, language: UiLanguage = 'en') {
   if (hours < 24) return language === 'zh' ? `${hours} 小时前` : `${hours} hr ago`
   const days = Math.floor(hours / 24)
   return days === 1 ? (language === 'zh' ? '昨天' : 'Yesterday') : language === 'zh' ? `${days} 天前` : `${days} days ago`
+}
+
+function formatByteCount(bytes: number, language: UiLanguage) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
+  const value = bytes / (1024 ** index)
+  return `${value.toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US', {
+    maximumFractionDigits: index === 0 || value >= 10 ? 0 : 1,
+  })} ${units[index]}`
 }
 
 function formatSessionUpdated(session: Session, language: UiLanguage) {
@@ -1853,6 +1863,8 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
   const [updatingCodex, setUpdatingCodex] = useState(false)
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateInfo | null>(null)
   const [desktopUpdateBusy, setDesktopUpdateBusy] = useState<'check' | 'download' | 'install' | null>(null)
+  const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<DesktopUpdateProgress | null>(null)
+  const [desktopUpdateError, setDesktopUpdateError] = useState('')
   const [bridgeSaving, setBridgeSaving] = useState(false)
   const [tunnelBusy, setTunnelBusy] = useState(false)
   const [bridgeDraft, setBridgeDraft] = useState<MobileBridgeSettings>({ tunnelUrl: '', cloudflaredPath: '', tunnelToken: '', tunnelName: '', preferTunnel: false, autoStartTunnel: false })
@@ -1870,6 +1882,47 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
     void checkDesktopUpdate().then((result) => { if (!disposed && result) setDesktopUpdate(result) })
     return () => { disposed = true }
   }, [])
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void listenDesktopEvent<DesktopUpdateProgress>('desktop_update_progress', (progress) => {
+      if (disposed) return
+      const normalized = {
+        ...progress,
+        state: progress.state || (progress.complete ? 'complete' : 'downloading'),
+      }
+      setDesktopUpdateProgress(normalized)
+      if (normalized.state === 'error') setDesktopUpdateError(normalized.error || (language === 'zh' ? '下载安装包失败' : 'Installer download failed'))
+      if (normalized.state === 'complete') setDesktopUpdateError('')
+    }).then((remove) => {
+      if (disposed) remove?.()
+      else unlisten = remove
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [language])
+  useEffect(() => {
+    const onCommandError = (event: Event) => {
+      const detail = (event as CustomEvent<DesktopCommandError>).detail
+      if (detail?.command !== 'download_desktop_update') return
+      const error = detail.error || (language === 'zh' ? '下载安装包失败' : 'Installer download failed')
+      setDesktopUpdateError(error)
+      setDesktopUpdateProgress((current) => ({
+        state: 'error',
+        downloadedBytes: current?.downloadedBytes || 0,
+        totalBytes: current?.totalBytes || desktopUpdate?.assetSize || null,
+        bytesPerSecond: null,
+        attempt: current?.attempt || 0,
+        transport: current?.transport || 'none',
+        complete: false,
+        error,
+      }))
+    }
+    window.addEventListener('codex-atlas:command-error', onCommandError)
+    return () => window.removeEventListener('codex-atlas:command-error', onCommandError)
+  }, [desktopUpdate?.assetSize, language])
   useEffect(() => {
     if (!serverTunnel) return
     setServerDraft((current) => ({ ...current, host: serverTunnel.host || current.host, port: serverTunnel.port || current.port, username: serverTunnel.username || current.username, remotePort: serverTunnel.remotePort || current.remotePort, tunnelUrl: serverTunnel.tunnelUrl || current.tunnelUrl, autoStart: serverTunnel.autoStart, identityFile: serverTunnel.keyPath || current.identityFile }))
@@ -1972,17 +2025,48 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
   const checkAtlasUpdate = async () => {
     setDesktopUpdateBusy('check')
     const result = await checkDesktopUpdate()
-    if (result) setDesktopUpdate(result)
+    if (result) {
+      setDesktopUpdate(result)
+      setDesktopUpdateError('')
+      if (!result.downloaded) setDesktopUpdateProgress(null)
+      showToast(result.available ? (language === 'zh' ? `发现 Atlas ${result.latestVersion}` : `Atlas ${result.latestVersion} is available`) : (language === 'zh' ? '当前已是最新版本' : 'Atlas is up to date'))
+    } else {
+      showToast(language === 'zh' ? '检查更新失败，请检查网络后重试' : 'Update check failed. Check your connection and try again.')
+    }
     setDesktopUpdateBusy(null)
-    showToast(result?.available ? (language === 'zh' ? `发现 Atlas ${result.latestVersion}` : `Atlas ${result.latestVersion} is available`) : (language === 'zh' ? '当前已是最新版本' : 'Atlas is up to date'))
   }
   const downloadAtlasUpdate = async () => {
     if (!desktopUpdate?.available) return
+    setDesktopUpdateError('')
+    setDesktopUpdateProgress({
+      state: 'connecting',
+      downloadedBytes: 0,
+      totalBytes: desktopUpdate.assetSize || null,
+      bytesPerSecond: null,
+      attempt: 1,
+      transport: 'native',
+      complete: false,
+      error: null,
+    })
     setDesktopUpdateBusy('download')
     try {
       const result = await downloadDesktopUpdate(desktopUpdate)
-      if (result) setDesktopUpdate(result)
-      showToast(result?.downloaded ? (language === 'zh' ? '安装包已下载，可立即安装' : 'Installer downloaded and ready to install') : (language === 'zh' ? '下载失败' : 'Download failed'))
+      if (result?.downloaded) {
+        setDesktopUpdate(result)
+        showToast(language === 'zh' ? '安装包已下载，可立即安装' : 'Installer downloaded and ready to install')
+      } else {
+        setDesktopUpdateProgress((current) => current?.state === 'error' ? current : {
+          state: 'error',
+          downloadedBytes: current?.downloadedBytes || 0,
+          totalBytes: current?.totalBytes || desktopUpdate.assetSize || null,
+          bytesPerSecond: null,
+          attempt: current?.attempt || 0,
+          transport: current?.transport || 'none',
+          complete: false,
+          error: language === 'zh' ? '下载安装包失败，请重试' : 'Installer download failed. Try again.',
+        })
+        setDesktopUpdateError((current) => current || (language === 'zh' ? '下载安装包失败，请重试' : 'Installer download failed. Try again.'))
+      }
     } finally {
       setDesktopUpdateBusy(null)
     }
@@ -2119,6 +2203,27 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
   const voiceDownloadPercent = voiceProgress?.totalBytes && voiceProgress.totalBytes > 0
     ? Math.min(100, Math.round((voiceProgress.downloadedBytes / voiceProgress.totalBytes) * 100))
     : null
+  const desktopDownloadPercent = desktopUpdateProgress?.totalBytes && desktopUpdateProgress.totalBytes > 0
+    ? Math.min(100, Math.round((desktopUpdateProgress.downloadedBytes / desktopUpdateProgress.totalBytes) * 100))
+    : null
+  const desktopProgressLabel = desktopUpdateProgress
+    ? desktopUpdateProgress.state === 'connecting'
+      ? (language === 'zh' ? '正在连接 GitHub' : 'Connecting to GitHub')
+      : desktopUpdateProgress.state === 'retrying'
+        ? desktopUpdateProgress.transport === 'system'
+          ? (language === 'zh' ? '正在切换系统下载器' : 'Switching to the system downloader')
+          : (language === 'zh' ? `网络中断，正在重试 ${desktopUpdateProgress.attempt}/3` : `Connection interrupted, retrying ${desktopUpdateProgress.attempt}/3`)
+        : desktopUpdateProgress.state === 'finalizing'
+          ? (language === 'zh' ? '正在校验安装包' : 'Verifying installer')
+          : desktopUpdateProgress.state === 'complete'
+            ? (language === 'zh' ? '安装包已就绪' : 'Installer is ready')
+            : desktopUpdateProgress.state === 'error'
+              ? (language === 'zh' ? '下载失败' : 'Download failed')
+              : (language === 'zh' ? '正在下载安装包' : 'Downloading installer')
+    : ''
+  const desktopProgressSize = desktopUpdateProgress
+    ? `${formatByteCount(desktopUpdateProgress.downloadedBytes, language)}${desktopUpdateProgress.totalBytes ? ` / ${formatByteCount(desktopUpdateProgress.totalBytes, language)}` : ''}${desktopUpdateProgress.bytesPerSecond ? ` · ${formatByteCount(desktopUpdateProgress.bytesPerSecond, language)}/s` : ''}`
+    : ''
   return <>
     <section className="page-heading compact"><div><div className="eyebrow accent-text">{tr(language, 'settings')} <span className="heading-line" /></div><h1>{tr(language, 'runtimeTitle')}</h1></div><button className="primary-button" onClick={() => void saveDefaults()} disabled={saving || !defaultModel.trim()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />} {saving ? (language === 'zh' ? '保存中…' : 'Saving…') : tr(language, 'save')}</button></section>
     <div className="runtime-grid">
@@ -2134,7 +2239,25 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
         <div className="panel-head"><div><h3>{tr(language, 'codexVersion')}</h3><span className="panel-subtitle">{tr(language, 'detectedCli')}</span></div><GitBranch size={17} className="violet-icon" /></div>
         <div className="version-card current"><div><span className="version-badge">{tr(language, 'installedBadge')}</span><strong>Codex {codexVersion}</strong><small>{codexVersion === 'detecting…' ? tr(language, 'detecting') : tr(language, 'readyResume')}</small></div><Check size={17} /></div>
         <button className="secondary-button version-help" onClick={() => void updateInstalledCodex()} disabled={updatingCodex}>{updatingCodex ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />} {updatingCodex ? (language === 'zh' ? '更新中…' : 'Updating…') : tr(language, 'checkUpdates')}</button>
-        <div className="desktop-update-row"><div><strong>{language === 'zh' ? 'Atlas 桌面版本' : 'Atlas desktop version'}</strong><small>{desktopUpdate ? (desktopUpdate.available ? `${language === 'zh' ? '可更新至' : 'Available'} ${desktopUpdate.latestVersion}` : (language === 'zh' ? '已是最新' : 'Up to date')) : (language === 'zh' ? '检查中…' : 'Checking…')}</small></div><div className="desktop-update-actions"><button className="icon-button tiny" onClick={() => void checkAtlasUpdate()} disabled={desktopUpdateBusy !== null} aria-label={language === 'zh' ? '检查 Atlas 更新' : 'Check Atlas updates'} title={language === 'zh' ? '检查 Atlas 更新' : 'Check Atlas updates'}>{desktopUpdateBusy === 'check' ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}</button>{desktopUpdate?.downloadedPath ? <button className="primary-button compact-button" onClick={() => void installAtlasUpdate()} disabled={desktopUpdateBusy !== null}>{desktopUpdateBusy === 'install' ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}{language === 'zh' ? '安装' : 'Install'}</button> : desktopUpdate?.available ? <button className="primary-button compact-button" onClick={() => void downloadAtlasUpdate()} disabled={desktopUpdateBusy !== null}>{desktopUpdateBusy === 'download' ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}{language === 'zh' ? '下载' : 'Download'}</button> : null}</div></div>
+        <div className="desktop-update-row">
+          <div>
+            <strong>{language === 'zh' ? 'Atlas 桌面版本' : 'Atlas desktop version'}</strong>
+            <small>{desktopUpdate ? (desktopUpdate.available ? `${language === 'zh' ? '可更新至' : 'Available'} ${desktopUpdate.latestVersion}` : (language === 'zh' ? '已是最新' : 'Up to date')) : (language === 'zh' ? '检查中…' : 'Checking…')}</small>
+          </div>
+          <div className="desktop-update-actions">
+            <button className="icon-button tiny" onClick={() => void checkAtlasUpdate()} disabled={desktopUpdateBusy !== null} aria-label={language === 'zh' ? '检查 Atlas 更新' : 'Check Atlas updates'} title={language === 'zh' ? '检查 Atlas 更新' : 'Check Atlas updates'}>{desktopUpdateBusy === 'check' ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}</button>
+            {desktopUpdate?.downloadedPath
+              ? <button className="primary-button compact-button" onClick={() => void installAtlasUpdate()} disabled={desktopUpdateBusy !== null}>{desktopUpdateBusy === 'install' ? <LoaderCircle className="spin" size={13} /> : <PackageCheck size={13} />}{language === 'zh' ? '安装' : 'Install'}</button>
+              : desktopUpdate?.available
+                ? <button className="primary-button compact-button" onClick={() => void downloadAtlasUpdate()} disabled={desktopUpdateBusy !== null}>{desktopUpdateBusy === 'download' ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}{desktopUpdateBusy === 'download' ? (desktopDownloadPercent !== null ? `${desktopDownloadPercent}%` : (language === 'zh' ? '下载中…' : 'Downloading…')) : desktopUpdateError ? (language === 'zh' ? '重试' : 'Retry') : (language === 'zh' ? '下载' : 'Download')}</button>
+                : null}
+          </div>
+        </div>
+        {desktopUpdateProgress && <div className={`desktop-update-progress ${desktopUpdateProgress.state}`} role="status" aria-live="polite">
+          <div><strong>{desktopProgressLabel}</strong><span>{desktopDownloadPercent !== null ? `${desktopDownloadPercent}%` : desktopProgressSize}</span></div>
+          {desktopUpdateProgress.totalBytes ? <progress max={desktopUpdateProgress.totalBytes} value={Math.min(desktopUpdateProgress.downloadedBytes, desktopUpdateProgress.totalBytes)} /> : <progress />}
+          <small>{desktopUpdateError || desktopUpdateProgress.error || desktopProgressSize}</small>
+        </div>}
       </section>
       <section className="settings-panel project-panel">
         <div className="panel-head"><div><h3>{tr(language, 'atlasProject')}</h3><span className="panel-subtitle">{tr(language, 'atlasProjectDescription')}</span></div><ExternalLink size={17} className="teal-icon" /></div>

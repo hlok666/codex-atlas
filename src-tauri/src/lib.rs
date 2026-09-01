@@ -14,6 +14,7 @@ use reqwest::Client;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -645,10 +646,26 @@ pub struct DesktopUpdateInfo {
     pub latest_version: String,
     pub available: bool,
     pub asset_name: Option<String>,
+    pub asset_size: Option<u64>,
+    pub asset_api_url: Option<String>,
+    pub asset_digest: Option<String>,
     pub download_url: Option<String>,
     pub downloaded_path: Option<String>,
     pub downloaded: bool,
     pub release_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopUpdateProgress {
+    state: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    bytes_per_second: Option<u64>,
+    attempt: u8,
+    transport: String,
+    complete: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9222,6 +9239,432 @@ fn desktop_asset_is_supported(name: &str) -> bool {
     }
 }
 
+fn desktop_update_partial_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("codex-atlas-update");
+    path.with_file_name(format!("{name}.part"))
+}
+
+fn normalized_desktop_update_digest(value: Option<&str>) -> Option<String> {
+    let digest = value?.trim().strip_prefix("sha256:")?.to_ascii_lowercase();
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(digest)
+}
+
+fn desktop_update_sha256(path: &Path) -> Result<String, String> {
+    let mut file =
+        File::open(path).map_err(|error| format!("open update for checksum: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let size = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read update for checksum: {error}"))?;
+        if size == 0 {
+            break;
+        }
+        hasher.update(&buffer[..size]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn desktop_update_file_is_complete(
+    path: &Path,
+    expected_size: Option<u64>,
+    expected_digest: Option<&str>,
+) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    let size_matches = expected_size
+        .filter(|size| *size > 0)
+        .map(|size| metadata.len() == size)
+        .unwrap_or(true);
+    if !size_matches {
+        return false;
+    }
+    match expected_digest {
+        Some(value) => normalized_desktop_update_digest(Some(value))
+            .map(|expected| {
+                desktop_update_sha256(path)
+                    .map(|actual| actual == expected)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false),
+        None => true,
+    }
+}
+
+fn content_range_total(value: Option<&str>) -> Option<u64> {
+    value?
+        .rsplit_once('/')
+        .and_then(|(_, total)| total.trim().parse::<u64>().ok())
+}
+
+fn desktop_update_speed(
+    started: Instant,
+    initial_bytes: u64,
+    downloaded_bytes: u64,
+) -> Option<u64> {
+    let elapsed = started.elapsed().as_secs_f64();
+    (elapsed >= 0.1)
+        .then(|| ((downloaded_bytes.saturating_sub(initial_bytes)) as f64 / elapsed).round() as u64)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_desktop_update_progress(
+    app: &AppHandle,
+    state: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    bytes_per_second: Option<u64>,
+    attempt: u8,
+    transport: &str,
+    error: Option<&str>,
+) {
+    let _ = app.emit(
+        "desktop_update_progress",
+        DesktopUpdateProgress {
+            state: state.to_string(),
+            downloaded_bytes,
+            total_bytes,
+            bytes_per_second,
+            attempt,
+            transport: transport.to_string(),
+            complete: state == "complete",
+            error: error.map(str::to_string),
+        },
+    );
+}
+
+async fn download_desktop_update_native(
+    app: &AppHandle,
+    url: &str,
+    temporary: &Path,
+    expected_size: Option<u64>,
+    asset_api: bool,
+    transport: &str,
+    max_attempts: u8,
+) -> Result<(u64, Option<u64>), String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(7_200))
+        .build()
+        .map_err(|error| format!("build update client: {error}"))?;
+    let mut last_error = "desktop update download did not start".to_string();
+
+    for attempt in 1..=max_attempts {
+        let mut existing = fs::metadata(temporary)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if expected_size.is_some_and(|size| existing == size && size > 0) {
+            return Ok((existing, expected_size));
+        }
+        if expected_size.is_some_and(|size| existing > size) {
+            fs::remove_file(temporary)
+                .map_err(|error| format!("reset invalid partial update: {error}"))?;
+            existing = 0;
+        }
+
+        emit_desktop_update_progress(
+            app,
+            if attempt == 1 {
+                "connecting"
+            } else {
+                "retrying"
+            },
+            existing,
+            expected_size,
+            None,
+            attempt,
+            transport,
+            (attempt > 1).then_some(last_error.as_str()),
+        );
+        let mut request = client.get(url).header("User-Agent", "Codex-Atlas-Desktop");
+        if asset_api {
+            request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
+        }
+        if existing > 0 {
+            request = request.header("Range", format!("bytes={existing}-"));
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = format!("connect to GitHub release: {error}");
+                if attempt < max_attempts {
+                    async_sleep(Duration::from_secs(attempt as u64)).await;
+                    continue;
+                }
+                break;
+            }
+        };
+        let status = response.status();
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+            && expected_size.is_some_and(|size| existing == size && size > 0)
+        {
+            return Ok((existing, expected_size));
+        }
+        if !status.is_success() {
+            last_error = format!("GitHub release returned HTTP {status}");
+            if attempt < max_attempts {
+                async_sleep(Duration::from_secs(attempt as u64)).await;
+                continue;
+            }
+            break;
+        }
+
+        // If a server ignores Range and responds with 200, restart the file
+        // rather than appending a second full installer to the partial file.
+        let append = existing > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        let initial_bytes = if append { existing } else { 0 };
+        let header_total = content_range_total(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+        )
+        .or_else(|| {
+            response
+                .content_length()
+                .map(|length| initial_bytes.saturating_add(length))
+        });
+        let total_bytes = expected_size.filter(|size| *size > 0).or(header_total);
+        let file_result = if append {
+            OpenOptions::new().create(true).append(true).open(temporary)
+        } else {
+            File::create(temporary)
+        };
+        let mut file = file_result.map_err(|error| format!("open update cache: {error}"))?;
+        let started = Instant::now();
+        let mut downloaded_bytes = initial_bytes;
+        let mut last_emitted_bytes = downloaded_bytes;
+        let mut last_emit = Instant::now();
+        emit_desktop_update_progress(
+            app,
+            "downloading",
+            downloaded_bytes,
+            total_bytes,
+            None,
+            attempt,
+            transport,
+            None,
+        );
+
+        let mut response = response;
+        let mut stream_error = None;
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    stream_error = Some(format!("read desktop update: {error}"));
+                    break;
+                }
+            };
+            if let Err(error) = file.write_all(&chunk) {
+                stream_error = Some(format!("write desktop update: {error}"));
+                break;
+            }
+            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+            if last_emit.elapsed() >= Duration::from_millis(100)
+                || downloaded_bytes.saturating_sub(last_emitted_bytes) >= 256 * 1024
+            {
+                emit_desktop_update_progress(
+                    app,
+                    "downloading",
+                    downloaded_bytes,
+                    total_bytes,
+                    desktop_update_speed(started, initial_bytes, downloaded_bytes),
+                    attempt,
+                    transport,
+                    None,
+                );
+                last_emit = Instant::now();
+                last_emitted_bytes = downloaded_bytes;
+            }
+        }
+        if let Err(error) = file.flush() {
+            stream_error = Some(format!("flush desktop update: {error}"));
+        }
+        drop(file);
+        if let Some(error) = stream_error {
+            last_error = error;
+            if attempt < max_attempts {
+                async_sleep(Duration::from_secs(attempt as u64)).await;
+                continue;
+            }
+            break;
+        }
+
+        let actual_size = fs::metadata(temporary)
+            .map(|metadata| metadata.len())
+            .map_err(|error| format!("inspect downloaded update: {error}"))?;
+        if total_bytes.is_some_and(|size| size > 0 && actual_size != size) {
+            last_error = format!(
+                "desktop update is incomplete: downloaded {actual_size} of {} bytes",
+                total_bytes.unwrap_or_default()
+            );
+            if attempt < max_attempts {
+                async_sleep(Duration::from_secs(attempt as u64)).await;
+                continue;
+            }
+            break;
+        }
+        emit_desktop_update_progress(
+            app,
+            "downloading",
+            actual_size,
+            total_bytes.or(Some(actual_size)),
+            desktop_update_speed(started, initial_bytes, actual_size),
+            attempt,
+            transport,
+            None,
+        );
+        return Ok((actual_size, total_bytes.or(Some(actual_size))));
+    }
+
+    Err(last_error)
+}
+
+#[cfg(target_os = "windows")]
+async fn download_desktop_update_with_curl(
+    app: &AppHandle,
+    url: &str,
+    temporary: &Path,
+    expected_size: Option<u64>,
+    asset_api: bool,
+    native_error: &str,
+) -> Result<(u64, Option<u64>), String> {
+    use std::os::windows::process::CommandExt;
+
+    let mut last_error = native_error.to_string();
+    for attempt in 1..=2 {
+        let mut existing = fs::metadata(temporary)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if expected_size.is_some_and(|size| existing == size && size > 0) {
+            return Ok((existing, expected_size));
+        }
+        if expected_size.is_some_and(|size| existing > size) {
+            fs::remove_file(temporary)
+                .map_err(|error| format!("reset invalid partial update: {error}"))?;
+            existing = 0;
+        }
+        emit_desktop_update_progress(
+            app,
+            "retrying",
+            existing,
+            expected_size,
+            None,
+            attempt,
+            "system",
+            Some(native_error),
+        );
+
+        let mut command = Command::new("curl.exe");
+        command.args([
+            "--location",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "2",
+            "--retry-all-errors",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "7200",
+            "--speed-limit",
+            "1024",
+            "--speed-time",
+            "60",
+        ]);
+        if existing > 0 {
+            command.args(["--continue-at", "-"]);
+        }
+        if asset_api {
+            command.args(["--header", "Accept: application/octet-stream"]);
+        }
+        command.args(["--output", &temporary.to_string_lossy(), url]);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .creation_flags(0x08000000);
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("start Windows system downloader: {error}"))?;
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut detail = String::new();
+                    if let Some(mut stderr) = child.stderr.take() {
+                        let _ = stderr.read_to_string(&mut detail);
+                    }
+                    if status.success() {
+                        let actual_size = fs::metadata(temporary)
+                            .map(|metadata| metadata.len())
+                            .map_err(|error| format!("inspect downloaded update: {error}"))?;
+                        if actual_size == 0
+                            || expected_size.is_some_and(|size| size > 0 && actual_size != size)
+                        {
+                            last_error = format!(
+                                "Windows system downloader produced an incomplete file ({actual_size} bytes)"
+                            );
+                            break;
+                        }
+                        return Ok((actual_size, expected_size.or(Some(actual_size))));
+                    }
+                    last_error = if detail.trim().is_empty() {
+                        format!("Windows system downloader exited with {status}")
+                    } else {
+                        detail.trim().to_string()
+                    };
+                    // curl code 33 means the remote server rejected resume.
+                    if status.code() == Some(33) {
+                        let _ = fs::remove_file(temporary);
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    let downloaded_bytes = fs::metadata(temporary)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(existing);
+                    emit_desktop_update_progress(
+                        app,
+                        "downloading",
+                        downloaded_bytes,
+                        expected_size,
+                        desktop_update_speed(started, existing, downloaded_bytes),
+                        attempt,
+                        "system",
+                        None,
+                    );
+                    async_sleep(Duration::from_millis(250)).await;
+                }
+                Err(error) => {
+                    last_error = format!("monitor Windows system downloader: {error}");
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
+        if attempt < 2 {
+            async_sleep(Duration::from_secs(attempt as u64)).await;
+        }
+    }
+    Err(format!(
+        "native downloader failed: {native_error}; system downloader failed: {last_error}"
+    ))
+}
+
 #[tauri::command]
 async fn check_desktop_update() -> Result<DesktopUpdateInfo, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
@@ -9258,22 +9701,34 @@ async fn check_desktop_update() -> Result<DesktopUpdateInfo, String> {
         .filter_map(|asset| {
             let name = asset.get("name").and_then(Value::as_str)?;
             let url = asset.get("browser_download_url").and_then(Value::as_str)?;
-            desktop_asset_is_supported(name).then(|| (name.to_string(), url.to_string()))
+            let api_url = asset.get("url").and_then(Value::as_str).map(str::to_string);
+            let size = asset.get("size").and_then(Value::as_u64);
+            let digest = asset
+                .get("digest")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            desktop_asset_is_supported(name)
+                .then(|| (name.to_string(), url.to_string(), api_url, size, digest))
         })
         .next();
-    let (asset_name, download_url) =
-        asset.map_or((None, None), |(name, url)| (Some(name), Some(url)));
+    let (asset_name, download_url, asset_api_url, asset_size, asset_digest) = asset.map_or(
+        (None, None, None, None, None),
+        |(name, url, api_url, size, digest)| (Some(name), Some(url), api_url, size, digest),
+    );
     let downloaded_path = asset_name
         .as_deref()
         .map(|name| desktop_update_cache_dir().join(name))
-        .filter(|path| path.is_file())
+        .filter(|path| desktop_update_file_is_complete(path, asset_size, asset_digest.as_deref()))
         .map(|path| path.to_string_lossy().to_string());
     Ok(DesktopUpdateInfo {
         current_version: current_version.clone(),
         latest_version: latest_version.clone(),
         available: version_key(&latest_version) > version_key(&current_version)
-            && download_url.is_some(),
+            && (download_url.is_some() || asset_api_url.is_some()),
         asset_name,
+        asset_size,
+        asset_api_url,
+        asset_digest,
         download_url,
         downloaded: downloaded_path.is_some(),
         downloaded_path,
@@ -9286,11 +9741,16 @@ async fn download_desktop_update(
     app: AppHandle,
     update: DesktopUpdateInfo,
 ) -> Result<DesktopUpdateInfo, String> {
-    let url = update
+    let direct_url = update
         .download_url
         .clone()
-        .filter(|url| url.starts_with("https://github.com/"))
-        .ok_or_else(|| "no trusted GitHub desktop installer is available".to_string())?;
+        .filter(|url| url.starts_with("https://github.com/"));
+    let asset_api_url = update.asset_api_url.clone().filter(|url| {
+        url.starts_with("https://api.github.com/repos/hlok666/codex-atlas/releases/assets/")
+    });
+    if direct_url.is_none() && asset_api_url.is_none() {
+        return Err("no trusted GitHub desktop installer is available".to_string());
+    }
     let name = update
         .asset_name
         .clone()
@@ -9299,40 +9759,182 @@ async fn download_desktop_update(
     let directory = desktop_update_cache_dir();
     fs::create_dir_all(&directory).map_err(|error| format!("create update cache: {error}"))?;
     let path = directory.join(&name);
-    if path.is_file()
-        && fs::metadata(&path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-    {
-        let _ = app.emit("desktop_update_progress", serde_json::json!({"downloadedBytes": fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0), "totalBytes": fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0), "complete": true}));
+    if desktop_update_file_is_complete(&path, update.asset_size, update.asset_digest.as_deref()) {
+        let size = fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        emit_desktop_update_progress(
+            &app,
+            "complete",
+            size,
+            update.asset_size.or(Some(size)),
+            None,
+            0,
+            "cache",
+            None,
+        );
         return Ok(DesktopUpdateInfo {
             downloaded_path: Some(path.to_string_lossy().to_string()),
             downloaded: true,
             ..update
         });
     }
-    let client = Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|error| format!("build update client: {error}"))?;
-    let bytes = client
-        .get(&url)
-        .header("User-Agent", "Codex-Atlas-Desktop")
-        .send()
+
+    let temporary = desktop_update_partial_path(&path);
+    if path.is_file() {
+        let existing_size = fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let can_resume = existing_size > 0
+            && update
+                .asset_size
+                .is_some_and(|expected| existing_size < expected);
+        if can_resume && !temporary.exists() {
+            fs::rename(&path, &temporary)
+                .map_err(|error| format!("preserve partial update: {error}"))?;
+        } else {
+            fs::remove_file(&path).map_err(|error| format!("reset invalid update: {error}"))?;
+        }
+    }
+
+    // A previous process may have stopped after receiving the full byte count
+    // but before checksum verification. Discard that file if its digest does
+    // not match, otherwise the range downloader would treat it as complete.
+    if update.asset_size.is_some_and(|expected| {
+        fs::metadata(&temporary)
+            .map(|metadata| metadata.len() == expected)
+            .unwrap_or(false)
+    }) && !desktop_update_file_is_complete(
+        &temporary,
+        update.asset_size,
+        update.asset_digest.as_deref(),
+    ) {
+        fs::remove_file(&temporary)
+            .map_err(|error| format!("reset unverified partial update: {error}"))?;
+    }
+
+    let mut downloaded = None;
+    let mut last_error = "desktop update download did not start".to_string();
+    if let Some(url) = asset_api_url.as_deref() {
+        match download_desktop_update_native(
+            &app,
+            url,
+            &temporary,
+            update.asset_size,
+            true,
+            "github-api",
+            3,
+        )
         .await
-        .map_err(|error| format!("download desktop update: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("download returned an error: {error}"))?
-        .bytes()
+        {
+            Ok(result) => downloaded = Some(result),
+            Err(error) => last_error = error,
+        }
+    }
+    if downloaded.is_none() {
+        if let Some(url) = direct_url.as_deref() {
+            match download_desktop_update_native(
+                &app,
+                url,
+                &temporary,
+                update.asset_size,
+                false,
+                "native",
+                1,
+            )
+            .await
+            {
+                Ok(result) => downloaded = Some(result),
+                Err(error) => last_error = error,
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if downloaded.is_none() {
+        let (url, asset_api) = asset_api_url
+            .as_deref()
+            .map(|url| (url, true))
+            .or_else(|| direct_url.as_deref().map(|url| (url, false)))
+            .ok_or_else(|| "no trusted Windows update source is available".to_string())?;
+        match download_desktop_update_with_curl(
+            &app,
+            url,
+            &temporary,
+            update.asset_size,
+            asset_api,
+            &last_error,
+        )
         .await
-        .map_err(|error| format!("read desktop update: {error}"))?;
-    let temporary = path.with_extension(format!("download-{}", now_ms()));
-    fs::write(&temporary, &bytes).map_err(|error| format!("write desktop update: {error}"))?;
+        {
+            Ok(result) => downloaded = Some(result),
+            Err(error) => last_error = error,
+        }
+    }
+    let download_result = downloaded.ok_or(last_error);
+    let (downloaded_bytes, total_bytes) = match download_result {
+        Ok(result) => result,
+        Err(error) => {
+            let downloaded_bytes = fs::metadata(&temporary)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            emit_desktop_update_progress(
+                &app,
+                "error",
+                downloaded_bytes,
+                update.asset_size,
+                None,
+                0,
+                "none",
+                Some(&error),
+            );
+            return Err(error);
+        }
+    };
+    let validated_size = update.asset_size.or(total_bytes);
+    emit_desktop_update_progress(
+        &app,
+        "finalizing",
+        downloaded_bytes,
+        validated_size,
+        None,
+        0,
+        "verification",
+        None,
+    );
+    if !desktop_update_file_is_complete(&temporary, validated_size, update.asset_digest.as_deref())
+    {
+        let error = if normalized_desktop_update_digest(update.asset_digest.as_deref()).is_some() {
+            "downloaded installer failed SHA-256 verification".to_string()
+        } else {
+            "downloaded installer failed size verification".to_string()
+        };
+        let _ = fs::remove_file(&temporary);
+        emit_desktop_update_progress(
+            &app,
+            "error",
+            downloaded_bytes,
+            validated_size,
+            None,
+            0,
+            "verification",
+            Some(&error),
+        );
+        return Err(error);
+    }
     if path.exists() {
-        let _ = fs::remove_file(&path);
+        fs::remove_file(&path).map_err(|error| format!("replace cached update: {error}"))?;
     }
     fs::rename(&temporary, &path).map_err(|error| format!("finalize desktop update: {error}"))?;
-    let _ = app.emit("desktop_update_progress", serde_json::json!({"downloadedBytes": bytes.len(), "totalBytes": bytes.len(), "complete": true}));
+    emit_desktop_update_progress(
+        &app,
+        "complete",
+        downloaded_bytes,
+        total_bytes.or(Some(downloaded_bytes)),
+        None,
+        0,
+        "cache",
+        None,
+    );
     Ok(DesktopUpdateInfo {
         downloaded_path: Some(path.to_string_lossy().to_string()),
         downloaded: true,
@@ -10363,6 +10965,46 @@ mod runtime_probe_tests {
         assert_eq!(floating_skin_corner_radii("amber", 504), (10, 10));
         assert_eq!(floating_skin_corner_radii("imac", 252), (30, 16));
         assert_eq!(floating_skin_corner_radii("tower", 252), (6, 6));
+    }
+
+    #[test]
+    fn desktop_update_range_and_cache_validation_are_strict() {
+        assert_eq!(
+            content_range_total(Some("bytes 1024-2047/4096")),
+            Some(4096)
+        );
+        assert_eq!(content_range_total(Some("bytes */4096")), Some(4096));
+        assert_eq!(content_range_total(Some("invalid")), None);
+
+        let path = std::env::temp_dir().join(format!(
+            "codex-atlas-update-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::write(&path, [1_u8, 2, 3]).expect("write update cache fixture");
+        let digest = "sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81";
+        assert!(desktop_update_file_is_complete(&path, None, None));
+        assert!(desktop_update_file_is_complete(
+            &path,
+            Some(3),
+            Some(digest)
+        ));
+        assert!(!desktop_update_file_is_complete(
+            &path,
+            Some(4),
+            Some(digest)
+        ));
+        assert!(!desktop_update_file_is_complete(
+            &path,
+            Some(3),
+            Some("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+        ));
+        assert!(!desktop_update_file_is_complete(
+            &path,
+            Some(3),
+            Some("not-a-sha256-digest")
+        ));
+        fs::remove_file(path).ok();
     }
 
     #[test]

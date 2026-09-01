@@ -87,10 +87,24 @@ export type DesktopUpdateInfo = {
   latestVersion: string
   available: boolean
   assetName?: string | null
+  assetSize?: number | null
+  assetApiUrl?: string | null
+  assetDigest?: string | null
   downloadUrl?: string | null
   downloadedPath?: string | null
   downloaded: boolean
   releaseUrl: string
+}
+
+export type DesktopUpdateProgress = {
+  state: 'connecting' | 'downloading' | 'retrying' | 'finalizing' | 'complete' | 'error' | string
+  downloadedBytes: number
+  totalBytes?: number | null
+  bytesPerSecond?: number | null
+  attempt: number
+  transport: 'native' | 'system' | 'cache' | 'none' | string
+  complete: boolean
+  error?: string | null
 }
 
 export type RunningCodexSession = {
@@ -360,7 +374,7 @@ function tauriInternals(): TauriInternals | null {
   return (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: TauriInternals }).__TAURI_INTERNALS__ || null
 }
 
-export async function invokeDesktop<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
+export async function invokeDesktop<T>(command: string, args?: Record<string, unknown>, fallbackOnError = true): Promise<T | null> {
   const bridge = tauriBridge()
   const internals = tauriInternals()
   // Tauri 2's package API is the canonical path. The injected global object
@@ -377,6 +391,7 @@ export async function invokeDesktop<T>(command: string, args?: Record<string, un
       return await candidate()
     } catch (error) {
       lastError = error
+      if (!fallbackOnError) break
     }
   }
   if (!lastError && candidates.length === 0) {
@@ -589,7 +604,9 @@ export async function checkDesktopUpdate(): Promise<DesktopUpdateInfo | null> {
 }
 
 export async function downloadDesktopUpdate(update: DesktopUpdateInfo): Promise<DesktopUpdateInfo | null> {
-  return invokeDesktop<DesktopUpdateInfo>('download_desktop_update', { update })
+  // Download retries and transport fallback live in Rust. Re-invoking the
+  // command through compatibility bridges would duplicate the entire job.
+  return invokeDesktop<DesktopUpdateInfo>('download_desktop_update', { update }, false)
 }
 
 export async function installDesktopUpdate(path: string): Promise<boolean> {

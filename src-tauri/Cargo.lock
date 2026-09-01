@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "codex-atlas"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "dirs",
  "keyring",
@@ -575,6 +575,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",
