@@ -48,11 +48,13 @@ class VoiceInputController(
     private val onSnapshot: (VoiceInputSnapshot) -> Unit,
 ) {
     private val handler = Handler(Looper.getMainLooper())
-    private val recognizer: SpeechRecognizer? = if (SpeechRecognizer.isRecognitionAvailable(context)) {
+    // Several ColorOS builds return false from isRecognitionAvailable even
+    // though their system recognition service can handle a request. Creating
+    // the recognizer is the authoritative check; startListening still reports
+    // a clear error through the normal listener when no provider is installed.
+    private val recognizer: SpeechRecognizer? = runCatching {
         SpeechRecognizer.createSpeechRecognizer(context)
-    } else {
-        null
-    }
+    }.getOrNull()
 
     private var snapshot = VoiceInputSnapshot()
     private var draftText = ""
@@ -106,8 +108,6 @@ class VoiceInputController(
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
         })
     }
-
-    fun isAvailable(): Boolean = recognizer != null
 
     fun setContinuousTranscriptListener(listener: ((String) -> Unit)?) {
         onContinuousTranscript = listener

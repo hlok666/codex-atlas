@@ -88,16 +88,21 @@ object AtlasMessageQueue {
             .commit()
     }
 
-    /** Atomically claims the next eligible item so two service ticks cannot send it twice. */
-    fun claim(context: Context): QueuedAtlasMessage? = synchronized(lock) {
+    /** Atomically claims an eligible item so the activity and service cannot send it twice. */
+    fun claim(context: Context, itemId: String? = null): QueuedAtlasMessage? = synchronized(lock) {
         val now = System.currentTimeMillis()
         val items = read(context)
-        val index = items.indexOfFirst { item ->
-            val state = AtlasQueueItemState.fromKey(item.state)
-            (state == AtlasQueueItemState.Pending || state == AtlasQueueItemState.Failed) &&
-                item.nextAttemptAtMs <= now
-        }
-        if (index < 0) return@synchronized null
+        val index = if (itemId == null) 0 else items.indexOfFirst { it.id == itemId }
+        if (index < 0 || index >= items.size) return@synchronized null
+        // Keep delivery strictly ordered. A targeted foreground claim is
+        // allowed only when no older outbox item is still outstanding.
+        if (index > 0) return@synchronized null
+        val candidate = items[index]
+        val candidateState = AtlasQueueItemState.fromKey(candidate.state)
+        if (
+            candidateState !in setOf(AtlasQueueItemState.Pending, AtlasQueueItemState.Failed) ||
+            candidate.nextAttemptAtMs > now
+        ) return@synchronized null
         val claimed = items[index].copy(
             clientMessageId = items[index].clientMessageId.ifBlank { items[index].id },
             state = AtlasQueueItemState.Sending.key,

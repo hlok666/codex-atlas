@@ -34,7 +34,8 @@ class AtlasSyncService : Service() {
             android.util.Log.e("AtlasSyncService", "sync worker failed", error)
         },
     )
-    private var worker: Job? = null
+    private var syncWorker: Job? = null
+    private var queueWorker: Job? = null
     private var cursorMs = 0L
     private var syncEpoch = ""
     private var afterSeq = 0L
@@ -60,13 +61,17 @@ class AtlasSyncService : Service() {
         cursorMs = maxOf(cursorMs, BridgePreferences.syncCursor(this))
         syncEpoch = BridgePreferences.syncEpoch(this)
         afterSeq = maxOf(afterSeq, BridgePreferences.syncSeq(this))
-        AtlasMessageQueue.resetSending(this)
-        if (worker?.isActive != true) worker = serviceScope.launch { runLoop() }
+        if (syncWorker?.isActive != true) syncWorker = serviceScope.launch { runSyncLoop() }
+        if (queueWorker?.isActive != true) {
+            AtlasMessageQueue.resetSending(this)
+            queueWorker = serviceScope.launch { runQueueLoop() }
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        worker?.cancel()
+        syncWorker?.cancel()
+        queueWorker?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -83,14 +88,75 @@ class AtlasSyncService : Service() {
         // Android 15 terminates apps that do not promptly stop a timed-out
         // foreground service. Current releases use remoteMessaging, but keep
         // this guard for upgrades from an older dataSync service instance.
-        worker?.cancel()
+        syncWorker?.cancel()
+        queueWorker?.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private suspend fun runLoop() {
+    private suspend fun runQueueLoop() {
+        while (serviceScope.isActive) {
+            val pairing = MainActivity.storedPairing(this)
+            val details = MainActivity.parsePairing(pairing)
+            val token = BridgePreferences.token(this).trim()
+            if (details == null || token.isBlank()) {
+                delay(1_000)
+                continue
+            }
+
+            val route = ConnectionRoute.fromKey(BridgePreferences.connectionRoute(this))
+            val primary = primaryBridgeUrl(details, route)
+            val fallback = fallbackBridgeUrl(details, route)
+            if (primary.isBlank()) {
+                delay(1_000)
+                continue
+            }
+
+            val control = AtlasMessageQueue.control(this)
+            if (control == AtlasQueueControl.Stopping) {
+                // Stop the current queue run without dropping unsent items.
+                // A blocking HTTP call is allowed to finish; no retry or next
+                // item will be submitted after the stop request.
+                AtlasMessageQueue.setControl(this, AtlasQueueControl.Paused)
+            }
+            val queued = if (control == AtlasQueueControl.Running) AtlasMessageQueue.claim(this) else null
+            if (control == AtlasQueueControl.Paused || control == AtlasQueueControl.Stopping) {
+                updateNotification("Codex Atlas", "发送队列已暂停")
+                delay(750)
+                continue
+            }
+            if (queued == null) {
+                delay(350)
+                continue
+            }
+            try {
+                AtlasBridgeClient(primary, token).sendMessageAny(
+                    queued.sessionId,
+                    queued.text,
+                    fallback,
+                    queued.clientMessageId,
+                )
+                AtlasMessageQueue.remove(this, queued.id)
+                sendBroadcast(Intent(ACTION_UPDATED).setPackage(packageName))
+                updateNotification("Codex Atlas", "已发送队列消息")
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                if (AtlasMessageQueue.control(this) == AtlasQueueControl.Stopping) {
+                    AtlasMessageQueue.setControl(this, AtlasQueueControl.Paused)
+                    updateNotification("Codex Atlas", "发送队列已停止")
+                    continue
+                }
+                AtlasMessageQueue.markFailure(this, queued.id, error.message)
+                sendBroadcast(Intent(ACTION_UPDATED).setPackage(packageName))
+                updateNotification("Codex Atlas", "队列发送失败，正在重试")
+                delay((1_500L * (queued.attempts + 1).coerceAtMost(4)).coerceAtMost(30_000L))
+            }
+        }
+    }
+
+    private suspend fun runSyncLoop() {
         while (serviceScope.isActive) {
             val pairing = MainActivity.storedPairing(this)
             val details = MainActivity.parsePairing(pairing)
@@ -108,41 +174,6 @@ class AtlasSyncService : Service() {
                 updateNotification("Codex Atlas", "没有可用通道")
                 delay(2_500)
                 continue
-            }
-
-            val control = AtlasMessageQueue.control(this)
-            if (control == AtlasQueueControl.Stopping) {
-                // Stop the current queue run without dropping unsent items.
-                // A blocking HTTP call is allowed to finish; no retry or next
-                // item will be submitted after the stop request.
-                AtlasMessageQueue.setControl(this, AtlasQueueControl.Paused)
-            }
-            val queued = if (control == AtlasQueueControl.Running) AtlasMessageQueue.claim(this) else null
-            if (control == AtlasQueueControl.Paused || control == AtlasQueueControl.Stopping) {
-                updateNotification("Codex Atlas", "发送队列已暂停")
-            }
-            if (queued != null) {
-                try {
-                    AtlasBridgeClient(primary, token).sendMessageAny(
-                        queued.sessionId,
-                        queued.text,
-                        fallback,
-                        queued.clientMessageId,
-                    )
-                    AtlasMessageQueue.remove(this, queued.id)
-                    updateNotification("Codex Atlas", "已发送队列消息")
-                } catch (error: Throwable) {
-                    if (error is CancellationException) throw error
-                    if (AtlasMessageQueue.control(this) == AtlasQueueControl.Stopping) {
-                        AtlasMessageQueue.setControl(this, AtlasQueueControl.Paused)
-                        updateNotification("Codex Atlas", "发送队列已停止")
-                        continue
-                    }
-                    AtlasMessageQueue.markFailure(this, queued.id, error.message)
-                    updateNotification("Codex Atlas", "队列发送失败，正在重试")
-                    delay((1_500L * (queued.attempts + 1).coerceAtMost(4)).coerceAtMost(30_000L))
-                    continue
-                }
             }
             try {
                 val sync = AtlasBridgeClient(primary, token).syncAny(

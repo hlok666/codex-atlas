@@ -20,8 +20,8 @@ android {
         applicationId = "com.codexatlas.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.1.17"
+        versionCode = 15
+        versionName = "0.1.18"
     }
 
     buildFeatures {
@@ -60,8 +60,10 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

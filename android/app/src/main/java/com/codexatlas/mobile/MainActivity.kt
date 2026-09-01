@@ -16,6 +16,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -33,23 +34,35 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Create
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Typography
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Shapes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -61,9 +74,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -91,6 +106,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         consumePairing(intent)
         consumeSessionIntent(intent)
         if (BridgePreferences.token(this).isNotBlank()) AtlasSyncService.start(this)
@@ -226,9 +242,20 @@ fun fallbackBridgeUrl(details: PairingDetails, route: ConnectionRoute): String =
 }
 
 private fun mergeAtlasMessages(current: List<AtlasMessage>, incoming: List<AtlasMessage>): List<AtlasMessage> {
+    val acknowledgedUserMessages = incoming.filter { item ->
+        item.role.equals("user", ignoreCase = true) &&
+            item.kind.lowercase(Locale.ROOT) !in setOf("queued", "sending", "sent", "failed")
+    }
     val merged = linkedMapOf<String, AtlasMessage>()
     (current + incoming)
         .filter { it.id.isNotBlank() || it.text.isNotBlank() }
+        .filterNot { item ->
+            item.kind.lowercase(Locale.ROOT) in setOf("queued", "sending", "sent") &&
+                acknowledgedUserMessages.any { remote ->
+                    remote.text.trim() == item.text.trim() &&
+                        kotlin.math.abs(remote.timestampMs - item.timestampMs) <= 120_000L
+                }
+        }
         .forEach { item ->
             val key = item.callId?.takeIf { it.isNotBlank() }?.let { "call:$it" }
                 ?: item.id.ifBlank { "${item.timestampMs}:${item.role}:${item.text}" }
@@ -266,7 +293,50 @@ private sealed interface ConnectionState {
     data object Idle : ConnectionState
     data object Testing : ConnectionState
     data class Connected(val title: String) : ConnectionState
+    data class Reconnecting(val message: String = "") : ConnectionState
     data class Failed(val message: String) : ConnectionState
+}
+
+private fun connectionFailureMessage(error: Throwable, chinese: Boolean): String {
+    val detail = error.message.orEmpty().lowercase(Locale.ROOT)
+    return when {
+        "401" in detail || "unauthorized" in detail -> if (chinese) "配对凭证已失效" else "Pairing credentials expired"
+        "403" in detail || "forbidden" in detail -> if (chinese) "连接被服务器拒绝" else "Connection rejected by server"
+        "404" in detail || "not found" in detail -> if (chinese) "设备服务未就绪" else "Device service is not ready"
+        "502" in detail || "503" in detail -> if (chinese) "服务器通道暂不可用" else "Server route is unavailable"
+        "timeout" in detail || "timed out" in detail -> if (chinese) "连接超时，请重试" else "Connection timed out"
+        "failed to connect" in detail || "connection refused" in detail || "unable to resolve" in detail ->
+            if (chinese) "无法连接设备" else "Could not reach the device"
+        else -> if (chinese) "连接失败，请重试" else "Connection failed; try again"
+    }
+}
+
+private fun reconcileLocalDeliveryStates(
+    messagesBySession: Map<String, List<AtlasMessage>>,
+    queuedMessages: List<QueuedAtlasMessage>,
+): Map<String, List<AtlasMessage>> {
+    val queueById = queuedMessages.associateBy(QueuedAtlasMessage::id)
+    return messagesBySession.mapValues { (_, messages) ->
+        messages.map messageLoop@ { item ->
+            val queueId = item.id.takeIf { it.startsWith("queued-") }?.removePrefix("queued-")
+                ?: return@messageLoop item
+            val queueItem = queueById[queueId]
+            val nextKind = when {
+                queueItem == null && item.kind.equals("failed", ignoreCase = true) -> "failed"
+                queueItem == null -> "sent"
+                queueItem.state == AtlasQueueItemState.Sending.key -> "sending"
+                queueItem.state == AtlasQueueItemState.Failed.key -> "failed"
+                else -> "queued"
+            }
+            if (item.kind == nextKind) item else item.copy(kind = nextKind)
+        }
+    }
+}
+
+private sealed interface MessageDeliveryResult {
+    data object Sent : MessageDeliveryResult
+    data object Deferred : MessageDeliveryResult
+    data class Failed(val message: String) : MessageDeliveryResult
 }
 
 private val AtlasTypography = Typography(
@@ -286,14 +356,24 @@ private fun AtlasTheme(content: @Composable () -> Unit) {
         colorScheme = androidx.compose.material3.lightColorScheme(
             primary = Color(0xFF2F7C3B),
             onPrimary = Color.White,
+            primaryContainer = Color(0xFFE5F3E7),
+            onPrimaryContainer = Color(0xFF17351D),
             secondary = Color(0xFF6C816F),
             onSecondary = Color.White,
+            secondaryContainer = Color(0xFFEDF2ED),
+            onSecondaryContainer = Color(0xFF26332A),
+            tertiary = Color(0xFF8A6A2A),
+            onTertiary = Color.White,
+            tertiaryContainer = Color(0xFFFFF2D8),
+            onTertiaryContainer = Color(0xFF4D3A16),
             background = Color(0xFFFCFDFC),
             onBackground = Color(0xFF1F2A22),
             surface = Color.White,
             onSurface = Color(0xFF1F2A22),
             surfaceVariant = Color(0xFFF3F6F3),
             onSurfaceVariant = Color(0xFF68736B),
+            outline = Color(0xFFD3DAD3),
+            outlineVariant = Color(0xFFE6EAE6),
             error = Color(0xFFB44A45),
             onError = Color.White,
         ),
@@ -303,6 +383,72 @@ private fun AtlasTheme(content: @Composable () -> Unit) {
             large = RoundedCornerShape(12.dp),
         ),
         typography = AtlasTypography,
+        content = content,
+    )
+}
+
+private val AtlasControlShape = RoundedCornerShape(8.dp)
+
+@Composable
+private fun Button(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape = AtlasControlShape,
+    content: @Composable RowScope.() -> Unit,
+) {
+    androidx.compose.material3.Button(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 48.dp),
+        enabled = enabled,
+        shape = shape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFF1F2A22),
+            contentColor = Color.White,
+            disabledContainerColor = Color(0xFFE8ECE8),
+            disabledContentColor = Color(0xFF9AA39B),
+        ),
+        content = content,
+    )
+}
+
+@Composable
+private fun OutlinedButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape = AtlasControlShape,
+    content: @Composable RowScope.() -> Unit,
+) {
+    androidx.compose.material3.OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 48.dp),
+        enabled = enabled,
+        shape = shape,
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = Color(0xFF26332A),
+            disabledContentColor = Color(0xFF9AA39B),
+        ),
+        content = content,
+    )
+}
+
+@Composable
+private fun TextButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    androidx.compose.material3.TextButton(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 48.dp),
+        enabled = enabled,
+        shape = AtlasControlShape,
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = Color(0xFF2F7C3B),
+            disabledContentColor = Color(0xFF9AA39B),
+        ),
         content = content,
     )
 }
@@ -337,6 +483,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var queueVisible by remember { mutableStateOf(false) }
     var sessionQuery by remember { mutableStateOf("") }
     var messageBusy by remember { mutableStateOf(false) }
+    var messageError by remember { mutableStateOf<String?>(null) }
     var createVisible by remember { mutableStateOf(false) }
     var createCwd by remember { mutableStateOf("") }
     var createPrompt by remember { mutableStateOf("") }
@@ -486,7 +633,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 AtlasWidgetReceiver.requestRefresh(context)
             }.onFailure { error ->
                 if (connectionRequestToken == requestToken) {
-                    state = ConnectionState.Failed(error.message ?: if (zh) "连接失败" else "Connection failed")
+                    state = ConnectionState.Failed(connectionFailureMessage(error, zh))
                 }
             }
         }
@@ -518,8 +665,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         if (MainActivity.parsePairing(pairing) != null) {
             delay(250)
             while (true) {
-                if (state is ConnectionState.Connected) break
-                if (state !is ConnectionState.Testing) connect(pairing)
+                if (state !is ConnectionState.Connected && state !is ConnectionState.Testing) connect(pairing)
                 delay(5_000)
             }
         }
@@ -529,7 +675,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         val details = MainActivity.parsePairing(pairing) ?: return@LaunchedEffect
         val selectionAtStart = selectedSessionId
         while (state is ConnectionState.Connected) {
-            val fresh = withContext(Dispatchers.IO) {
+            val syncResult = withContext(Dispatchers.IO) {
                 runCatching {
                     val primary = primaryBridgeUrl(details, connectionRoute)
                     val fallback = fallbackBridgeUrl(details, connectionRoute)
@@ -544,8 +690,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         syncEpoch,
                         syncAfterSeq,
                     )
-                }.getOrNull()
+                }
             }
+            val fresh = syncResult.getOrNull()
             if (fresh != null) {
                 // A long-poll response can finish after the user selected a
                 // different conversation. Let the keyed effect restart and
@@ -604,9 +751,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 AtlasWidgetReceiver.requestRefresh(context)
                 if (!recoverySucceeded) delay(750)
             } else {
-                // Back off briefly on a disconnected LAN/tunnel before trying
-                // the next candidate. A healthy bridge uses long-polling above.
-                delay(1_500)
+                state = ConnectionState.Reconnecting(syncResult.exceptionOrNull()?.message.orEmpty())
             }
         }
     }
@@ -616,6 +761,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             queuedMessages = AtlasMessageQueue.items(context)
             queuedMessageCount = queuedMessages.size
             queueControl = AtlasMessageQueue.control(context)
+            messagesBySession = reconcileLocalDeliveryStates(messagesBySession, queuedMessages)
             delay(if (state is ConnectionState.Connected) 1_000 else 2_500)
         }
     }
@@ -743,7 +889,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFFCFDFC)) {
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().safeDrawingPadding().imePadding(),
         ) {
         Column(
             modifier = Modifier
@@ -760,18 +906,17 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         ) {
             if (mobilePage != MobilePage.Conversation) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Atlas", style = MaterialTheme.typography.headlineMedium, color = Color(0xFF1F2A22), fontWeight = FontWeight.SemiBold)
-                    Text(if (zh) "Codex 会话" else "Codex sessions", color = Color(0xFF68736B), style = MaterialTheme.typography.bodyMedium)
-                }
+                Text("Atlas", modifier = Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium, color = Color(0xFF1F2A22), fontWeight = FontWeight.SemiBold)
                 TextButton(onClick = { mobilePage = MobilePage.Settings }) {
+                    Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
                     Text(if (zh) "设置" else "Settings", color = Color(0xFF2F7C3B))
                 }
             }
             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
-            if (updateBusy || availableUpdate != null || updateError != null) {
+            if (updateBusy || availableUpdate?.available == true || updateError != null) {
                 val update = availableUpdate
-                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(if (update?.available == true) (if (zh) "有新版本" else "Update available") else if (updateBusy) (if (zh) "检查更新…" else "Checking updates…") else (if (zh) "已是最新" else "Up to date"), fontWeight = FontWeight.SemiBold, color = Color(0xFF26332A), style = MaterialTheme.typography.bodyLarge)
@@ -790,13 +935,27 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     }
             }
             Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    val selectedProfile = deviceProfiles.firstOrNull { it.id == selectedDeviceId }
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (zh) "设备" else "Device", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = Color(0xFF1F2A22))
-                        TextButton(onClick = { deviceManagerVisible = !deviceManagerVisible }) {
-                            Text(if (zh) "${deviceProfiles.size} 台" else "${deviceProfiles.size}")
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                selectedProfile?.name?.ifBlank { "Codex Atlas" } ?: if (zh) "连接设备" else "Connect a device",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1F2A22),
+                            )
+                            if (selectedProfile != null) {
+                                Text(selectedProfile.kind.uppercase(Locale.ROOT), color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        if (deviceProfiles.isNotEmpty()) {
+                            TextButton(onClick = { deviceManagerVisible = !deviceManagerVisible }) {
+                                Text(if (deviceManagerVisible) { if (zh) "收起" else "Done" } else { if (zh) "管理" else "Manage" })
+                            }
                         }
                     }
-                    if (deviceManagerVisible) {
+                    ConnectionStatus(state, zh)
+                    if (deviceManagerVisible || deviceProfiles.isEmpty()) {
                             Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 deviceProfiles.forEach { profile ->
                                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -830,65 +989,62 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                         }
                                     }
                                 }
-                                if (deviceProfiles.isEmpty()) Text(if (zh) "尚未保存设备" else "No saved devices", color = Color(0xFF667466), style = MaterialTheme.typography.bodySmall)
                             }
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    Text(if (zh) "连接设备" else "Connect a device", style = MaterialTheme.typography.labelLarge, color = Color(0xFF526352))
-                    OutlinedTextField(
-                        value = pairing,
-                        onValueChange = { pairing = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text(if (zh) "配对链接" else "Pairing link") },
-                        placeholder = { Text("codex-atlas://connect…") },
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        val pairingDetails = MainActivity.parsePairing(pairing)
-                        ConnectionRoute.entries.forEach { route ->
-                            val serverAvailable = pairingDetails?.tunnelUrl?.isNotBlank() == true
-                            val enabled = route != ConnectionRoute.Server || serverAvailable
-                            val label = when (route) {
-                                ConnectionRoute.Auto -> if (zh) "自动" else "Auto"
-                                ConnectionRoute.Lan -> if (zh) "局域网" else "LAN"
-                                ConnectionRoute.Server -> if (zh) "服务器" else "Server"
+                            Spacer(Modifier.height(2.dp))
+                            OutlinedTextField(
+                                value = pairing,
+                                onValueChange = { pairing = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text(if (zh) "配对链接" else "Pairing link") },
+                                placeholder = { Text("codex-atlas://connect…") },
+                            )
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                val pairingDetails = MainActivity.parsePairing(pairing)
+                                ConnectionRoute.entries.forEach { route ->
+                                    val serverAvailable = pairingDetails?.tunnelUrl?.isNotBlank() == true
+                                    val enabled = route != ConnectionRoute.Server || serverAvailable
+                                    val label = when (route) {
+                                        ConnectionRoute.Auto -> if (zh) "自动" else "Auto"
+                                        ConnectionRoute.Lan -> if (zh) "局域网" else "LAN"
+                                        ConnectionRoute.Server -> if (zh) "服务器" else "Server"
+                                    }
+                                    if (route == connectionRoute) {
+                                        Button(onClick = {
+                                            connectionRoute = route
+                                            BridgePreferences.saveConnectionRoute(context, route.key)
+                                        }, enabled = enabled, modifier = Modifier.weight(1f)) { Text(label) }
+                                    } else {
+                                        OutlinedButton(onClick = {
+                                            connectionRoute = route
+                                            BridgePreferences.saveConnectionRoute(context, route.key)
+                                        }, enabled = enabled, modifier = Modifier.weight(1f)) { Text(label) }
+                                    }
+                                }
                             }
-                            if (route == connectionRoute) {
-                                Button(onClick = {
-                                    connectionRoute = route
-                                    BridgePreferences.saveConnectionRoute(context, route.key)
-                                }, enabled = enabled) { Text(label) }
-                            } else {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedButton(onClick = {
-                                    connectionRoute = route
-                                    BridgePreferences.saveConnectionRoute(context, route.key)
-                                }, enabled = enabled) { Text(label) }
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scannerVisible = true
+                                    else permissionLauncher.launch(Manifest.permission.CAMERA)
+                                }, modifier = Modifier.weight(1f)) { Text(if (zh) "扫描二维码" else "Scan QR") }
+                                Button(onClick = { connect(pairing) }, enabled = MainActivity.parsePairing(pairing) != null && state !is ConnectionState.Testing, modifier = Modifier.weight(1f)) {
+                                    if (state is ConnectionState.Testing) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                                    else Text(if (zh) "连接" else "Connect")
+                                }
                             }
-                        }
-                    }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = {
-                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scannerVisible = true
-                            else permissionLauncher.launch(Manifest.permission.CAMERA)
-                        }, modifier = Modifier.weight(1f)) { Text(if (zh) "扫描二维码" else "Scan QR") }
-                        Button(onClick = { connect(pairing) }, enabled = MainActivity.parsePairing(pairing) != null && state !is ConnectionState.Testing, modifier = Modifier.weight(1f)) {
-                            if (state is ConnectionState.Testing) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            else Text(if (zh) "立即连接" else "Connect")
-                        }
-                    }
-                    if (permissionDenied) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (zh) "相机权限被拒绝" else "Camera permission was denied", color = Color(0xFFB44A45), style = MaterialTheme.typography.bodySmall)
-                            TextButton(onClick = {
-                                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                })
-                            }) { Text(if (zh) "打开设置" else "Open settings") }
+                            if (permissionDenied) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Text(if (zh) "相机权限被拒绝" else "Camera permission was denied", color = Color(0xFFB44A45), style = MaterialTheme.typography.bodySmall)
+                                    TextButton(onClick = {
+                                        context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                            data = Uri.parse("package:${context.packageName}")
+                                        })
+                                    }) { Text(if (zh) "打开设置" else "Open settings") }
+                                }
+                            }
                         }
                     }
                 }
-            ConnectionStatus(state, zh)
-            }
             if (snapshot != null && MainActivity.parsePairing(pairing) != null) {
                 val details = MainActivity.parsePairing(pairing)!!
                 val selectedSession = sessions.firstOrNull { it.id == selectedSessionId }
@@ -952,6 +1108,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     TextButton(onClick = {
                                         selectedSessionId = item.id
+                                        messageError = null
                                         mobilePage = MobilePage.Conversation
                                     }, modifier = Modifier.fillMaxWidth()) {
                                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -959,18 +1116,17 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                                 Text(item.title.ifBlank { if (zh) "未命名会话" else "Untitled session" }, maxLines = 1, color = if (item.id == conversationId) Color(0xFF2F7C3B) else Color(0xFF243025), fontWeight = if (item.id == conversationId) FontWeight.SemiBold else FontWeight.Normal)
                                                 Text(listOf(item.cwd, item.model, item.liveState.ifBlank { if (item.running) "working" else "idle" }).filter { it.isNotBlank() }.joinToString(" · "), maxLines = 1, color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
                                             }
-                                            Text(
-                                                when {
-                                                    item.requiresAttention -> "!"
-                                                    item.running -> "●"
-                                                    else -> "○"
-                                                },
-                                                color = when {
-                                                    item.requiresAttention -> Color(0xFFD85D59)
-                                                    item.running -> Color(0xFF58BE70)
-                                                    else -> Color(0xFFB7C2B8)
-                                                },
-                                                fontWeight = FontWeight.Bold,
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(10.dp)
+                                                    .background(
+                                                        when {
+                                                            item.requiresAttention -> Color(0xFFD85D59)
+                                                            item.running -> Color(0xFF58BE70)
+                                                            else -> Color(0xFFB7C2B8)
+                                                        },
+                                                        RoundedCornerShape(50),
+                                                    ),
                                             )
                                         }
                                     }
@@ -986,13 +1142,13 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .border(1.dp, Color(0xFFE6EAE6))
+                            .background(Color.White)
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         TextButton(onClick = { mobilePage = MobilePage.Home }) {
-                            Text(if (zh) "‹ 返回" else "‹ Back", color = Color(0xFF2F7C3B), fontWeight = FontWeight.SemiBold)
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null, modifier = Modifier.size(20.dp))
                         }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(conversationTitle, maxLines = 1, color = Color(0xFF243025), fontWeight = FontWeight.SemiBold)
@@ -1080,16 +1236,72 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         }
                         fun sendToConversation(text: String) {
                             val normalized = text.trim()
-                            if (normalized.isEmpty() || conversationId.isBlank()) return
+                            if (normalized.isEmpty() || conversationId.isBlank() || messageBusy) return
                             val queued = AtlasMessageQueue.enqueue(context, conversationId, normalized)
+                            val immediate = queueControl == AtlasQueueControl.Running && state is ConnectionState.Connected
                             message = ""
+                            messageError = null
                             queuedMessages = AtlasMessageQueue.items(context)
                             queuedMessageCount = queuedMessages.size
                             messagesBySession = messagesBySession + (conversationId to mergeAtlasMessages(
                                 messages,
-                                listOf(AtlasMessage("queued-${queued.id}", "user", normalized, queued.createdAtMs, "queued")),
+                                listOf(AtlasMessage("queued-${queued.id}", "user", normalized, queued.createdAtMs, if (immediate) "sending" else "queued")),
                             ))
-                            AtlasSyncService.start(context)
+                            if (!immediate) {
+                                AtlasSyncService.start(context)
+                                return
+                            }
+                            messageBusy = true
+                            scope.launch {
+                                val delivery = withContext(Dispatchers.IO) {
+                                    val claimed = AtlasMessageQueue.claim(context, queued.id)
+                                        ?: return@withContext MessageDeliveryResult.Deferred
+                                    runCatching {
+                                        val primary = primaryBridgeUrl(details, connectionRoute)
+                                        val fallback = fallbackBridgeUrl(details, connectionRoute)
+                                        AtlasBridgeClient(primary, details.token).sendMessageAny(
+                                            conversationId,
+                                            normalized,
+                                            fallback,
+                                            claimed.clientMessageId,
+                                        )
+                                    }.fold(
+                                        onSuccess = {
+                                            AtlasMessageQueue.remove(context, queued.id)
+                                            MessageDeliveryResult.Sent
+                                        },
+                                        onFailure = { error ->
+                                            AtlasMessageQueue.markFailure(context, queued.id, error.message)
+                                            MessageDeliveryResult.Failed(
+                                                error.message ?: if (zh) "消息发送失败" else "Message delivery failed",
+                                            )
+                                        },
+                                    )
+                                }
+                                val optimisticId = "queued-${queued.id}"
+                                when (delivery) {
+                                    MessageDeliveryResult.Sent -> {
+                                        messagesBySession = messagesBySession + (
+                                            conversationId to messagesBySession[conversationId].orEmpty().map { item ->
+                                                if (item.id == optimisticId) item.copy(kind = "sent") else item
+                                            }
+                                        )
+                                    }
+                                    is MessageDeliveryResult.Failed -> {
+                                        messageError = delivery.message
+                                        messagesBySession = messagesBySession + (
+                                            conversationId to messagesBySession[conversationId].orEmpty().map { item ->
+                                                if (item.id == optimisticId) item.copy(kind = "failed") else item
+                                            }
+                                        )
+                                    }
+                                    MessageDeliveryResult.Deferred -> Unit
+                                }
+                                queuedMessages = AtlasMessageQueue.items(context)
+                                queuedMessageCount = queuedMessages.size
+                                messageBusy = false
+                                if (queuedMessageCount > 0) AtlasSyncService.start(context)
+                            }
                         }
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -1107,11 +1319,22 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank() && !messageBusy, modifier = Modifier.weight(1f)) {
                                     if (messageBusy) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
-                                    else Text(if (zh) "发送" else "Send")
+                                    else {
+                                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.size(6.dp))
+                                        Text(if (zh) "发送" else "Send")
+                                    }
                                 }
                                 OutlinedButton(onClick = { createVisible = !createVisible }, modifier = Modifier.weight(1f)) {
                                     Text(if (zh) "新建会话" else "New session")
                                 }
+                            }
+                            if (messageError != null) {
+                                Text(
+                                    messageError.orEmpty(),
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
                             }
                         }
                         if (voiceSnapshot.active) {
@@ -1139,33 +1362,22 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                TextButton(onClick = {
+                                OutlinedButton(onClick = {
                                     pendingVoiceMode = false
-                                    if (!voiceController.isAvailable()) {
-                                        Toast.makeText(context, if (zh) "系统不支持语音识别" else "Speech recognition is unavailable", Toast.LENGTH_SHORT).show()
-                                    } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                                         voiceController.start(message, continuous = false)
                                     } else {
                                         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                     }
-                                }, enabled = voiceController.isAvailable() && !messageBusy && !voiceSnapshot.active, modifier = Modifier.weight(1f)) { Text(if (zh) "语音输入" else "Dictate") }
+                                }, enabled = !messageBusy && !voiceSnapshot.active, modifier = Modifier.weight(1f)) { Text(if (zh) "语音输入" else "Dictate") }
                                 OutlinedButton(onClick = {
                                     pendingVoiceMode = true
-                                    if (!voiceController.isAvailable()) {
-                                        Toast.makeText(context, if (zh) "系统不支持语音识别" else "Speech recognition is unavailable", Toast.LENGTH_SHORT).show()
-                                    } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                                         voiceController.start(message, continuous = true)
                                     } else {
                                         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                     }
-                                }, enabled = voiceController.isAvailable() && !messageBusy && !voiceSnapshot.active, modifier = Modifier.weight(1f)) { Text(if (zh) "连续语音" else "Voice mode") }
-                                TextButton(onClick = {
-                                    readRepliesAloud = !readRepliesAloud
-                                    BridgePreferences.saveReadRepliesAloud(context, readRepliesAloud)
-                                    if (!readRepliesAloud) speechOutput.stop()
-                                }, modifier = Modifier.weight(1f)) {
-                                    Text(if (readRepliesAloud) { if (zh) "朗读中" else "Read on" } else { if (zh) "朗读" else "Read" })
-                                }
+                                }, enabled = !messageBusy && !voiceSnapshot.active, modifier = Modifier.weight(1f)) { Text(if (zh) "连续输入" else "Voice mode") }
                             }
                         }
                         if (queuedMessageCount > 0) {
@@ -1218,7 +1430,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 }
             }
         }
-        MobileBottomNav(
+        if (mobilePage != MobilePage.Conversation) MobileBottomNav(
                 current = mobilePage,
                 chinese = zh,
                 onSelect = { page ->
@@ -1245,7 +1457,11 @@ private fun MobilePageHeader(
     ) {
         if (onBack != null) {
             TextButton(onClick = onBack) {
-                Text(if (chinese) "返回" else "Back", color = Color(0xFF2F7C3B), fontWeight = FontWeight.SemiBold)
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                    contentDescription = if (chinese) "返回" else "Back",
+                    modifier = Modifier.size(24.dp),
+                )
             }
         }
         Text(
@@ -1272,7 +1488,7 @@ private fun MobileQueuePage(
     onRemove: (String) -> Unit,
     onNavigate: (MobilePage) -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxSize().background(Color(0xFFFCFDFC))) {
+    Column(modifier = Modifier.fillMaxSize().background(Color(0xFFFCFDFC)).safeDrawingPadding()) {
         MobilePageHeader(
             title = if (chinese) "消息队列" else "Message queue",
             chinese = chinese,
@@ -1303,11 +1519,6 @@ private fun MobileQueuePage(
                     Text(if (chinese) "停止发送" else "Stop")
                 }
             }
-            Text(
-                if (chinese) "断线时消息会保留，连接恢复后按顺序发送。" else "Messages stay in order and resume when the connection returns.",
-                color = Color(0xFF68736B),
-                style = MaterialTheme.typography.bodyMedium,
-            )
             if (items.isEmpty()) {
                 Text(if (chinese) "队列为空" else "Queue is empty", color = Color(0xFF7A867B), style = MaterialTheme.typography.bodyLarge)
             } else {
@@ -1366,7 +1577,7 @@ private fun MobileSettingsPage(
     onNavigate: (MobilePage) -> Unit,
 ) {
     val context = LocalContext.current
-    Column(modifier = Modifier.fillMaxSize().background(Color(0xFFFCFDFC))) {
+    Column(modifier = Modifier.fillMaxSize().background(Color(0xFFFCFDFC)).safeDrawingPadding()) {
         MobilePageHeader(title = if (chinese) "设置" else "Settings", chinese = chinese, onBack = onBack)
         androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
         Column(
@@ -1378,11 +1589,7 @@ private fun MobileSettingsPage(
             profile?.let { current ->
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(current.name.ifBlank { "Codex Atlas" }, color = Color(0xFF26332A), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                    Text(
-                        listOf(current.kind.uppercase(Locale.ROOT), current.lanUrl, current.tunnelUrl.takeIf { it.isNotBlank() })
-                            .filterNotNull().filter { it.isNotBlank() }.joinToString(" · "),
-                        color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall, maxLines = 2,
-                    )
+                    Text(current.kind.uppercase(Locale.ROOT), color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
                 }
             }
             Text(if (chinese) "通道" else "Route", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1F2A22), fontWeight = FontWeight.SemiBold)
@@ -1404,7 +1611,17 @@ private fun MobileSettingsPage(
                     Text(if (chinese) "朗读 Codex 回复" else "Read Codex replies", color = Color(0xFF26332A), style = MaterialTheme.typography.bodyLarge)
                     Text(if (chinese) "收到新的回复时使用系统语音播报" else "Speak new replies with the system voice", color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
                 }
-                Switch(checked = readRepliesAloud, onCheckedChange = onReadRepliesChange)
+                Switch(
+                    checked = readRepliesAloud,
+                    onCheckedChange = onReadRepliesChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = Color(0xFF2F7C3B),
+                        uncheckedThumbColor = Color(0xFF8C978E),
+                        uncheckedTrackColor = Color(0xFFEDF2ED),
+                        uncheckedBorderColor = Color(0xFFCDD5CD),
+                    ),
+                )
             }
             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
             Text(if (chinese) "应用更新" else "App updates", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1F2A22), fontWeight = FontWeight.SemiBold)
@@ -1432,8 +1649,11 @@ private fun MobileSettingsPage(
             if (updateBusy && updateProgress > 0) {
                 androidx.compose.material3.LinearProgressIndicator(progress = { updateProgress / 100f }, modifier = Modifier.fillMaxWidth())
             }
-            TextButton(onClick = { openPublicUrl(context, ProjectLinks.projectUrl) }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (chinese) "打开项目主页" else "Open project")
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Codex Atlas v${BuildConfig.VERSION_NAME}", modifier = Modifier.weight(1f), color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { openPublicUrl(context, ProjectLinks.projectUrl) }) {
+                    Text(if (chinese) "项目主页" else "Project")
+                }
             }
         }
         MobileBottomNav(current = MobilePage.Settings, chinese = chinese, onSelect = onNavigate)
@@ -1442,29 +1662,32 @@ private fun MobileSettingsPage(
 
 @Composable
 private fun MobileBottomNav(current: MobilePage, chinese: Boolean, onSelect: (MobilePage) -> Unit) {
-    NavigationBar(
-        modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFFE6EAE6)),
-        containerColor = Color.White,
-        tonalElevation = 0.dp,
-    ) {
-        listOf(
-            MobilePage.Home to (if (chinese) "首页" else "Home"),
-            MobilePage.Conversation to (if (chinese) "会话" else "Chat"),
-            MobilePage.Queue to (if (chinese) "队列" else "Queue"),
-            MobilePage.Settings to (if (chinese) "设置" else "Settings"),
-        ).forEach { (page, label) ->
-            NavigationBarItem(
-                selected = current == page,
-                onClick = { onSelect(page) },
-                icon = {
-                    Box(
-                        modifier = Modifier
-                            .size(if (current == page) 8.dp else 6.dp)
-                            .background(if (current == page) Color(0xFF2F7C3B) else Color(0xFF9BA69D), RoundedCornerShape(50)),
-                    )
-                },
-                label = { Text(label) },
-            )
+    Column(modifier = Modifier.fillMaxWidth()) {
+        androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+        NavigationBar(
+            modifier = Modifier.fillMaxWidth(),
+            containerColor = Color.White,
+            tonalElevation = 0.dp,
+        ) {
+            listOf(
+                MobilePage.Home to (if (chinese) "首页" else "Home"),
+                MobilePage.Conversation to (if (chinese) "会话" else "Chat"),
+                MobilePage.Queue to (if (chinese) "队列" else "Queue"),
+                MobilePage.Settings to (if (chinese) "设置" else "Settings"),
+            ).forEach { (page, label) ->
+                val image = when (page) {
+                    MobilePage.Home -> Icons.Filled.Home
+                    MobilePage.Conversation -> Icons.Filled.Create
+                    MobilePage.Queue -> Icons.AutoMirrored.Filled.List
+                    MobilePage.Settings -> Icons.Filled.Settings
+                }
+                NavigationBarItem(
+                    selected = current == page,
+                    onClick = { onSelect(page) },
+                    icon = { Icon(image, contentDescription = label, modifier = Modifier.size(22.dp)) },
+                    label = { Text(label) },
+                )
+            }
         }
     }
 }
@@ -1475,10 +1698,11 @@ private fun ConnectionStatus(state: ConnectionState, chinese: Boolean) {
         ConnectionState.Idle -> Color(0xFFD3A941) to if (chinese) "等待配对链接" else "Waiting for a pairing link"
         ConnectionState.Testing -> Color(0xFFD3A941) to if (chinese) "正在测试连接…" else "Testing connection…"
         is ConnectionState.Connected -> Color(0xFF58BE70) to if (chinese) "已连接 · ${state.title}" else "Connected · ${state.title}"
+        is ConnectionState.Reconnecting -> Color(0xFFD3A941) to if (chinese) "连接中断，正在重连" else "Connection lost · reconnecting"
         is ConnectionState.Failed -> Color(0xFFD85D59) to state.message
     }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Text("●", color = dot, style = MaterialTheme.typography.titleMedium)
+        Box(modifier = Modifier.size(10.dp).background(dot, RoundedCornerShape(50)))
         Spacer(Modifier.size(8.dp))
         Text(text, color = Color(0xFF4D5C4E), style = MaterialTheme.typography.bodyMedium)
     }
@@ -1497,7 +1721,7 @@ private fun ConnectionStatePill(value: String, chinese: Boolean) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("●", color = color, style = MaterialTheme.typography.labelMedium)
+        Box(modifier = Modifier.size(8.dp).background(color, RoundedCornerShape(50)))
         Text(
             when {
                 normalized.contains("error") || normalized.contains("fail") || normalized.contains("blocked") -> if (chinese) "需要处理" else "Needs attention"
@@ -1542,12 +1766,12 @@ private fun QueuePanel(
                     }
                 }
             }
-            Text(if (chinese) "断线后会自动重试，等待或停止不会删除队列消息。" else "Offline items retry automatically; waiting or stopping keeps them in the queue.", color = Color(0xFF8B7B60), style = MaterialTheme.typography.bodySmall)
             if (items.isEmpty()) {
                 Text(if (chinese) "队列已清空" else "Queue is empty", color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
             } else {
-                items.take(20).forEach { item ->
-                    Column(modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp)).padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                items.take(20).forEachIndexed { index, item ->
+                    if (index > 0) androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Text(item.text, maxLines = 3, color = Color(0xFF334238), style = MaterialTheme.typography.bodyMedium)
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text(
@@ -1654,9 +1878,11 @@ private fun ConversationMessage(item: AtlasMessage, chinese: Boolean) {
     val isUser = role == "user"
     val isTool = role == "tool" || item.kind.equals("tool", ignoreCase = true)
     val isQueued = item.kind.equals("queued", ignoreCase = true)
+    val isSending = item.kind.equals("sending", ignoreCase = true)
     val isFailed = item.kind.equals("failed", ignoreCase = true) || item.toolStatus.equals("failed", ignoreCase = true)
     val roleLabel = when {
         isQueued -> if (chinese) "等待发送" else "Pending"
+        isSending -> if (chinese) "发送中" else "Sending"
         isFailed -> if (chinese) "发送失败" else "Failed"
         isUser -> if (chinese) "你" else "You"
         isTool -> if (chinese) "工具" else "Tool"
@@ -1665,6 +1891,7 @@ private fun ConversationMessage(item: AtlasMessage, chinese: Boolean) {
     val roleColor = when {
         isFailed -> Color(0xFFB44A45)
         isQueued -> Color(0xFF9A6B2F)
+        isSending -> Color(0xFF2F7C3B)
         isUser -> Color(0xFF2F7C3B)
         isTool -> Color(0xFF9A6B2F)
         else -> Color(0xFF69766B)
@@ -1672,6 +1899,7 @@ private fun ConversationMessage(item: AtlasMessage, chinese: Boolean) {
     val surfaceColor = when {
         isFailed -> Color(0xFFFFF4F2)
         isQueued -> Color(0xFFFFF8EA)
+        isSending -> Color(0xFFF0F7F0)
         isUser -> Color(0xFFEAF5EB)
         isTool -> Color(0xFFFFF6E6)
         else -> Color.Transparent
@@ -1928,7 +2156,7 @@ private fun VoiceInputPanel(
                     transcript,
                     color = Color(0xFF334238),
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(8.dp)).padding(10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 )
             }
             if (failed) {
@@ -2064,7 +2292,7 @@ private fun ScannerScreen(chinese: Boolean, onResult: (String) -> Unit, onClose:
                 }, ContextCompat.getMainExecutor(context))
             } }, modifier = Modifier.fillMaxSize()
         )
-        Column(modifier = Modifier.align(Alignment.TopCenter).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(if (chinese) "扫描 Codex Atlas 二维码" else "Scan the Codex Atlas QR", color = Color.White, style = MaterialTheme.typography.titleLarge)
             Text(status, color = if (scannerState == ScannerState.Error) Color(0xFFFFB4AB) else Color(0xFFDCE8DC))
         }
@@ -2085,10 +2313,11 @@ private fun ScannerScreen(chinese: Boolean, onResult: (String) -> Unit, onClose:
                 }) { Text(if (chinese) "打开相机权限" else "Open camera permissions", color = Color.White) }
             }
         }
-        OutlinedButton(onClick = onClose, modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp)) { Text(if (chinese) "取消" else "Cancel", color = Color.White) }
+        OutlinedButton(onClick = onClose, modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(24.dp)) { Text(if (chinese) "取消" else "Cancel", color = Color.White) }
     }
 }
 
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
 private fun scanFrame(
     proxy: ImageProxy,
     scanner: BarcodeScanner,

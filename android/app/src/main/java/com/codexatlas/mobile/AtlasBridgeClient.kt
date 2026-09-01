@@ -2,6 +2,9 @@ package com.codexatlas.mobile
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -193,7 +196,7 @@ class AtlasBridgeClient(
             put("text", text)
             if (clientMessageId.isNotBlank()) put("clientMessageId", clientMessageId)
         }
-        postAny("/v1/sessions/$sessionId/message", json.encodeToString(payload), fallbackUrl)
+        postAny(sessionIdPath(sessionId, "/message"), json.encodeToString(payload), fallbackUrl)
     }
 
     fun sendDictationChunkAny(
@@ -255,7 +258,18 @@ class AtlasBridgeClient(
             .post(body.toRequestBody())
             .build()
         http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
+            val responseBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val detail = runCatching {
+                    json.parseToJsonElement(responseBody).jsonObject["error"]?.jsonPrimitive?.contentOrNull
+                }.getOrNull()
+                error(
+                    buildString {
+                        append("Atlas Bridge returned HTTP ").append(response.code)
+                        if (!detail.isNullOrBlank()) append(": ").append(detail)
+                    },
+                )
+            }
         }
     }
 
