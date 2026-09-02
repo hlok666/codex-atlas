@@ -187,9 +187,12 @@ class AtlasSyncService : Service() {
                 val sync = AtlasBridgeClient(primary, token).syncAny(
                     cursorMs,
                     fallback,
-                    20_000,
+                    // Keep the background companion responsive while still
+                    // using long-polling to avoid a busy request loop.
+                    2_000,
                     syncEpoch,
                     afterSeq,
+                    includeEvents = false,
                 )
                 currentCoroutineContext().ensureActive()
                 cursorMs = maxOf(cursorMs, sync.cursorMs)

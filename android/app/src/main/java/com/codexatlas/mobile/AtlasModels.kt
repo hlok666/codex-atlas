@@ -34,6 +34,9 @@ data class AtlasSnapshot(
     val balanceUnit: String = "USD",
     val balanceProvider: String = "",
     val balanceCheckedAtMs: Long = 0,
+    val balanceStatus: String = "loading",
+    val balanceStale: Boolean = false,
+    val balanceError: String? = null,
     val requiresAttention: Boolean = false,
     val lastError: String? = null,
     val foreground: Boolean = false,
@@ -41,6 +44,18 @@ data class AtlasSnapshot(
     val lastEventAtMs: Long = 0,
     val messages: List<AtlasMessage> = emptyList(),
     val approval: AtlasApproval? = null,
+)
+
+@Serializable
+data class AtlasBalance(
+    val success: Boolean = false,
+    val remaining: Double? = null,
+    val unit: String = "USD",
+    val provider: String = "",
+    val status: String = "loading",
+    val checkedAtMs: Long = 0,
+    val stale: Boolean = false,
+    val error: String? = null,
 )
 
 @Serializable

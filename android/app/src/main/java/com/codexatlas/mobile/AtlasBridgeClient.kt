@@ -127,6 +127,8 @@ class AtlasBridgeClient(
         waitMs: Long = 0,
         epoch: String = "",
         afterSeq: Long = 0,
+        sessionId: String = "",
+        includeEvents: Boolean = true,
     ): AtlasSyncResponse {
         val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
@@ -140,6 +142,11 @@ class AtlasBridgeClient(
                             .append(java.net.URLEncoder.encode(epoch, Charsets.UTF_8.name()))
                     }
                     if (afterSeq > 0) append("&after=").append(afterSeq)
+                    if (sessionId.isNotBlank()) {
+                        append("&session=")
+                            .append(java.net.URLEncoder.encode(sessionId, Charsets.UTF_8.name()))
+                    }
+                    if (!includeEvents) append("&events=0")
                 }
                 val request = Request.Builder()
                     .url(candidate + "/v1/sync" + query)
@@ -173,6 +180,30 @@ class AtlasBridgeClient(
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
                     val result = json.decodeFromString<List<AtlasSession>>(response.body?.string().orEmpty())
+                    BridgeTransport.succeeded(candidate)
+                    return result
+                }
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
+    fun balanceAny(fallbackUrl: String = "", refresh: Boolean = false): AtlasBalance {
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(candidate + "/v1/balance" + if (refresh) "?refresh=1" else "")
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) error("Atlas Bridge returned HTTP ${response.code}")
+                    val result = json.decodeFromString<AtlasBalance>(response.body?.string().orEmpty())
                     BridgeTransport.succeeded(candidate)
                     return result
                 }

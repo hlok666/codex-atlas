@@ -61,6 +61,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
 import type { DesktopUpdateInfo, DesktopUpdateProgress } from './lib/atlasBridge'
 import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
+import { FloatingSessionTargetLock } from './lib/floatingSessionTarget'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
 import packageJson from '../package.json'
 import '@fontsource-variable/geist'
@@ -2555,21 +2556,28 @@ function FloatingMini() {
   const [approvalOther, setApprovalOther] = useState('')
   const approvalOtherInputRef = useRef<HTMLInputElement | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
-  const selectedSessionRef = useRef<string | null>(null)
+  const sessionTargetRef = useRef(new FloatingSessionTargetLock())
   const eventTime = (item: Session) => item.lastEventAtMs || item.timestamp || 0
   const selectLatest = (mapped: Session[]) => {
-    if (!autoPickSession && selectedSessionRef.current && mapped.some((item) => item.id === selectedSessionRef.current)) return
+    const lockedSessionId = sessionTargetRef.current.lockedSessionId
+    if (lockedSessionId) {
+      // Keep the target stable while the editor is open. The record itself is
+      // still refreshed below by the normal runtime/index polling.
+      setSelectedSessionId(lockedSessionId)
+      return
+    }
+    const currentSessionId = sessionTargetRef.current.selectedSessionId
+    if (!autoPickSession && currentSessionId && mapped.some((item) => item.id === currentSessionId)) return
     const running = mapped.filter((item) => (item.processIds?.length || 0) > 0)
     const selected = running.find((item) => item.foreground)
       || running.reduce<Session | null>((best, item) => !best || eventTime(item) > eventTime(best) ? item : best, null)
       || mapped[0]
     if (!selected) {
-      selectedSessionRef.current = null
+      sessionTargetRef.current.selectAutomatically(null)
       setSelectedSessionId(null)
       return
     }
-    selectedSessionRef.current = selected.id
-    setSelectedSessionId(selected.id)
+    setSelectedSessionId(sessionTargetRef.current.selectAutomatically(selected.id))
   }
   const applyRuntimeRecords = (records: RunningCodexSession[]) => {
     const byId = new Map(records.map((record) => [record.sessionId, record]))
@@ -2605,12 +2613,16 @@ function FloatingMini() {
         foreground: runtime.foreground,
       }
     }))
+    if (sessionTargetRef.current.lockedSessionId) {
+      setSelectedSessionId(sessionTargetRef.current.lockedSessionId)
+      return
+    }
     const runningIds = new Set(records.map((record) => record.sessionId))
-    if (autoPickSession && latest && (foreground || !selectedSessionRef.current || !runningIds.has(selectedSessionRef.current))) {
-      selectedSessionRef.current = latest.sessionId
-      setSelectedSessionId(latest.sessionId)
+    const currentSessionId = sessionTargetRef.current.selectedSessionId
+    if (autoPickSession && latest && (foreground || !currentSessionId || !runningIds.has(currentSessionId))) {
+      setSelectedSessionId(sessionTargetRef.current.selectAutomatically(latest.sessionId))
     } else if (!latest) {
-      selectedSessionRef.current = null
+      sessionTargetRef.current.selectAutomatically(null)
       setSelectedSessionId(null)
     }
   }
@@ -2771,8 +2783,33 @@ function FloatingMini() {
   }, [])
   const orderedItems = useMemo(() => [...items]
     .sort((left, right) => Number(right.foreground) - Number(left.foreground) || eventTime(right) - eventTime(left)), [items])
-  const selectedIndex = Math.max(0, orderedItems.findIndex((item) => item.id === selectedSessionId))
-  const selectedItem = orderedItems[selectedIndex] || orderedItems[0]
+  const selectedIndexInOrder = selectedSessionId
+    ? orderedItems.findIndex((item) => item.id === selectedSessionId)
+    : -1
+  const selectedIndex = selectedIndexInOrder >= 0 ? selectedIndexInOrder : 0
+  // Do not silently fall back to another session while a locked target is
+  // being refreshed or removed. Showing another session would make a failed
+  // submission look as though it was sent to the wrong conversation.
+  const selectedItem = selectedSessionId && selectedIndexInOrder < 0
+    ? undefined
+    : orderedItems[selectedIndex] || orderedItems[0]
+  const openQuickInput = (sessionId?: string) => {
+    const target = sessionTargetRef.current.openInput(sessionId || selectedItem?.id)
+    if (!target) return
+    setSelectedSessionId(target)
+    setQuickInputOpen(true)
+  }
+  const closeQuickInput = (clearDraft = true) => {
+    sessionTargetRef.current.closeInput()
+    setQuickInputOpen(false)
+    if (clearDraft) {
+      setQuickInput('')
+      setQuickAttachments([])
+    }
+  }
+  const actionItem = sessionTargetRef.current.lockedSessionId
+    ? orderedItems.find((item) => item.id === sessionTargetRef.current.lockedSessionId) || selectedItem
+    : selectedItem
   useEffect(() => {
     const observed = selectedItem?.model?.trim()
     if (!observed) return
@@ -2817,16 +2854,15 @@ function FloatingMini() {
     : '0/0'
   const switchSession = (direction: -1 | 1) => {
     if (orderedItems.length < 2) return
-    const currentIndex = orderedItems.findIndex((item) => item.id === selectedSessionRef.current)
+    const currentIndex = orderedItems.findIndex((item) => item.id === sessionTargetRef.current.selectedSessionId)
     const index = currentIndex < 0 ? 0 : (currentIndex + direction + orderedItems.length) % orderedItems.length
     const next = orderedItems[index]
-    selectedSessionRef.current = next.id
-    setSelectedSessionId(next.id)
+    setSelectedSessionId(sessionTargetRef.current.selectManually(next.id))
   }
   const activateSelected = () => {
-    if (!selectedItem) return
+    if (!actionItem) return
     setActionBusy('activate')
-    void resumeCodexSession(selectedItem.id).then((ok) => {
+    void resumeCodexSession(actionItem.id).then((ok) => {
       setMessage(ok
         ? (language === 'zh' ? '会话已激活' : 'Session activated')
         : (language === 'zh' ? '无法激活会话' : 'Could not activate session'))
@@ -2835,11 +2871,11 @@ function FloatingMini() {
     })
   }
   const inputContinueSelected = () => {
-    if (!selectedItem) return
+    if (!actionItem) return
     setActionBusy('input')
     // Queue through Codex itself so the floating widget never steals focus
     // from the user's active application.
-    void sendCodexContinue(selectedItem.id, false).then((ok) => {
+    void sendCodexContinue(actionItem.id, false).then((ok) => {
       setMessage(ok
         ? (language === 'zh' ? '已在后台提交“继续”' : 'Continue queued in the background')
         : (language === 'zh' ? '无法提交到该会话' : 'Could not queue the message'))
@@ -2850,18 +2886,17 @@ function FloatingMini() {
   const submitQuickInput = (event?: React.FormEvent) => {
     event?.preventDefault()
     const value = quickInput.trim()
-    if (!selectedItem || (!value && quickAttachments.length === 0) || actionBusy || modelBusy) return
+    const targetSessionId = sessionTargetRef.current.submissionTarget(selectedItem?.id) || ''
+    if (!targetSessionId || (!value && quickAttachments.length === 0) || actionBusy || modelBusy) return
     setActionBusy('input')
-    void sendFloatingMessage(selectedItem.id, value, quickInputMode, quickAttachments).then((ok) => {
+    void sendFloatingMessage(targetSessionId, value, quickInputMode, quickAttachments).then((ok) => {
       setMessage(ok
         ? (quickInputMode === 'queue'
           ? (language === 'zh' ? '消息已加入队列' : 'Message added to queue')
           : (language === 'zh' ? '已打断思考并发送' : 'Thinking interrupted and message sent'))
         : (language === 'zh' ? '消息提交失败，请检查会话终端' : 'Message could not be delivered; check the session terminal'))
       if (ok) {
-        setQuickInput('')
-        setQuickAttachments([])
-        setQuickInputOpen(false)
+        closeQuickInput()
       }
       setActionBusy(null)
       window.setTimeout(() => setMessage(''), 2200)
@@ -2968,6 +3003,9 @@ function FloatingMini() {
     }
   }, [contextMenu])
   useEffect(() => {
+    if (!quickInputOpen) sessionTargetRef.current.closeInput()
+  }, [quickInputOpen])
+  useEffect(() => {
     if (quickInputOpen) quickInputRef.current?.focus()
   }, [quickInputOpen])
   const beginFloatingDrag = (event: React.MouseEvent<HTMLElement>) => {
@@ -2985,15 +3023,15 @@ function FloatingMini() {
       </div>
       <div className="desktop-tv-body">
         <div className="desktop-tv-screen-frame">
-          <div className={`desktop-tv-screen ${quickInputOpen ? 'is-inputting' : ''}`} onClick={() => { if (!approvalRequest && selectedItem) setQuickInputOpen(true) }} title={selectedItem?.title || t('floatingIdle')}>
+          <div className={`desktop-tv-screen ${quickInputOpen ? 'is-inputting' : ''}`} onClick={() => { if (!approvalRequest && selectedItem) openQuickInput() }} title={selectedItem?.title || t('floatingIdle')}>
             <div className="desktop-tv-scanlines" aria-hidden="true" />
             <div className="desktop-tv-screen-head"><span><i className="desktop-tv-status-dot" />{phaseLabel}</span><b>{sessionLabel}</b></div>
               <div className="desktop-tv-session-meta" aria-hidden="true"><strong>{selectedItem?.title || (language === 'zh' ? '未选择会话' : 'No session selected')}</strong><small>{selectedItem ? `${selectedItem.folder} · ${selectedItem.model}` : ''}</small></div>
              {approvalRequest ? <div className="desktop-tv-approval" role="status" aria-live="polite" onClick={(event) => event.stopPropagation()}><strong>{language === 'zh' ? '需要审批' : 'Approval needed'}</strong><p>{approvalRequest.prompt}</p><div className="desktop-tv-approval-options">{approvalRequest.options.map((option) => <button key={`${option.value}:${option.label}`} onClick={() => respondToApproval(option)} disabled={approvalBusy !== null || !selectedItem}>{approvalBusy === option.value ? <LoaderCircle className="spin" size={10} /> : null}{option.label}</button>)}</div><div className="desktop-tv-approval-other"><input ref={approvalOtherInputRef} value={approvalOther} onChange={(event) => setApprovalOther(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') respondWithCustomApproval() }} placeholder={t('otherChoicePlaceholder')} disabled={approvalBusy !== null || !selectedItem} /><button onClick={respondWithCustomApproval} disabled={!approvalOther.trim() || approvalBusy !== null || !selectedItem}>{t('otherChoice')} · {t('submitOtherChoice')}</button></div></div> : quickInputOpen ? <form className="desktop-tv-quick-input" onSubmit={submitQuickInput} onClick={(event) => event.stopPropagation()}>
                 <div className="desktop-tv-quick-modes" role="group" aria-label={language === 'zh' ? '发送方式' : 'Send mode'}><button type="button" className={quickInputMode === 'queue' ? 'selected' : ''} onClick={() => setQuickInputMode('queue')}>{language === 'zh' ? '排队' : 'Queue'}</button><button type="button" className={quickInputMode === 'interrupt' ? 'selected' : ''} onClick={() => setQuickInputMode('interrupt')}>{language === 'zh' ? '打断' : 'Interrupt'}</button></div>
-                <textarea ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuickInputOpen(false); setQuickInput(''); setQuickAttachments([]); return } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={t('quickInputPlaceholder')} disabled={!selectedItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} rows={2} />
+                <textarea ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { closeQuickInput(); return } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={t('quickInputPlaceholder')} disabled={!actionItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} rows={2} />
                 <div className="desktop-tv-quick-attachments">{quickAttachments.map((attachment, index) => <span key={`${attachment.name}:${index}`} title={attachment.path || attachment.name}><i>{attachment.kind === 'image' ? <ImageIcon size={10} /> : <FileText size={10} />}</i>{attachment.name}<button type="button" onClick={() => setQuickAttachments((current) => current.filter((_, currentIndex) => currentIndex !== index))} aria-label={language === 'zh' ? `移除 ${attachment.name}` : `Remove ${attachment.name}`}><X size={10} /></button></span>)}</div>
-                <div className="desktop-tv-quick-tools"><label className="desktop-tv-file-button" title={language === 'zh' ? '添加文档或图片' : 'Attach a document or image'}><Paperclip size={12} /><input ref={quickFileInputRef} type="file" multiple accept="image/*,.txt,.md,.pdf,.json,.csv,.doc,.docx,.xls,.xlsx" onChange={(event) => { addQuickFiles(event.target.files); event.currentTarget.value = '' }} /></label><span>{quickInputMode === 'queue' ? (language === 'zh' ? '等待当前任务完成' : 'Wait for current task') : (language === 'zh' ? '立即打断并提交' : 'Interrupt and submit')}</span><button type="submit" disabled={(!quickInput.trim() && quickAttachments.length === 0) || !selectedItem || actionBusy !== null} aria-label={t('quickInputSubmit')} title={t('quickInputSubmit')}>{actionBusy === 'input' ? <LoaderCircle className="spin" size={12} /> : <ArrowUpRight size={12} />}</button></div>
+                <div className="desktop-tv-quick-tools"><label className="desktop-tv-file-button" title={language === 'zh' ? '添加文档或图片' : 'Attach a document or image'}><Paperclip size={12} /><input ref={quickFileInputRef} type="file" multiple accept="image/*,.txt,.md,.pdf,.json,.csv,.doc,.docx,.xls,.xlsx" onChange={(event) => { addQuickFiles(event.target.files); event.currentTarget.value = '' }} /></label><span>{quickInputMode === 'queue' ? (language === 'zh' ? '等待当前任务完成' : 'Wait for current task') : (language === 'zh' ? '立即打断并提交' : 'Interrupt and submit')}</span><button type="submit" disabled={(!quickInput.trim() && quickAttachments.length === 0) || !actionItem || actionBusy !== null} aria-label={t('quickInputSubmit')} title={t('quickInputSubmit')}>{actionBusy === 'input' ? <LoaderCircle className="spin" size={12} /> : <ArrowUpRight size={12} />}</button></div>
               </form> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
           </div>
         </div>
@@ -3010,7 +3048,7 @@ function FloatingMini() {
     {contextMenu && <div className="desktop-tv-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" onClick={(event) => event.stopPropagation()}>
       <button role="menuitem" onClick={() => { setContextMenu(null); activateSelected() }} disabled={!selectedItem || actionBusy !== null}><Play size={13} fill="currentColor" />{t('floatingResume')}</button>
       <button role="menuitem" onClick={() => { setContextMenu(null); inputContinueSelected() }} disabled={!selectedItem || actionBusy !== null}><TerminalSquare size={13} />{t('floatingInputContinue')}</button>
-      <button role="menuitem" onClick={() => { setContextMenu(null); setQuickInputOpen(true) }} disabled={!selectedItem}><Plus size={13} />{t('quickInputSubmit')}</button>
+       <button role="menuitem" onClick={() => { setContextMenu(null); openQuickInput() }} disabled={!selectedItem}><Plus size={13} />{t('quickInputSubmit')}</button>
       <div className="desktop-tv-context-divider" />
       <span className="desktop-tv-context-label">{t('modelMenu')}</span>
       {codexModels.length === 0 && <span className="desktop-tv-context-empty">{language === 'zh' ? '正在读取 Codex 模型…' : 'Reading Codex models…'}</span>}

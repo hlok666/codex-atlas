@@ -167,14 +167,34 @@ class AtlasWidgetReceiver : AppWidgetProvider() {
                     .ifBlank { "idle" },
             )
             views.setTextViewText(R.id.atlas_widget_output, snapshot.lastOutput.ifBlank { "Waiting for Codex output" })
-            val balanceText = if (snapshot.balanceRemaining == null) {
-                if (snapshot.balanceProvider.isBlank()) "Balance unavailable" else "${snapshot.balanceProvider} · unavailable"
-            } else {
-                "${snapshot.balanceProvider.ifBlank { "Codex" }} · ${String.format(Locale.US, "%.2f", snapshot.balanceRemaining)} ${snapshot.balanceUnit}"
+            val chinese = context.resources.configuration.locales.get(0).language.startsWith("zh")
+            val balanceStatus = snapshot.balanceStatus.lowercase(Locale.ROOT)
+            val balanceText = when {
+                snapshot.balanceRemaining != null -> buildString {
+                    append(snapshot.balanceProvider.ifBlank { "Codex" })
+                    append(" · ")
+                    append(String.format(Locale.US, "%.2f", snapshot.balanceRemaining))
+                    append(' ')
+                    append(snapshot.balanceUnit)
+                    if (snapshot.balanceStale || balanceStatus == "stale") {
+                        append(if (chinese) " · 已过期" else " · stale")
+                    }
+                }
+                balanceStatus == "loading" -> if (chinese) "正在获取余额…" else "Checking balance…"
+                snapshot.balanceProvider.isBlank() -> if (chinese) "余额不可用" else "Balance unavailable"
+                else -> "${snapshot.balanceProvider} · ${if (chinese) "查询失败" else "unavailable"}"
             }
             views.setTextViewText(R.id.atlas_widget_balance, balanceText)
             views.setTextColor(R.id.atlas_widget_state_dot, stateColor)
-            views.setTextColor(R.id.atlas_widget_balance, if (snapshot.balanceRemaining != null && snapshot.balanceRemaining <= 0.0) Color.rgb(216, 93, 89) else Color.rgb(146, 201, 149))
+            views.setTextColor(
+                R.id.atlas_widget_balance,
+                when (balanceStatus) {
+                    "insufficient" -> Color.rgb(216, 93, 89)
+                    "stale", "error" -> Color.rgb(178, 122, 37)
+                    "available" -> Color.rgb(80, 143, 89)
+                    else -> Color.rgb(120, 133, 122)
+                },
+            )
             views.setBoolean(R.id.atlas_widget_activate, "setEnabled", snapshot.canActivate && snapshot.sessionId.isNotBlank())
             views.setBoolean(R.id.atlas_widget_continue, "setEnabled", snapshot.canInputContinue && snapshot.sessionId.isNotBlank())
             views.setBoolean(R.id.atlas_widget_reply, "setEnabled", snapshot.sessionId.isNotBlank())

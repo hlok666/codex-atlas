@@ -83,6 +83,7 @@ enum AppServerCommand {
 struct RuntimeSessionCache {
     sessions: Vec<SessionRecord>,
     refreshed_at_ms: i64,
+    refreshing: bool,
 }
 
 #[derive(Default)]
@@ -94,6 +95,8 @@ struct MobileSyncState {
     fingerprints: HashMap<String, (String, i64)>,
     raw_messages: HashMap<String, CachedMobileMessages>,
     dictation_last_seq: HashMap<String, u64>,
+    last_persisted_at_ms: i64,
+    persist_dirty: bool,
 }
 
 #[derive(Clone)]
@@ -115,6 +118,44 @@ struct PersistedMobileSyncState {
 
 static MOBILE_SYNC_STATE: OnceLock<Mutex<MobileSyncState>> = OnceLock::new();
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileBalanceSnapshot {
+    success: bool,
+    remaining: Option<f64>,
+    unit: String,
+    provider: String,
+    status: String,
+    checked_at_ms: i64,
+    stale: bool,
+    error: Option<String>,
+}
+
+impl Default for MobileBalanceSnapshot {
+    fn default() -> Self {
+        Self {
+            success: false,
+            remaining: None,
+            unit: "USD".to_string(),
+            provider: String::new(),
+            status: "loading".to_string(),
+            checked_at_ms: 0,
+            stale: false,
+            error: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct MobileBalanceCache {
+    snapshot: MobileBalanceSnapshot,
+    last_attempt_at_ms: i64,
+    changed_at_ms: i64,
+    refreshing: bool,
+}
+
+static MOBILE_BALANCE_CACHE: OnceLock<Mutex<MobileBalanceCache>> = OnceLock::new();
+
 #[derive(Default)]
 struct MobileMessageReceiptState {
     loaded: bool,
@@ -126,6 +167,19 @@ static MOBILE_MESSAGE_RECEIPTS: OnceLock<Mutex<MobileMessageReceiptState>> = Onc
 
 const MOBILE_MESSAGE_PAGE_DEFAULT: usize = 200;
 const MOBILE_MESSAGE_PAGE_MAX: usize = 1_000;
+const MOBILE_SYNC_PROTOCOL_VERSION: &str = "v2";
+// Rollout files can grow to hundreds of megabytes on long-lived sessions.
+// Mobile sync only needs the recent event window; reading the entire JSONL on
+// every poll caused multi-minute refreshes and unbounded memory growth.
+const MOBILE_MESSAGE_TAIL_BYTES: usize = 4 * 1024 * 1024;
+const MOBILE_MESSAGE_TAIL_LINES: usize = 4_096;
+const MOBILE_MESSAGE_CACHE_LIMIT: usize = 4_096;
+const MOBILE_MESSAGE_APPEND_OVERLAP_BYTES: u64 = 512 * 1024;
+const MOBILE_SEQUENCE_MAX_ENTRIES: usize = 20_000;
+const MOBILE_SYNC_PERSIST_INTERVAL_MS: i64 = 1_500;
+const MOBILE_SESSION_CACHE_TTL_MS: i64 = 5_000;
+const MOBILE_BALANCE_REFRESH_INTERVAL_MS: i64 = 15_000;
+const MOBILE_BALANCE_STALE_AFTER_MS: i64 = 45_000;
 
 #[derive(Default)]
 struct ProcessSnapshotCache {
@@ -497,6 +551,10 @@ struct MobileStatusSnapshot {
     balance_unit: String,
     balance_provider: String,
     balance_checked_at_ms: i64,
+    balance_status: String,
+    balance_stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    balance_error: Option<String>,
     requires_attention: bool,
     last_error: Option<String>,
     foreground: bool,
@@ -1766,14 +1824,159 @@ fn mobile_bridge_device_kind() -> &'static str {
 }
 
 fn rollout_lines(path: &Path) -> Vec<String> {
-    let Ok(file) = File::open(path) else {
-        return Vec::new();
+    tail_lines(path, MOBILE_MESSAGE_TAIL_BYTES, MOBILE_MESSAGE_TAIL_LINES)
+}
+
+fn mobile_message_from_line(line: &str, modified_ms: i64) -> Option<MobileSessionMessage> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let payload = value.get("payload").unwrap_or(&value);
+    let kind = event_type(&value, payload);
+    let role = payload
+        .get("role")
+        .or_else(|| value.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let (role, text) = if role == "user"
+        || kind.contains("user_message")
+        || (kind == "response_item" && role == "user")
+    {
+        let text = payload
+            .get("content")
+            .or_else(|| payload.get("text"))
+            .or_else(|| payload.get("message"))
+            .or_else(|| value.get("content"))
+            .or_else(|| value.get("text"))
+            .map(text_from_value)
+            .unwrap_or_default();
+        ("user", text)
+    } else {
+        let text = full_output_text_from_event(&value, payload).unwrap_or_default();
+        let role = if kind.contains("tool")
+            || kind.contains("function_call")
+            || kind.contains("custom_tool")
+            || kind == "item_started"
+            || kind == "item_completed"
+        {
+            "tool"
+        } else {
+            "assistant"
+        };
+        (role, text)
     };
-    BufReader::new(file)
-        .lines()
-        .filter_map(Result::ok)
-        .filter(|line| !line.trim().is_empty())
-        .collect()
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let timestamp_ms = number_from_value(
+        payload,
+        &[
+            "completed_at_ms",
+            "started_at_ms",
+            "completed_at",
+            "started_at",
+        ],
+    )
+    .or_else(|| number_from_value(&value, &["timestamp_ms", "ts"]))
+    .unwrap_or(modified_ms);
+    let identity = mobile_event_identity(&value, payload, timestamp_ms, line);
+    let id = format!("{}:{}", identity, stable_text_digest(&text));
+    let turn_id = first_string_for_keys(payload, &["turn_id", "turnId", "turn"], 0)
+        .or_else(|| first_string_for_keys(&value, &["turn_id", "turnId", "turn"], 0));
+    let call_id = first_string_for_keys(
+        payload,
+        &[
+            "call_id",
+            "callId",
+            "tool_call_id",
+            "toolCallId",
+            "function_call_id",
+        ],
+        0,
+    )
+    .or_else(|| {
+        first_string_for_keys(
+            &value,
+            &["call_id", "callId", "tool_call_id", "toolCallId"],
+            0,
+        )
+    });
+    let tool_status = if role == "tool" {
+        let status = first_string_for_keys(payload, &["status", "state"], 0)
+            .or_else(|| first_string_for_keys(&value, &["status", "state"], 0));
+        Some(status.unwrap_or_else(|| {
+            if kind.contains("failed") || kind.contains("error") {
+                "failed".to_string()
+            } else if kind.contains("completed") || kind.contains("output") {
+                "completed".to_string()
+            } else {
+                "running".to_string()
+            }
+        }))
+    } else {
+        None
+    };
+    let approval_id = if role == "assistant" {
+        first_string_for_keys(
+            payload,
+            &[
+                "approval_id",
+                "approvalId",
+                "request_id",
+                "requestId",
+                "permission_id",
+            ],
+            0,
+        )
+        .or_else(|| {
+            first_string_for_keys(
+                &value,
+                &["approval_id", "approvalId", "request_id", "requestId"],
+                0,
+            )
+        })
+    } else {
+        None
+    };
+    Some(MobileSessionMessage {
+        id,
+        role: role.to_string(),
+        text: text.clone(),
+        timestamp_ms,
+        kind,
+        seq: 0,
+        seq_start: 0,
+        seq_end: 0,
+        source_seq_ranges: Vec::new(),
+        turn_id,
+        call_id,
+        tool_status,
+        tool_detail: (role == "tool").then_some(text),
+        approval_id,
+        approval_options: Vec::new(),
+    })
+}
+
+fn mobile_messages_from_lines<I>(lines: I, modified_ms: i64) -> Vec<MobileSessionMessage>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut messages = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in lines {
+        let Some(message) = mobile_message_from_line(&line, modified_ms) else {
+            continue;
+        };
+        if seen.insert(message.id.clone()) {
+            messages.push(message);
+        }
+    }
+    messages.sort_by_key(|message| message.timestamp_ms);
+    if messages.len() > MOBILE_MESSAGE_CACHE_LIMIT {
+        let keep_from = messages.len() - MOBILE_MESSAGE_CACHE_LIMIT;
+        messages.drain(..keep_from);
+    }
+    messages
 }
 
 fn mobile_session_messages_raw(session: &SessionRecord) -> Vec<MobileSessionMessage> {
@@ -1782,145 +1985,82 @@ fn mobile_session_messages_raw(session: &SessionRecord) -> Vec<MobileSessionMess
     }
     let path = Path::new(&session.rollout_path);
     let modified_ms = file_modified_ms(path).max(session.updated_at_ms);
-    let mut messages = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (index, line) in rollout_lines(path).into_iter().enumerate() {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let payload = value.get("payload").unwrap_or(&value);
-        let kind = event_type(&value, payload);
-        let role = payload
-            .get("role")
-            .or_else(|| value.get("role"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let (role, text) = if role == "user"
-            || kind.contains("user_message")
-            || (kind == "response_item" && role == "user")
-        {
-            let text = payload
-                .get("content")
-                .or_else(|| payload.get("text"))
-                .or_else(|| payload.get("message"))
-                .or_else(|| value.get("content"))
-                .or_else(|| value.get("text"))
-                .map(text_from_value)
-                .unwrap_or_default();
-            ("user", text)
-        } else {
-            let text = output_text_from_event(&value, payload).unwrap_or_default();
-            let role = if kind.contains("tool")
-                || kind.contains("function_call")
-                || kind.contains("custom_tool")
-                || kind == "item_started"
-                || kind == "item_completed"
-            {
-                "tool"
-            } else {
-                "assistant"
-            };
-            (role, text)
-        };
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let timestamp_ms = number_from_value(
-            payload,
-            &[
-                "completed_at_ms",
-                "started_at_ms",
-                "completed_at",
-                "started_at",
-            ],
-        )
-        .or_else(|| number_from_value(&value, &["timestamp_ms", "ts"]))
-        .unwrap_or(modified_ms);
-        let identity = event_identity(&value, payload)
-            .unwrap_or_else(|| format!("{timestamp_ms}:{index}:{}", stable_text_digest(&line)));
-        let id = format!("{}:{}", identity, stable_text_digest(&text));
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        let turn_id = first_string_for_keys(payload, &["turn_id", "turnId", "turn"], 0)
-            .or_else(|| first_string_for_keys(&value, &["turn_id", "turnId", "turn"], 0));
-        let call_id = first_string_for_keys(
-            payload,
-            &[
-                "call_id",
-                "callId",
-                "tool_call_id",
-                "toolCallId",
-                "function_call_id",
-            ],
-            0,
-        )
-        .or_else(|| {
-            first_string_for_keys(
-                &value,
-                &["call_id", "callId", "tool_call_id", "toolCallId"],
-                0,
-            )
-        });
-        let tool_status = if role == "tool" {
-            let status = first_string_for_keys(payload, &["status", "state"], 0)
-                .or_else(|| first_string_for_keys(&value, &["status", "state"], 0));
-            Some(status.unwrap_or_else(|| {
-                if kind.contains("failed") || kind.contains("error") {
-                    "failed".to_string()
-                } else if kind.contains("completed") || kind.contains("output") {
-                    "completed".to_string()
-                } else {
-                    "running".to_string()
-                }
-            }))
-        } else {
-            None
-        };
-        let approval_id = if role == "assistant" {
-            first_string_for_keys(
-                payload,
-                &[
-                    "approval_id",
-                    "approvalId",
-                    "request_id",
-                    "requestId",
-                    "permission_id",
-                ],
-                0,
-            )
-            .or_else(|| {
-                first_string_for_keys(
-                    &value,
-                    &["approval_id", "approvalId", "request_id", "requestId"],
-                    0,
-                )
-            })
-        } else {
-            None
-        };
-        messages.push(MobileSessionMessage {
-            id,
-            role: role.to_string(),
-            text: text.chars().take(4000).collect(),
-            timestamp_ms,
-            kind,
-            seq: 0,
-            seq_start: 0,
-            seq_end: 0,
-            source_seq_ranges: Vec::new(),
-            turn_id,
-            call_id,
-            tool_status,
-            tool_detail: (role == "tool").then(|| text.chars().take(8000).collect()),
-            approval_id,
-            approval_options: Vec::new(),
-        });
+    mobile_messages_from_lines(rollout_lines(path), modified_ms)
+}
+
+fn rollout_append_lines(path: &Path, previous_size: u64) -> Option<(Vec<String>, bool)> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length <= previous_size {
+        return Some((Vec::new(), true));
     }
-    messages.sort_by_key(|message| message.timestamp_ms);
-    messages
+    // Re-read a small overlap so a writer that was in the middle of a JSONL
+    // record at the previous poll is recovered without reparsing megabytes of
+    // history. The first partial line is discarded below.
+    let start = previous_size.saturating_sub(MOBILE_MESSAGE_APPEND_OVERLAP_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::with_capacity((length - start) as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if start > 0 {
+        text.split_once('\n').map(|(_, tail)| tail).unwrap_or("")
+    } else {
+        text.as_ref()
+    };
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    // Codex appends complete JSONL records, but do not parse a partial final
+    // record if the process was sampled during a write. It will be included
+    // on the next poll once its newline arrives.
+    let complete = if text.ends_with('\n') {
+        true
+    } else if lines
+        .last()
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .is_some()
+    {
+        // A final JSON object without a newline is still a complete record.
+        true
+    } else {
+        lines.pop();
+        false
+    };
+    Some((lines, complete))
+}
+
+fn merge_mobile_messages(
+    current: Vec<MobileSessionMessage>,
+    incoming: Vec<MobileSessionMessage>,
+) -> Vec<MobileSessionMessage> {
+    let mut positions = HashMap::<String, usize>::new();
+    let mut merged = Vec::with_capacity(current.len().saturating_add(incoming.len()));
+    for message in current.into_iter().chain(incoming) {
+        if let Some(index) = positions.get(&message.id).copied() {
+            // Keep the newest metadata for an event that was re-read through
+            // the overlap (for example a tool status changing in place).
+            merged[index] = message;
+        } else {
+            positions.insert(message.id.clone(), merged.len());
+            merged.push(message);
+        }
+    }
+    merged.sort_by_key(|message| message.timestamp_ms);
+    if merged.len() > MOBILE_MESSAGE_CACHE_LIMIT {
+        let keep_from = merged.len() - MOBILE_MESSAGE_CACHE_LIMIT;
+        merged.drain(..keep_from);
+    }
+    merged
+}
+
+fn mobile_event_identity(value: &Value, payload: &Value, _timestamp_ms: i64, line: &str) -> String {
+    // Do not include a tail-window line number here. The window shifts as a
+    // rollout grows, and positional IDs would replay the entire tail on each
+    // append. A digest is stable across reads and is only used when Codex did
+    // not provide an explicit event/turn id.
+    event_identity(value, payload).unwrap_or_else(|| format!("line:{}", stable_text_digest(line)))
 }
 
 fn mobile_sync_state_path() -> PathBuf {
@@ -1933,6 +2073,7 @@ fn load_mobile_sync_state(state: &mut MobileSyncState) {
     }
     state.loaded = true;
     let path = mobile_sync_state_path();
+    let persisted_at_ms = file_modified_ms(&path);
     if let Ok(raw) = fs::read_to_string(path) {
         if let Ok(persisted) = serde_json::from_str::<PersistedMobileSyncState>(&raw) {
             state.epoch = persisted.epoch;
@@ -1941,20 +2082,35 @@ fn load_mobile_sync_state(state: &mut MobileSyncState) {
             state.next_seq = persisted
                 .next_seq
                 .max(state.sequences.values().copied().max().unwrap_or(0));
+            state.last_persisted_at_ms = persisted_at_ms;
         }
     }
-    if state.epoch.trim().is_empty() {
-        state.epoch = format!(
-            "atlas-{}-{}",
-            now_ms(),
-            stable_text_digest(&format!(
-                "{}:{}",
-                std::process::id(),
-                mobile_sync_state_path().display()
-            ))
-        );
-        let _ = persist_mobile_sync_state(state);
+    // v1 used the line number inside a moving tail window as part of the
+    // fallback message identity. Upgrade once so clients discard that
+    // unbounded/incorrect sequence window instead of receiving a huge replay
+    // after the first rollout append.
+    let protocol_prefix = format!("atlas-{MOBILE_SYNC_PROTOCOL_VERSION}-");
+    if state.epoch.trim().is_empty() || !state.epoch.starts_with(&protocol_prefix) {
+        state.epoch = new_mobile_sync_epoch();
+        state.next_seq = 0;
+        state.sequences.clear();
+        state.fingerprints.clear();
+        state.raw_messages.clear();
+        state.dictation_last_seq.clear();
+        persist_mobile_sync_state_now(state);
     }
+}
+
+fn new_mobile_sync_epoch() -> String {
+    format!(
+        "atlas-{MOBILE_SYNC_PROTOCOL_VERSION}-{}-{}",
+        now_ms(),
+        stable_text_digest(&format!(
+            "{}:{}",
+            std::process::id(),
+            mobile_sync_state_path().display()
+        ))
+    )
 }
 
 fn persist_mobile_sync_state(state: &MobileSyncState) -> Result<(), String> {
@@ -1968,30 +2124,58 @@ fn persist_mobile_sync_state(state: &MobileSyncState) -> Result<(), String> {
     write_text_atomically(&mobile_sync_state_path(), &format!("{raw}\n"))
 }
 
+fn persist_mobile_sync_state_now(state: &mut MobileSyncState) {
+    if persist_mobile_sync_state(state).is_ok() {
+        state.last_persisted_at_ms = now_ms();
+        state.persist_dirty = false;
+    } else {
+        state.persist_dirty = true;
+    }
+}
+
+fn persist_mobile_sync_state_if_due(state: &mut MobileSyncState, force: bool) {
+    if !state.persist_dirty {
+        return;
+    }
+    let now = now_ms();
+    if force
+        || state.last_persisted_at_ms == 0
+        || now.saturating_sub(state.last_persisted_at_ms) >= MOBILE_SYNC_PERSIST_INTERVAL_MS
+    {
+        persist_mobile_sync_state_now(state);
+    }
+}
+
 fn rotate_mobile_sync_epoch(state: &mut MobileSyncState) {
     state.epoch = format!(
-        "atlas-{}-{}",
-        now_ms(),
+        "{}-{}",
+        new_mobile_sync_epoch(),
         stable_text_digest(&format!("{}:{}", state.epoch, std::process::id()))
     );
     state.next_seq = 0;
     state.sequences.clear();
     state.raw_messages.clear();
     state.dictation_last_seq.clear();
-    let _ = persist_mobile_sync_state(state);
+    state.persist_dirty = true;
+    persist_mobile_sync_state_now(state);
 }
 
-fn assign_mobile_message_sequences(session_id: &str, messages: &mut [MobileSessionMessage]) {
-    let store = MOBILE_SYNC_STATE.get_or_init(|| Mutex::new(MobileSyncState::default()));
-    let Ok(mut state) = store.lock() else {
-        return;
-    };
-    load_mobile_sync_state(&mut state);
+fn apply_mobile_message_sequences(
+    state: &mut MobileSyncState,
+    session_id: &str,
+    messages: &mut [MobileSessionMessage],
+    baseline_missing: bool,
+) -> bool {
     let mut changed = false;
+    let baseline_seq = state.next_seq;
     for message in messages {
         let sequence_key = format!("{}:{}", session_id, message.id);
         let seq = if let Some(seq) = state.sequences.get(&sequence_key).copied() {
             seq
+        } else if baseline_missing {
+            state.sequences.insert(sequence_key, baseline_seq);
+            changed = true;
+            baseline_seq
         } else {
             state.next_seq = state.next_seq.saturating_add(1);
             let seq = state.next_seq;
@@ -2002,18 +2186,21 @@ fn assign_mobile_message_sequences(session_id: &str, messages: &mut [MobileSessi
         message.seq = seq;
         message.seq_start = seq;
         message.seq_end = seq;
-        message.source_seq_ranges = vec![MobileSeqRange {
-            source: "rollout".to_string(),
-            start: seq,
-            end: seq,
-        }];
+        message.source_seq_ranges = if seq == 0 {
+            Vec::new()
+        } else {
+            vec![MobileSeqRange {
+                source: "rollout".to_string(),
+                start: seq,
+                end: seq,
+            }]
+        };
     }
     // Retain a bounded canonical history. If an older client asks for a
     // sequence below this window, the response advertises `gap` and the
     // client performs a full session reload.
-    const MAX_SEQUENCE_ENTRIES: usize = 100_000;
-    if state.sequences.len() > MAX_SEQUENCE_ENTRIES {
-        let remove_count = state.sequences.len() - MAX_SEQUENCE_ENTRIES;
+    if state.sequences.len() > MOBILE_SEQUENCE_MAX_ENTRIES {
+        let remove_count = state.sequences.len() - MOBILE_SEQUENCE_MAX_ENTRIES;
         let mut entries = state
             .sequences
             .iter()
@@ -2025,9 +2212,39 @@ fn assign_mobile_message_sequences(session_id: &str, messages: &mut [MobileSessi
         }
         changed = true;
     }
+    changed
+}
+
+fn assign_mobile_message_sequences(session_id: &str, messages: &mut [MobileSessionMessage]) {
+    let store = MOBILE_SYNC_STATE.get_or_init(|| Mutex::new(MobileSyncState::default()));
+    let Ok(mut state) = store.lock() else {
+        return;
+    };
+    load_mobile_sync_state(&mut state);
+    let changed = apply_mobile_message_sequences(&mut state, session_id, messages, false);
     if changed {
-        let _ = persist_mobile_sync_state(&state);
+        // Persist sequence metadata at a bounded cadence. Serializing the
+        // whole canonical map for every streamed token can otherwise block
+        // the bridge thread and make a small update look like a minute-long
+        // sync.
+        state.persist_dirty = true;
     }
+    persist_mobile_sync_state_if_due(&mut state, false);
+}
+
+fn baseline_mobile_message_sequences(session_id: &str, messages: &mut [MobileSessionMessage]) {
+    let store = MOBILE_SYNC_STATE.get_or_init(|| Mutex::new(MobileSyncState::default()));
+    let Ok(mut state) = store.lock() else {
+        return;
+    };
+    load_mobile_sync_state(&mut state);
+    if apply_mobile_message_sequences(&mut state, session_id, messages, true) {
+        // A conversation history request establishes the client's starting
+        // point. Map those existing events to the current cursor instead of
+        // allocating thousands of new sequence numbers on the next append.
+        state.persist_dirty = true;
+    }
+    persist_mobile_sync_state_if_due(&mut state, false);
 }
 
 fn cached_mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage> {
@@ -2050,12 +2267,9 @@ fn cached_mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionM
             rotate_mobile_sync_epoch(&mut state);
             return None;
         }
-        state.raw_messages.get(&session.id).and_then(|cached| {
-            (cached.size == size && cached.modified_ms == modified_ms)
-                .then(|| cached.messages.clone())
-        })
+        state.raw_messages.get(&session.id).cloned()
     });
-    cached.unwrap_or_else(|| {
+    let Some(cached) = cached else {
         let parsed = mobile_session_messages_raw(session);
         if let Ok(mut state) = store.lock() {
             load_mobile_sync_state(&mut state);
@@ -2068,8 +2282,56 @@ fn cached_mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionM
                 },
             );
         }
-        parsed
-    })
+        return parsed;
+    };
+
+    if cached.size == size && cached.modified_ms == modified_ms {
+        return cached.messages;
+    }
+
+    // Most rollout updates are appends. Parse only the newly-written tail and
+    // merge it into the bounded in-memory history instead of decoding the
+    // latest several megabytes again for every streamed token.
+    if size > cached.size && modified_ms >= cached.modified_ms {
+        if let Some((lines, complete)) = rollout_append_lines(path, cached.size) {
+            let incoming =
+                mobile_messages_from_lines(lines, modified_ms.max(session.updated_at_ms));
+            let merged = merge_mobile_messages(cached.messages, incoming);
+            if let Ok(mut state) = store.lock() {
+                load_mobile_sync_state(&mut state);
+                state.raw_messages.insert(
+                    session.id.clone(),
+                    CachedMobileMessages {
+                        size: if complete { size } else { cached.size },
+                        modified_ms: if complete {
+                            modified_ms
+                        } else {
+                            cached.modified_ms
+                        },
+                        messages: merged.clone(),
+                    },
+                );
+            }
+            return merged;
+        }
+    }
+
+    // A rewrite/touch with no append invalidates the incremental window. Fall
+    // back to the bounded tail reader so status changes made in place are not
+    // missed.
+    let parsed = mobile_session_messages_raw(session);
+    if let Ok(mut state) = store.lock() {
+        load_mobile_sync_state(&mut state);
+        state.raw_messages.insert(
+            session.id.clone(),
+            CachedMobileMessages {
+                size,
+                modified_ms,
+                messages: parsed.clone(),
+            },
+        );
+    }
+    parsed
 }
 
 fn mobile_session_messages(session: &SessionRecord) -> Vec<MobileSessionMessage> {
@@ -2084,7 +2346,14 @@ fn mobile_sync_metadata() -> (String, u64, u64) {
         return (String::new(), 0, 0);
     };
     load_mobile_sync_state(&mut state);
-    let oldest = state.sequences.values().copied().min().unwrap_or(0);
+    persist_mobile_sync_state_if_due(&mut state, false);
+    let oldest = state
+        .sequences
+        .values()
+        .copied()
+        .filter(|seq| *seq > 0)
+        .min()
+        .unwrap_or(0);
     (state.epoch.clone(), state.next_seq, oldest)
 }
 
@@ -2207,6 +2476,177 @@ fn mobile_approval_request(session: &SessionRecord) -> Option<MobileApprovalRequ
     })
 }
 
+fn mobile_balance_from_result(
+    previous: &MobileBalanceSnapshot,
+    result: Result<Vec<CcSwitchProviderBalance>, String>,
+    checked_at_ms: i64,
+) -> MobileBalanceSnapshot {
+    match result {
+        Ok(mut records) => match records.drain(..).next() {
+            Some(record) if record.success && record.remaining.is_some_and(f64::is_finite) => {
+                let remaining = record.remaining;
+                MobileBalanceSnapshot {
+                    success: true,
+                    remaining,
+                    unit: record
+                        .unit
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| "USD".to_string()),
+                    provider: record.name,
+                    status: if remaining.is_some_and(|value| value <= 0.0) {
+                        "insufficient".to_string()
+                    } else {
+                        "available".to_string()
+                    },
+                    checked_at_ms,
+                    stale: false,
+                    error: None,
+                }
+            }
+            Some(record) => {
+                let same_provider = !record.name.trim().is_empty()
+                    && record.name.eq_ignore_ascii_case(previous.provider.trim());
+                let retain_previous = same_provider && previous.remaining.is_some();
+                MobileBalanceSnapshot {
+                    success: false,
+                    remaining: retain_previous.then_some(previous.remaining).flatten(),
+                    unit: if retain_previous {
+                        previous.unit.clone()
+                    } else {
+                        record
+                            .unit
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| "USD".to_string())
+                    },
+                    provider: record.name,
+                    status: if retain_previous { "stale" } else { "error" }.to_string(),
+                    checked_at_ms: if retain_previous {
+                        previous.checked_at_ms
+                    } else {
+                        0
+                    },
+                    stale: retain_previous,
+                    error: record
+                        .error
+                        .or_else(|| Some("Current provider did not return a balance".to_string())),
+                }
+            }
+            None => MobileBalanceSnapshot {
+                status: "unavailable".to_string(),
+                error: Some("No active CC Switch Codex provider".to_string()),
+                ..MobileBalanceSnapshot::default()
+            },
+        },
+        Err(error) => {
+            let retain_previous = previous.remaining.is_some();
+            MobileBalanceSnapshot {
+                success: false,
+                remaining: previous.remaining,
+                unit: previous.unit.clone(),
+                provider: previous.provider.clone(),
+                status: if retain_previous { "stale" } else { "error" }.to_string(),
+                checked_at_ms: previous.checked_at_ms,
+                stale: retain_previous,
+                error: Some(error),
+            }
+        }
+    }
+}
+
+fn update_mobile_balance_cache(
+    result: Result<Vec<CcSwitchProviderBalance>, String>,
+) -> MobileBalanceSnapshot {
+    let now = now_ms();
+    let store = MOBILE_BALANCE_CACHE.get_or_init(|| Mutex::new(MobileBalanceCache::default()));
+    let Ok(mut state) = store.lock() else {
+        return MobileBalanceSnapshot {
+            status: "error".to_string(),
+            error: Some("Balance monitor is unavailable".to_string()),
+            ..MobileBalanceSnapshot::default()
+        };
+    };
+    state.snapshot = mobile_balance_from_result(&state.snapshot, result, now);
+    state.refreshing = false;
+    state.last_attempt_at_ms = now;
+    state.changed_at_ms = now.max(state.changed_at_ms.saturating_add(1));
+    state.snapshot.clone()
+}
+
+fn fetch_mobile_balance() -> Result<Vec<CcSwitchProviderBalance>, String> {
+    tauri::async_runtime::block_on(get_cc_switch_provider_balances())
+}
+
+fn request_mobile_balance_refresh(force: bool) {
+    let now = now_ms();
+    let store = MOBILE_BALANCE_CACHE.get_or_init(|| Mutex::new(MobileBalanceCache::default()));
+    let should_start = store.lock().ok().is_some_and(|mut state| {
+        if state.refreshing
+            || (!force
+                && state.last_attempt_at_ms > 0
+                && now.saturating_sub(state.last_attempt_at_ms)
+                    < MOBILE_BALANCE_REFRESH_INTERVAL_MS)
+        {
+            return false;
+        }
+        state.refreshing = true;
+        state.last_attempt_at_ms = now;
+        if state.snapshot.remaining.is_none() {
+            state.snapshot.status = "loading".to_string();
+            state.snapshot.error = None;
+        }
+        state.changed_at_ms = now.max(state.changed_at_ms.saturating_add(1));
+        true
+    });
+    if should_start {
+        thread::spawn(|| {
+            let result = fetch_mobile_balance();
+            let _ = update_mobile_balance_cache(result);
+        });
+    }
+}
+
+fn refresh_mobile_balance_blocking() -> MobileBalanceSnapshot {
+    let now = now_ms();
+    let store = MOBILE_BALANCE_CACHE.get_or_init(|| Mutex::new(MobileBalanceCache::default()));
+    if let Ok(mut state) = store.lock() {
+        state.refreshing = true;
+        state.last_attempt_at_ms = now;
+    }
+    update_mobile_balance_cache(fetch_mobile_balance())
+}
+
+fn cached_mobile_balance() -> MobileBalanceSnapshot {
+    request_mobile_balance_refresh(false);
+    let now = now_ms();
+    let store = MOBILE_BALANCE_CACHE.get_or_init(|| Mutex::new(MobileBalanceCache::default()));
+    let mut snapshot = store
+        .lock()
+        .map(|state| state.snapshot.clone())
+        .unwrap_or_else(|_| MobileBalanceSnapshot {
+            status: "error".to_string(),
+            error: Some("Balance monitor is unavailable".to_string()),
+            ..MobileBalanceSnapshot::default()
+        });
+    if snapshot.remaining.is_some()
+        && snapshot.checked_at_ms > 0
+        && now.saturating_sub(snapshot.checked_at_ms) > MOBILE_BALANCE_STALE_AFTER_MS
+    {
+        snapshot.success = false;
+        snapshot.status = "stale".to_string();
+        snapshot.stale = true;
+    }
+    snapshot
+}
+
+fn mobile_balance_changed_since(since_ms: i64) -> bool {
+    request_mobile_balance_refresh(false);
+    MOBILE_BALANCE_CACHE
+        .get_or_init(|| Mutex::new(MobileBalanceCache::default()))
+        .lock()
+        .map(|state| state.changed_at_ms > since_ms)
+        .unwrap_or(false)
+}
+
 fn mobile_status_snapshot_from_sessions(
     sessions: &[SessionRecord],
 ) -> Option<MobileStatusSnapshot> {
@@ -2225,14 +2665,7 @@ fn mobile_status_snapshot_from_sessions(
     } else {
         "completed".to_string()
     };
-    let balance = tauri::async_runtime::block_on(get_cc_switch_provider_balances())
-        .ok()
-        .and_then(|mut values| values.drain(..).next());
-    let balance_checked_at_ms = balance
-        .as_ref()
-        .filter(|value| value.success && value.remaining.is_some())
-        .map(|_| now_ms())
-        .unwrap_or(0);
+    let balance = cached_mobile_balance();
     Some(MobileStatusSnapshot {
         device_id: mobile_bridge_device_id(),
         device_name: mobile_bridge_device_name(),
@@ -2254,16 +2687,13 @@ fn mobile_status_snapshot_from_sessions(
             .unwrap_or_default(),
         can_activate: true,
         can_input_continue: session.running,
-        balance_remaining: balance.as_ref().and_then(|value| value.remaining),
-        balance_unit: balance
-            .as_ref()
-            .and_then(|value| value.unit.clone())
-            .unwrap_or_else(|| "USD".to_string()),
-        balance_provider: balance
-            .as_ref()
-            .map(|value| value.name.clone())
-            .unwrap_or_default(),
-        balance_checked_at_ms,
+        balance_remaining: balance.remaining,
+        balance_unit: balance.unit,
+        balance_provider: balance.provider,
+        balance_checked_at_ms: balance.checked_at_ms,
+        balance_status: balance.status,
+        balance_stale: balance.stale,
+        balance_error: balance.error,
         requires_attention: session.requires_attention,
         last_error: session.last_error.clone(),
         foreground: session.foreground,
@@ -2448,9 +2878,15 @@ fn mobile_sync_response(
     since_ms: i64,
     requested_epoch: Option<&str>,
     after_seq: u64,
+    requested_session_id: Option<&str>,
+    include_events: bool,
 ) -> MobileSyncResponse {
-    let sessions = list_sessions_sync().unwrap_or_default();
-    remember_mobile_sessions(&sessions);
+    // The long-poll change check has already warmed this cache. Reusing it
+    // keeps the response path from running a second SQLite/process/archive
+    // scan after every event (which was the other major source of latency).
+    let sessions = list_mobile_sessions_cached(MOBILE_SESSION_CACHE_TTL_MS)
+        .or_else(|_| list_sessions_sync())
+        .unwrap_or_default();
     let _ = mobile_runtime_changed_since(&sessions, since_ms);
     let (initial_epoch, initial_next_seq, initial_oldest_seq) = mobile_sync_metadata();
     let (initial_reset, initial_gap) = mobile_sync_window_flags(
@@ -2462,10 +2898,15 @@ fn mobile_sync_response(
     );
     let mut events = Vec::new();
     let bootstrap = mobile_sync_is_bootstrap(since_ms, requested_epoch, after_seq);
-    if !bootstrap && !initial_reset && !initial_gap {
+    if include_events && !bootstrap && !initial_reset && !initial_gap {
         let sequence_catch_up = after_seq > 0 && initial_next_seq > after_seq;
         for session in sessions
             .iter()
+            .filter(|session| {
+                requested_session_id
+                    .map(|requested| session.id == requested)
+                    .unwrap_or(true)
+            })
             .filter(|session| sequence_catch_up || mobile_session_changed_since(session, since_ms))
         {
             let messages = mobile_session_messages(session)
@@ -2497,20 +2938,25 @@ fn mobile_sync_response(
     if reset || gap {
         events.clear();
     }
+    let snapshot = mobile_status_snapshot_from_sessions(&sessions);
+    let cursor_ms = now_ms();
     MobileSyncResponse {
-        cursor_ms: now_ms(),
+        cursor_ms,
         sync_epoch,
         next_seq,
         reset,
         gap,
-        snapshot: mobile_status_snapshot_from_sessions(&sessions),
+        snapshot,
         sessions: sessions.iter().map(MobileSessionSummary::from).collect(),
         events,
     }
 }
 
 fn mobile_sync_has_changes(since_ms: i64, requested_epoch: Option<&str>, after_seq: u64) -> bool {
-    let Ok(sessions) = list_mobile_sessions_cached(750) else {
+    if mobile_balance_changed_since(since_ms) {
+        return true;
+    }
+    let Ok(sessions) = list_mobile_sessions_cached(MOBILE_SESSION_CACHE_TTL_MS) else {
         return false;
     };
     let (sync_epoch, next_seq, _) = mobile_sync_metadata();
@@ -2629,11 +3075,34 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         let wait_ms = query_parameter(&url, "wait")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
+        let requested_session_id = query_parameter(&url, "session")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let include_events = query_parameter(&url, "events")
+            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
         wait_for_mobile_sync(since_ms, requested_epoch.as_deref(), after_seq, wait_ms);
         let _ = request.respond(bridge_json_response(
-            &mobile_sync_response(since_ms, requested_epoch.as_deref(), after_seq),
+            &mobile_sync_response(
+                since_ms,
+                requested_epoch.as_deref(),
+                after_seq,
+                requested_session_id.as_deref(),
+                include_events,
+            ),
             200,
         ));
+        return;
+    }
+    if method == Method::Get && path == "/v1/balance" {
+        let force = query_parameter(&url, "refresh")
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let balance = if force {
+            refresh_mobile_balance_blocking()
+        } else {
+            cached_mobile_balance()
+        };
+        let _ = request.respond(bridge_json_response(&balance, 200));
         return;
     }
     if method == Method::Get && path == "/v1/status" {
@@ -2651,7 +3120,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         return;
     }
     if method == Method::Get && url == "/v1/sessions" {
-        match list_mobile_sessions_cached(750) {
+        match list_mobile_sessions_cached(MOBILE_SESSION_CACHE_TTL_MS) {
             Ok(sessions) => {
                 let summaries = sessions
                     .iter()
@@ -2679,7 +3148,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             ));
             return;
         };
-        let Some(session) = find_session(session_id) else {
+        let Some(session) = find_mobile_session(session_id) else {
             let _ = request.respond(bridge_json_response(
                 &serde_json::json!({"error": "session not found"}),
                 404,
@@ -2696,9 +3165,12 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             mobile_session_messages(&session)
         } else {
             // Opening a conversation must not advance the live event cursor
-            // across its entire history. Sequence numbers are assigned only
-            // when a client explicitly asks for sequence-based pagination.
-            cached_mobile_session_messages(&session)
+            // across its entire history. Existing events share the current
+            // cursor so the next rollout append sends only genuinely new
+            // content instead of replaying the whole visible timeline.
+            let mut messages = cached_mobile_session_messages(&session);
+            baseline_mobile_message_sequences(&session.id, &mut messages);
+            messages
         };
         let messages = paginate_mobile_messages(messages, after_seq, limit);
         let _ = request.respond(bridge_json_response(&messages, 200));
@@ -2862,7 +3334,8 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
                 state
                     .dictation_last_seq
                     .insert(session_id.to_string(), chunk.seq);
-                let _ = persist_mobile_sync_state(&state);
+                state.persist_dirty = true;
+                persist_mobile_sync_state_now(&mut state);
             }
             remember_mobile_message_accepted(session_id, &receipt_id);
             let _ = request.respond(bridge_json_response(
@@ -4232,7 +4705,7 @@ fn error_text_from_value(value: &Value) -> Option<String> {
 /// Ping Island uses the same rollout families (`agent_message`, `response_item`,
 /// tool calls and reasoning), so keeping this extraction event-oriented avoids
 /// exposing raw JSON in the desktop widget.
-fn output_text_from_event(value: &Value, payload: &Value) -> Option<String> {
+fn full_output_text_from_event(value: &Value, payload: &Value) -> Option<String> {
     let kind = event_type(value, payload);
     let role = payload
         .get("role")
@@ -4337,7 +4810,12 @@ fn output_text_from_event(value: &Value, payload: &Value) -> Option<String> {
             .map(text_from_value)
             .unwrap_or_default();
     }
-    compact_output_line(&text)
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn output_text_from_event(value: &Value, payload: &Value) -> Option<String> {
+    full_output_text_from_event(value, payload).and_then(|text| compact_output_line(&text))
 }
 
 fn compact_output_line(text: &str) -> Option<String> {
@@ -6189,24 +6667,57 @@ fn list_sessions_sync() -> Result<Vec<SessionRecord>, String> {
 fn list_mobile_sessions_cached(max_age_ms: i64) -> Result<Vec<SessionRecord>, String> {
     let now = now_ms();
     let store = MOBILE_SESSION_CACHE.get_or_init(|| Mutex::new(RuntimeSessionCache::default()));
-    let mut cache = store
-        .lock()
-        .map_err(|_| "mobile session cache is unavailable".to_string())?;
-    if cache.refreshed_at_ms > 0 && now.saturating_sub(cache.refreshed_at_ms) <= max_age_ms.max(0) {
-        return Ok(cache.sessions.clone());
-    }
-    let sessions = list_sessions_sync()?;
-    cache.sessions = sessions.clone();
-    cache.refreshed_at_ms = now_ms();
-    Ok(sessions)
-}
+    let stale_sessions = {
+        let mut cache = store
+            .lock()
+            .map_err(|_| "mobile session cache is unavailable".to_string())?;
+        if cache.refreshed_at_ms > 0
+            && now.saturating_sub(cache.refreshed_at_ms) <= max_age_ms.max(0)
+        {
+            return Ok(cache.sessions.clone());
+        }
+        // Never hold the cache mutex while doing the SQLite/process/archive
+        // scan. A long-poll request must not block a second request (or a
+        // command) behind the scan. While one refresh is in flight, serve the
+        // last snapshot and let that refresh publish the newer value.
+        if cache.refreshing {
+            return Ok(cache.sessions.clone());
+        }
+        cache.refreshing = true;
+        (!cache.sessions.is_empty()).then(|| cache.sessions.clone())
+    };
 
-fn remember_mobile_sessions(sessions: &[SessionRecord]) {
-    let store = MOBILE_SESSION_CACHE.get_or_init(|| Mutex::new(RuntimeSessionCache::default()));
-    if let Ok(mut cache) = store.lock() {
-        cache.sessions = sessions.to_vec();
-        cache.refreshed_at_ms = now_ms();
+    if let Some(stale_sessions) = stale_sessions {
+        // File modification checks below do not need a fresh SQLite/process
+        // scan to detect appended rollout data. Refresh the heavier session
+        // metadata asynchronously so an expired cache never stalls a mobile
+        // long-poll or command request.
+        thread::spawn(|| {
+            let result = list_sessions_sync();
+            let store =
+                MOBILE_SESSION_CACHE.get_or_init(|| Mutex::new(RuntimeSessionCache::default()));
+            if let Ok(mut cache) = store.lock() {
+                cache.refreshing = false;
+                if let Ok(sessions) = result {
+                    cache.sessions = sessions;
+                    cache.refreshed_at_ms = now_ms();
+                }
+            }
+        });
+        return Ok(stale_sessions);
     }
+
+    // The first request has no stale snapshot to serve, so populate it once
+    // synchronously. Every subsequent expiry follows the non-blocking path.
+    let result = list_sessions_sync();
+    if let Ok(mut cache) = store.lock() {
+        cache.refreshing = false;
+        if let Ok(ref sessions) = result {
+            cache.sessions = sessions.clone();
+            cache.refreshed_at_ms = now_ms();
+        }
+    }
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -6310,7 +6821,50 @@ fn find_session(session_id: &str) -> Option<SessionRecord> {
     list_sessions_sync()
         .ok()?
         .into_iter()
-        .find(|session| session.id == session_id)
+        .find(|session| session.id == session_id.trim())
+}
+
+fn find_mobile_session(session_id: &str) -> Option<SessionRecord> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    // Mobile reads are frequent and the cache is refreshed by the sync
+    // change detector. Avoid a full process/archive scan for every timeline
+    // request; fall back to the authoritative scan only when the cache has
+    // not been populated yet.
+    if let Ok(sessions) = list_mobile_sessions_cached(MOBILE_SESSION_CACHE_TTL_MS) {
+        if let Some(session) = sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+        {
+            return Some(session);
+        }
+    }
+    find_session(session_id)
+}
+
+/// A freshly-created rollout can be visible to the runtime poll a few hundred
+/// milliseconds before the SQLite/index scan catches up. Commands initiated by
+/// the floating widget get a bounded retry so that transient index lag does
+/// not look like a no-op to the user.
+fn find_session_for_command(session_id: &str) -> Result<SessionRecord, String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Err("session id is empty".to_string());
+    }
+    for (attempt, delay_ms) in [0_u64, 80, 180].into_iter().enumerate() {
+        if delay_ms > 0 {
+            thread::sleep(Duration::from_millis(delay_ms));
+        }
+        if let Some(session) = find_session(session_id) {
+            return Ok(session);
+        }
+        if attempt == 2 {
+            break;
+        }
+    }
+    Err(format!("session not found: {session_id}"))
 }
 
 fn rollout_contains(path: &str, needle: &str) -> bool {
@@ -6908,6 +7462,15 @@ fn app_server_queue_message(
             "clientUserMessageId": client_message_id.clone(),
         }),
     )?;
+    validate_app_server_queue_receipt(&result, &session.id, &client_message_id)?;
+    Ok(true)
+}
+
+fn validate_app_server_queue_receipt(
+    result: &Value,
+    session_id: &str,
+    client_message_id: &str,
+) -> Result<String, String> {
     let queued = result
         .get("queuedSubmission")
         .ok_or_else(|| "thread/queue/add returned no queued submission".to_string())?;
@@ -6916,6 +7479,20 @@ fn app_server_queue_message(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "thread/queue/add returned no submission id".to_string())?;
+    // Current Codex responses nest the receipt under queuedSubmission. Accept
+    // an optional threadId at either level for forward compatibility, but if a
+    // server supplies it, it must identify the exact requested thread.
+    let response_thread_id = queued
+        .get("threadId")
+        .or_else(|| result.get("threadId"))
+        .and_then(Value::as_str);
+    if let Some(response_thread_id) = response_thread_id {
+        if response_thread_id != session_id {
+            return Err(format!(
+                "thread/queue/add acknowledged a different thread: {response_thread_id}"
+            ));
+        }
+    }
     let response_client_id = queued
         .get("clientUserMessageId")
         .and_then(Value::as_str)
@@ -6925,7 +7502,7 @@ fn app_server_queue_message(
             "thread/queue/add acknowledged a different message: {submission_id}"
         ));
     }
-    Ok(true)
+    Ok(submission_id.to_string())
 }
 
 fn queue_codex_message(session: &SessionRecord, input: &str) -> bool {
@@ -7343,8 +7920,7 @@ async fn create_codex_session(
 
 #[tauri::command(rename_all = "camelCase")]
 fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Result<bool, String> {
-    let session =
-        find_session(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
+    let session = find_session_for_command(&session_id)?;
     let remote = app_server_endpoint(&state);
     if remote.is_some()
         && app_server_request(
@@ -7384,26 +7960,33 @@ fn send_session_input(
     // External terminals do not expose stdin to Atlas. `codex queue` is the
     // supported cross-process path. A manual click can additionally focus the
     // exact terminal window and inject the prompt if queue is unavailable.
-    let Some(session) = find_session(&session_id) else {
-        return Ok(false);
-    };
-    if queue_codex_message(&session, &input) {
-        return Ok(true);
+    let session = find_session_for_command(&session_id)?;
+    let mut delivery_errors = Vec::new();
+    match queue_codex_message_with_attachments_detailed(&session, &input, &[]) {
+        Ok(()) => return Ok(true),
+        Err(error) => delivery_errors.push(format!("codex queue: {error}")),
     }
-    if app_server_queue_message(&state, &session, &input, &[]).unwrap_or(false) {
-        return Ok(true);
+    match app_server_queue_message(&state, &session, &input, &[]) {
+        Ok(true) => return Ok(true),
+        Ok(false) => {
+            delivery_errors.push("app-server queue did not accept the message".to_string())
+        }
+        Err(error) => delivery_errors.push(format!("app-server queue: {error}")),
     }
-    if app_server_send_message(&state, &session, &input, "queue", &[]).unwrap_or(false) {
-        return Ok(true);
+    match app_server_send_message(&state, &session, &input, "queue", &[]) {
+        Ok(true) => return Ok(true),
+        Ok(false) => delivery_errors.push("app-server send did not accept the message".to_string()),
+        Err(error) => delivery_errors.push(format!("app-server send: {error}")),
     }
     // `codex queue` is deliberately allowed for an exited thread too. This
     // persists the prompt without opening or focusing a terminal; the user
     // can activate the queued thread separately when needed.
     if focus_terminal.unwrap_or(false) || is_continue_prompt(&input) {
         return send_text_to_terminal(&session, &input, focus_terminal.unwrap_or(false))
-            .map(|_| true);
+            .map(|_| true)
+            .map_err(|error| format!("{}; terminal: {error}", delivery_errors.join("; ")));
     }
-    Ok(false)
+    Err(delivery_errors.join("; "))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -7411,9 +7994,7 @@ fn send_floating_message(
     state: State<'_, AppState>,
     request: FloatingMessageRequest,
 ) -> Result<bool, String> {
-    let Some(session) = find_session(&request.session_id) else {
-        return Ok(false);
-    };
+    let session = find_session_for_command(&request.session_id)?;
     let mut input = request.input.trim().to_string();
     if input.chars().count() > 32_000 {
         return Err("floating message is too long (maximum 32000 characters)".to_string());
@@ -7494,8 +8075,7 @@ fn send_terminal_input(
     input: String,
     focus_terminal: Option<bool>,
 ) -> Result<bool, String> {
-    let session =
-        find_session(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
+    let session = find_session_for_command(&session_id)?;
     // A freshly focused Windows Terminal can be visible before the process
     // tree poll catches up. For this manual, window-visible action, the
     // matched terminal itself is the authoritative liveness signal.
@@ -11074,6 +11654,37 @@ mod runtime_probe_tests {
     }
 
     #[test]
+    fn app_server_queue_receipt_requires_matching_client_and_optional_thread() {
+        let session_id = "01a04c76-7180-7e93-aaa8-cceb7cc3ad40";
+        let client_id = "atlas-queue-test";
+        let valid = serde_json::json!({
+            "queuedSubmission": {
+                "id": "01a05cb1-acc2-7783-a6c2-6007ccf4ed27",
+                "clientUserMessageId": client_id,
+                "threadId": session_id
+            }
+        });
+        assert!(validate_app_server_queue_receipt(&valid, session_id, client_id).is_ok());
+
+        let wrong_client = serde_json::json!({
+            "queuedSubmission": {
+                "id": "01a05cb1-acc2-7783-a6c2-6007ccf4ed27",
+                "clientUserMessageId": "another-message"
+            }
+        });
+        assert!(validate_app_server_queue_receipt(&wrong_client, session_id, client_id).is_err());
+
+        let wrong_thread = serde_json::json!({
+            "threadId": "01a04645-5ce2-7e92-a076-cf4302ed2492",
+            "queuedSubmission": {
+                "id": "01a05cb1-acc2-7783-a6c2-6007ccf4ed27",
+                "clientUserMessageId": client_id
+            }
+        });
+        assert!(validate_app_server_queue_receipt(&wrong_thread, session_id, client_id).is_err());
+    }
+
+    #[test]
     fn mobile_message_receipts_require_a_bounded_non_empty_client_id() {
         assert_eq!(
             mobile_message_receipt_key("session-1", " msg-1 "),
@@ -11144,6 +11755,162 @@ mod runtime_probe_tests {
             after.iter().map(|message| message.seq).collect::<Vec<_>>(),
             vec![3, 4]
         );
+    }
+
+    #[test]
+    fn mobile_conversation_keeps_the_complete_assistant_message() {
+        let body = format!("{}\n{}", "a".repeat(3_000), "b".repeat(3_000));
+        let value = serde_json::json!({
+            "type": "agent_message",
+            "payload": {
+                "role": "assistant",
+                "message": body,
+            }
+        });
+        let payload = value.get("payload").expect("payload");
+        let full = full_output_text_from_event(&value, payload).expect("full output");
+        let compact = output_text_from_event(&value, payload).expect("compact output");
+        assert_eq!(full.chars().count(), 6_001);
+        assert_eq!(compact.chars().count(), 320);
+        assert!(full.contains('\n'));
+    }
+
+    #[test]
+    fn mobile_event_identity_is_stable_when_tail_window_moves() {
+        let value = serde_json::json!({
+            "type": "response_item",
+            "payload": {"role": "assistant", "text": "same event"}
+        });
+        let payload = value.get("payload").expect("payload");
+        let first = mobile_event_identity(payload, payload, 1_700_000_000_000, "same line");
+        let second = mobile_event_identity(payload, payload, 1_700_000_000_000, "same line");
+        assert_eq!(first, second);
+        assert!(!first.contains("same line"));
+    }
+
+    #[test]
+    fn mobile_history_baseline_only_sequences_future_messages() {
+        let message = |id: &str, timestamp_ms: i64| MobileSessionMessage {
+            id: id.to_string(),
+            role: "assistant".to_string(),
+            text: id.to_string(),
+            timestamp_ms,
+            kind: "message".to_string(),
+            seq: 0,
+            seq_start: 0,
+            seq_end: 0,
+            source_seq_ranges: Vec::new(),
+            turn_id: None,
+            call_id: None,
+            tool_status: None,
+            tool_detail: None,
+            approval_id: None,
+            approval_options: Vec::new(),
+        };
+        let mut state = MobileSyncState {
+            next_seq: 8,
+            ..MobileSyncState::default()
+        };
+        let mut history = vec![message("old-1", 1), message("old-2", 2)];
+
+        assert!(apply_mobile_message_sequences(
+            &mut state,
+            "session-1",
+            &mut history,
+            true,
+        ));
+        assert_eq!(state.next_seq, 8);
+        assert_eq!(
+            history.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            vec![8, 8]
+        );
+
+        let mut next_window = vec![
+            message("old-1", 1),
+            message("old-2", 2),
+            message("new-1", 3),
+        ];
+        assert!(apply_mobile_message_sequences(
+            &mut state,
+            "session-1",
+            &mut next_window,
+            false,
+        ));
+        assert_eq!(state.next_seq, 9);
+        assert_eq!(
+            next_window.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            vec![8, 8, 9]
+        );
+    }
+
+    #[test]
+    fn mobile_balance_only_marks_a_successful_zero_as_insufficient() {
+        let record = CcSwitchProviderBalance {
+            id: "provider-1".to_string(),
+            name: "Current relay".to_string(),
+            app_type: "codex".to_string(),
+            model: None,
+            base_url: "https://example.test".to_string(),
+            success: true,
+            remaining: Some(0.0),
+            total: None,
+            unit: Some("USD".to_string()),
+            provider: None,
+            error: None,
+        };
+        let snapshot = mobile_balance_from_result(
+            &MobileBalanceSnapshot::default(),
+            Ok(vec![record]),
+            1_700_000_000_000,
+        );
+        assert!(snapshot.success);
+        assert_eq!(snapshot.status, "insufficient");
+        assert_eq!(snapshot.remaining, Some(0.0));
+        assert_eq!(snapshot.provider, "Current relay");
+    }
+
+    #[test]
+    fn mobile_balance_query_failure_keeps_only_the_same_providers_last_value() {
+        let previous = MobileBalanceSnapshot {
+            success: true,
+            remaining: Some(10.0),
+            unit: "USD".to_string(),
+            provider: "Current relay".to_string(),
+            status: "available".to_string(),
+            checked_at_ms: 1_700_000_000_000,
+            stale: false,
+            error: None,
+        };
+        let failed = |name: &str| CcSwitchProviderBalance {
+            id: "provider-1".to_string(),
+            name: name.to_string(),
+            app_type: "codex".to_string(),
+            model: None,
+            base_url: "https://example.test".to_string(),
+            success: false,
+            remaining: None,
+            total: None,
+            unit: None,
+            provider: None,
+            error: Some("request timed out".to_string()),
+        };
+
+        let same = mobile_balance_from_result(
+            &previous,
+            Ok(vec![failed("Current relay")]),
+            1_700_000_020_000,
+        );
+        assert_eq!(same.status, "stale");
+        assert_eq!(same.remaining, Some(10.0));
+        assert!(!same.success);
+
+        let changed = mobile_balance_from_result(
+            &previous,
+            Ok(vec![failed("Different relay")]),
+            1_700_000_020_000,
+        );
+        assert_eq!(changed.status, "error");
+        assert_eq!(changed.remaining, None);
     }
 
     #[test]
