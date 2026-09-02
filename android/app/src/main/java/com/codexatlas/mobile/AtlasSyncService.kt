@@ -24,6 +24,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Keeps the authenticated bridge alive when the Android activity is backgrounded. */
 class AtlasSyncService : Service() {
@@ -37,7 +41,10 @@ class AtlasSyncService : Service() {
         },
     )
     private var syncWorker: Job? = null
+    private var pushWorker: Job? = null
     private var queueWorker: Job? = null
+    private val syncMutex = Mutex()
+    private val pushRefreshPending = AtomicBoolean(false)
     private var cursorMs = 0L
     private var syncEpoch = ""
     private var afterSeq = 0L
@@ -63,6 +70,9 @@ class AtlasSyncService : Service() {
         cursorMs = maxOf(cursorMs, BridgePreferences.syncCursor(this))
         syncEpoch = BridgePreferences.syncEpoch(this)
         afterSeq = maxOf(afterSeq, BridgePreferences.syncSeq(this))
+        if (pushWorker?.isActive != true) {
+            pushWorker = serviceScope.launch { runPushLoop() }
+        }
         if (activityVisible) {
             syncWorker?.cancel()
             syncWorker = null
@@ -78,6 +88,7 @@ class AtlasSyncService : Service() {
 
     override fun onDestroy() {
         syncWorker?.cancel()
+        pushWorker?.cancel()
         queueWorker?.cancel()
         serviceScope.cancel()
         super.onDestroy()
@@ -97,6 +108,7 @@ class AtlasSyncService : Service() {
         // foreground service. Current releases use remoteMessaging, but keep
         // this guard for upgrades from an older dataSync service instance.
         syncWorker?.cancel()
+        pushWorker?.cancel()
         queueWorker?.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
@@ -176,38 +188,14 @@ class AtlasSyncService : Service() {
             }
 
             val route = ConnectionRoute.fromKey(BridgePreferences.connectionRoute(this))
-            val primary = primaryBridgeUrl(details, route)
-            val fallback = fallbackBridgeUrl(details, route)
-            if (primary.isBlank()) {
+            if (primaryBridgeUrl(details, route).isBlank()) {
                 updateNotification("Codex Atlas", "没有可用通道")
                 delay(2_500)
                 continue
             }
             try {
-                val sync = AtlasBridgeClient(primary, token).syncAny(
-                    cursorMs,
-                    fallback,
-                    // Keep the background companion responsive while still
-                    // using long-polling to avoid a busy request loop.
-                    2_000,
-                    syncEpoch,
-                    afterSeq,
-                    includeEvents = false,
-                )
+                val sync = syncBridge(details, token, route, 2_000).getOrThrow()
                 currentCoroutineContext().ensureActive()
-                cursorMs = maxOf(cursorMs, sync.cursorMs)
-                if (sync.syncEpoch.isNotBlank()) {
-                    afterSeq = if (sync.reset || sync.gap || (syncEpoch.isNotBlank() && syncEpoch != sync.syncEpoch)) {
-                        sync.nextSeq
-                    } else {
-                        maxOf(afterSeq, sync.nextSeq)
-                    }
-                    syncEpoch = sync.syncEpoch
-                    BridgePreferences.saveSyncPosition(this, syncEpoch, afterSeq, cursorMs)
-                } else {
-                    BridgePreferences.saveSyncCursor(this, cursorMs)
-                }
-                sync.snapshot?.let { BridgePreferences.saveCachedSnapshot(this, it) }
                 AtlasWidgetReceiver.requestRefresh(this)
                 sendBroadcast(Intent(ACTION_UPDATED).setPackage(packageName))
                 updateNotification(
@@ -275,6 +263,7 @@ class AtlasSyncService : Service() {
         private const val CHANNEL_ID = "atlas_connection"
         private const val NOTIFICATION_ID = 8101
         const val ACTION_UPDATED = "com.codexatlas.mobile.action.SYNC_UPDATED"
+        const val ACTION_PUSH = "com.codexatlas.mobile.action.SYNC_PUSH"
         @Volatile private var activityVisible = false
 
         fun start(context: Context) {
@@ -285,6 +274,115 @@ class AtlasSyncService : Service() {
         fun setActivityVisible(context: Context, visible: Boolean) {
             activityVisible = visible
             if (BridgePreferences.token(context).isNotBlank()) start(context)
+        }
+    }
+
+    /**
+     * Performs one sequence-aware sync while serializing cursor updates with
+     * push-triggered refreshes. The SSE payload is only a wake-up signal; this
+     * request remains the durable source of truth after reconnects or drops.
+     */
+    private suspend fun syncBridge(
+        details: PairingDetails,
+        token: String,
+        route: ConnectionRoute,
+        waitMs: Long,
+    ): Result<AtlasSyncResponse> = syncMutex.withLock {
+        val primary = primaryBridgeUrl(details, route)
+        val fallback = fallbackBridgeUrl(details, route)
+        if (primary.isBlank()) {
+            return@withLock Result.failure(IllegalStateException("No server route is available"))
+        }
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                AtlasBridgeClient(primary, token).syncAny(
+                    cursorMs,
+                    fallback,
+                    waitMs,
+                    syncEpoch,
+                    afterSeq,
+                    includeEvents = false,
+                )
+            }
+        }
+        result.onSuccess { sync ->
+            cursorMs = maxOf(cursorMs, sync.cursorMs)
+            if (sync.syncEpoch.isNotBlank()) {
+                afterSeq = if (sync.reset || sync.gap || (syncEpoch.isNotBlank() && syncEpoch != sync.syncEpoch)) {
+                    sync.nextSeq
+                } else {
+                    maxOf(afterSeq, sync.nextSeq)
+                }
+                syncEpoch = sync.syncEpoch
+                BridgePreferences.saveSyncPosition(this, syncEpoch, afterSeq, cursorMs)
+            } else {
+                BridgePreferences.saveSyncCursor(this, cursorMs)
+            }
+            sync.snapshot?.let { BridgePreferences.saveCachedSnapshot(this, it) }
+        }
+        result
+    }
+
+    /** Maintains the push connection and reconnects with bounded backoff. */
+    private suspend fun runPushLoop() {
+        var retryDelay = 500L
+        while (currentCoroutineContext().isActive) {
+            val pairing = MainActivity.storedPairing(this)
+            val details = MainActivity.parsePairing(pairing)
+            val token = BridgePreferences.token(this).trim()
+            if (details == null || token.isBlank()) {
+                delay(2_500)
+                continue
+            }
+            val route = ConnectionRoute.fromKey(BridgePreferences.connectionRoute(this))
+            val primary = primaryBridgeUrl(details, route)
+            val fallback = fallbackBridgeUrl(details, route)
+            if (primary.isBlank()) {
+                delay(2_500)
+                continue
+            }
+            try {
+                AtlasBridgeClient(primary, token).streamEventsAny(fallback) { payload ->
+                    // The initial `ready` frame confirms the stream but does
+                    // not represent a Codex update.
+                    if (payload.contains("\"type\":\"sync\"")) {
+                        schedulePushRefresh(details, token, route)
+                    }
+                }
+                retryDelay = 500L
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                android.util.Log.w("AtlasSyncService", "push stream unavailable", error)
+            }
+            delay(retryDelay)
+            retryDelay = (retryDelay * 2).coerceAtMost(8_000L)
+        }
+    }
+
+    private fun schedulePushRefresh(
+        details: PairingDetails,
+        token: String,
+        route: ConnectionRoute,
+    ) {
+        if (!pushRefreshPending.compareAndSet(false, true)) return
+        serviceScope.launch {
+            try {
+                // Coalesce token-level events into one immediate sync request.
+                delay(50)
+                syncBridge(details, token, route, 0)
+                    .onSuccess {
+                        AtlasWidgetReceiver.requestRefresh(this@AtlasSyncService)
+                        sendBroadcast(Intent(ACTION_PUSH).setPackage(packageName))
+                        sendBroadcast(Intent(ACTION_UPDATED).setPackage(packageName))
+                    }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                android.util.Log.w("AtlasSyncService", "push refresh failed", error)
+            } finally {
+                pushRefreshPending.set(false)
+            }
         }
     }
 }

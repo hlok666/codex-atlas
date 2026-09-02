@@ -5,13 +5,22 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 private object BridgeTransport {
     val http: OkHttpClient = OkHttpClient.Builder()
@@ -165,6 +174,80 @@ class AtlasBridgeClient(
             }
         }
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
+    /**
+     * Keeps a lightweight server-sent event stream open. The desktop sends a
+     * wake-only event whenever Codex changes; callers immediately use their
+     * normal sequence-aware sync request to retrieve the durable payload.
+     */
+    suspend fun streamEventsAny(
+        fallbackUrl: String = "",
+        onEvent: (String) -> Unit,
+    ) {
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            currentCoroutineContext().ensureActive()
+            try {
+                streamEvents(candidate, onEvent)
+                BridgeTransport.succeeded(candidate)
+                return
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
+    private suspend fun streamEvents(candidate: String, onEvent: (String) -> Unit) {
+        suspendCancellableCoroutine<Unit> { continuation ->
+            val request = Request.Builder()
+                .url(candidate + "/v1/events")
+                .header("Authorization", "Bearer $token")
+                .header("Accept", "text/event-stream")
+                .get()
+                .build()
+            val call = http.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, error: java.io.IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        response.use {
+                            if (!it.isSuccessful) {
+                                error("Atlas Bridge returned HTTP ${it.code}")
+                            }
+                            val body = it.body ?: error("Atlas Bridge returned an empty event stream")
+                            val reader = body.charStream().buffered()
+                            val data = StringBuilder()
+                            while (true) {
+                                val line = reader.readLine() ?: break
+                                when {
+                                    line.startsWith("data:") -> {
+                                        data.append(line.substring(5).trimStart()).append('\n')
+                                    }
+                                    line.isEmpty() && data.isNotEmpty() -> {
+                                        onEvent(data.toString().trim())
+                                        data.clear()
+                                    }
+                                }
+                            }
+                            if (data.isNotEmpty()) onEvent(data.toString().trim())
+                        }
+                        if (continuation.isActive) continuation.resume(Unit)
+                    } catch (error: Throwable) {
+                        if (continuation.isActive) continuation.resumeWithException(error)
+                    }
+                }
+            })
+        }
     }
 
     fun listSessionsAny(fallbackUrl: String = ""): List<AtlasSession> {

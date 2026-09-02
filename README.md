@@ -83,6 +83,7 @@ Bridge API 包括：
 
 ```text
 GET  /v1/status
+GET  /v1/events                         (authenticated SSE push stream)
 GET  /v1/sessions
 GET  /v1/sessions/{id}/messages
 POST /v1/sessions
@@ -93,11 +94,13 @@ POST /v1/paseo/import-all
 GET  /v1/sync?since=<cursorMs>&wait=<milliseconds>
 ```
 
+手机连接后会保持 `/v1/events` 长连接。桌面端检测到 Codex 输出、状态或余额变化时主动发送唤醒事件，Android 服务立即请求 `/v1/sync` 获取增量；SSE 断开时自动回到带游标的增量同步，不会丢消息。局域网和反向 SSH 服务器通道都支持这条推送链路。
+
 请只在可信网络开放 `15730`，并把 Bridge token 当作密码保管。
 
 ## 发布
 
-桌面端版本 `0.1.10` 在以下文件中保持一致：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json`。Android 当前为 `0.1.7`（versionCode `8`）。发布前执行：
+桌面端版本在以下文件中保持一致：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json`。Android 的 `versionName` 和 `versionCode` 也必须同步递增。发布前执行：
 
 ```bash
 npm run build

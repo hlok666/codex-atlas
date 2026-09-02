@@ -32,7 +32,11 @@ authenticated POST requests:
 - `POST /v1/sessions/{id}/input` with `{ "text": "继续" }`
 
 The foreground sync service keeps the selected profile live while the app is in
-the background and refreshes every installed card as timeline events arrive.
+the background. It holds an authenticated `/v1/events` SSE stream and asks for
+the sequence-aware `/v1/sync` delta as soon as the desktop publishes a change;
+the short long-poll remains as a recovery fallback when a proxy or tunnel does
+not support a persistent stream. Every installed card refreshes from the same
+cached snapshot.
 
 The desktop app remains the authority for Codex process discovery, PowerShell
 focus, `codex resume`, and terminal input. The Android client is deliberately a

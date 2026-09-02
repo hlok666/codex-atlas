@@ -2,9 +2,11 @@ package com.codexatlas.mobile
 
 import android.Manifest
 import android.appwidget.AppWidgetManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -542,11 +544,33 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var pendingVoiceMode by remember { mutableStateOf(false) }
     var voiceSnapshot by remember { mutableStateOf(VoiceInputSnapshot()) }
     var pendingVoiceSend by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pushPulse by remember { mutableStateOf(0L) }
     var readRepliesAloud by remember { mutableStateOf(BridgePreferences.readRepliesAloud(context)) }
     val voiceController = remember(context, zh) {
         VoiceInputController(context, zh) { next -> voiceSnapshot = next }
     }
     val speechOutput = remember(context, zh) { SpeechOutputController(context, zh) }
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == AtlasSyncService.ACTION_PUSH) pushPulse += 1L
+            }
+        }
+        val filter = IntentFilter(AtlasSyncService.ACTION_PUSH)
+        var registered = false
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                context.registerReceiver(receiver, filter)
+            }
+            registered = true
+        }
+        onDispose {
+            if (registered) runCatching { context.unregisterReceiver(receiver) }
+        }
+    }
     DisposableEffect(voiceController) {
         voiceController.setContinuousTranscriptListener { text ->
             pendingVoiceSend = pendingVoiceSend + text
@@ -768,10 +792,11 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         }
     }
 
-    LaunchedEffect(pairing, selectedSessionId, voiceSnapshot.active, readRepliesAloud, connectionRoute) {
+    LaunchedEffect(pairing, selectedSessionId, voiceSnapshot.active, readRepliesAloud, connectionRoute, pushPulse) {
         val details = MainActivity.parsePairing(pairing) ?: return@LaunchedEffect
         val selectionAtStart = selectedSessionId
         var reconnectAttempts = 0
+        var firstSync = true
         while (true) {
             if (state !is ConnectionState.Connected && state !is ConnectionState.Reconnecting) {
                 delay(200)
@@ -788,16 +813,17 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     AtlasBridgeClient(primary, details.token).syncAny(
                         syncCursorMs,
                         fallback,
-                        // A short long-poll window keeps streamed replies
-                        // visible within a couple of seconds on both LAN and
-                        // the persistent server route.
-                        2_000,
+                        // Push wake-ups skip the fallback wait and fetch the
+                        // delta immediately. Later iterations retain a short
+                        // long-poll for reconnects and older clients.
+                        if (firstSync && pushPulse > 0L) 0 else 2_000,
                         syncEpoch,
                         syncAfterSeq,
                         selectionAtStart,
                     )
                 }
             }
+            firstSync = false
             val fresh = syncResult.getOrNull()
             if (fresh != null) {
                 reconnectAttempts = 0
