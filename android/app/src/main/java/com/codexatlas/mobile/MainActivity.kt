@@ -55,10 +55,14 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Typography
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -87,6 +91,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -525,6 +530,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var messageBusy by remember { mutableStateOf(false) }
     var messageError by remember { mutableStateOf<String?>(null) }
     var createVisible by remember { mutableStateOf(false) }
+    var conversationMenuExpanded by remember { mutableStateOf(false) }
     var createCwd by remember { mutableStateOf("") }
     var createPrompt by remember { mutableStateOf("") }
     var createBusy by remember { mutableStateOf(false) }
@@ -1293,28 +1299,69 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(Color.White)
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        TextButton(onClick = { mobilePage = MobilePage.Home }) {
+                        IconButton(onClick = { mobilePage = MobilePage.Home }) {
                             Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null, modifier = Modifier.size(20.dp))
                         }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(conversationTitle, maxLines = 1, color = Color(0xFF243025), fontWeight = FontWeight.SemiBold)
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(0.dp),
+                        ) {
+                            Text(
+                                conversationTitle,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = Color(0xFF243025),
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
                             Text(
                                 listOf(conversationFolder, conversationModel)
                                     .filter { it.isNotBlank() }
                                     .joinToString(" · "),
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 color = Color(0xFF7A867B),
-                                style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.labelSmall,
                             )
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (queuedMessageCount > 0) {
-                                TextButton(onClick = { queueVisible = !queueVisible }) {
-                                    Text(if (zh) "队列 $queuedMessageCount" else "Queue $queuedMessageCount", color = Color(0xFFB27A25))
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box {
+                                IconButton(onClick = { conversationMenuExpanded = true }) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = if (zh) "更多操作" else "More actions", modifier = Modifier.size(20.dp))
+                                }
+                                DropdownMenu(
+                                    expanded = conversationMenuExpanded,
+                                    onDismissRequest = { conversationMenuExpanded = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (zh) "语音输入" else "Dictate") },
+                                        onClick = {
+                                            conversationMenuExpanded = false
+                                            if (!messageBusy && !voiceSnapshot.active) beginVoiceInput(continuous = false)
+                                        },
+                                        enabled = !messageBusy && !voiceSnapshot.active,
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(if (zh) "连续输入" else "Voice mode") },
+                                        onClick = {
+                                            conversationMenuExpanded = false
+                                            if (!messageBusy && !voiceSnapshot.active) beginVoiceInput(continuous = true)
+                                        },
+                                        enabled = !messageBusy && !voiceSnapshot.active,
+                                    )
+                                    if (queuedMessageCount > 0) {
+                                        DropdownMenuItem(
+                                            text = { Text(if (zh) "发送队列 $queuedMessageCount" else "Queue $queuedMessageCount") },
+                                            onClick = {
+                                                conversationMenuExpanded = false
+                                                queueVisible = !queueVisible
+                                            },
+                                        )
+                                    }
                                 }
                             }
                             ConnectionStatePill(selectedSession?.liveState ?: snapshot!!.state, zh)
@@ -1355,7 +1402,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     )
                 }
                 if (mobilePage == MobilePage.Conversation) {
-                Column(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (selectedSession?.requiresAttention == true) {
                             ApprovalActions(
                                 chinese = zh,
@@ -1463,36 +1510,41 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             }
                         }
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
                             OutlinedTextField(
                                 value = message,
                                 onValueChange = { message = it },
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 104.dp),
                                 placeholder = { Text(if (zh) "输入消息" else "Write a message") },
-                                minLines = 2,
-                                maxLines = 5,
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                Button(onClick = { sendToConversation(message) }, enabled = message.isNotBlank() && !messageBusy, modifier = Modifier.weight(1f)) {
-                                    if (messageBusy) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
-                                    else {
-                                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        Spacer(Modifier.size(6.dp))
-                                        Text(if (zh) "发送" else "Send")
+                                minLines = 1,
+                                maxLines = 3,
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = { sendToConversation(message) },
+                                        enabled = message.isNotBlank() && !messageBusy,
+                                    ) {
+                                        if (messageBusy) {
+                                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                        } else {
+                                            Icon(
+                                                Icons.AutoMirrored.Filled.Send,
+                                                contentDescription = if (zh) "发送" else "Send",
+                                                modifier = Modifier.size(19.dp),
+                                            )
+                                        }
                                     }
-                                }
-                                OutlinedButton(onClick = { createVisible = !createVisible }, modifier = Modifier.weight(1f)) {
-                                    Text(if (zh) "新建会话" else "New session")
-                                }
-                            }
+                                },
+                            )
                             if (messageError != null) {
                                 Text(
                                     messageError.orEmpty(),
                                     color = MaterialTheme.colorScheme.error,
                                     style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -1518,28 +1570,6 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                         sendToConversation(composed)
                                     }
                                 },
-                            )
-                        }
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                OutlinedButton(
-                                    onClick = { beginVoiceInput(continuous = false) },
-                                    enabled = !messageBusy && !voiceSnapshot.active,
-                                    modifier = Modifier.weight(1f),
-                                ) { Text(if (zh) "语音输入" else "Dictate") }
-                                OutlinedButton(
-                                    onClick = { beginVoiceInput(continuous = true) },
-                                    enabled = !messageBusy && !voiceSnapshot.active,
-                                    modifier = Modifier.weight(1f),
-                                ) { Text(if (zh) "连续输入" else "Voice mode") }
-                            }
-                        }
-                        if (queuedMessageCount > 0) {
-                            Text(
-                                if (zh) "还有 $queuedMessageCount 条消息等待发送，连接恢复后会自动继续。"
-                                else "$queuedMessageCount message(s) queued and will send when the connection recovers.",
-                                color = Color(0xFFB27A25),
-                                style = MaterialTheme.typography.bodySmall,
                             )
                         }
                         if (audioPermissionDenied) {
