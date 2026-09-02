@@ -68,7 +68,7 @@ export type DesktopSessionRecord = {
   lastEventAtMs?: number
   lastError?: string
   failureKey?: string
-  /** Latest compact human-readable rollout/CLI output. */
+  /** Latest human-readable rollout/CLI output, including the complete reply when available. */
   lastOutput?: string
   /** True when this session belongs to the current foreground terminal window. */
   foreground?: boolean

@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.26 发布说明
+
+- 悬浮窗不再把模型回复限制为三行或 320 个字符，保留完整助手回复并支持在 CRT 内滚动查看。
+- 会话空闲时，完整回复会按可读段落分页循环播放；鼠标悬停或键盘聚焦时暂停，方便阅读，系统减少动态效果时保持静态。
+- 修复 AgentMessage 事件的正文提取，避免只显示“Tool completed: AgentMessage”而丢失实际回答。
+- 桌面端与 Android App 统一更新至 `0.1.26`，Android `versionCode` 更新为 `22`。
+
 # Codex Atlas 0.1.25 发布说明
 
 - 修复超大 Codex rollout 会话导致 App 对话消息延迟一至两分钟的问题：Bridge 改为受限尾部读取与文件追加增量解析，不再反复解码数百 MB 的完整 JSONL。

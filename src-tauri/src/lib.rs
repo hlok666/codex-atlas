@@ -4701,7 +4701,8 @@ fn error_text_from_value(value: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.chars().take(1200).collect())
 }
 
-/// Pull a compact, human-readable line from the Codex JSONL event stream.
+/// Pull human-readable output from the Codex JSONL event stream. Assistant
+/// replies keep their formatting; tool and status events remain compact.
 /// Ping Island uses the same rollout families (`agent_message`, `response_item`,
 /// tool calls and reasoning), so keeping this extraction event-oriented avoids
 /// exposing raw JSON in the desktop widget.
@@ -4726,13 +4727,13 @@ fn full_output_text_from_event(value: &Value, payload: &Value) -> Option<String>
             .or_else(|| value.get("prompt"))
             .or_else(|| value.get("question"))
             .or_else(|| value.get("message"))
-            .map(text_from_value)
+            .map(assistant_text_from_value)
             .unwrap_or_default();
         let options = payload
             .get("options")
             .or_else(|| payload.get("choices"))
             .or_else(|| value.get("options"))
-            .map(text_from_value)
+            .map(assistant_text_from_value)
             .unwrap_or_default();
         text = if options.trim().is_empty() {
             prompt
@@ -4750,6 +4751,15 @@ fn full_output_text_from_event(value: &Value, payload: &Value) -> Option<String>
         if text.trim().is_empty() {
             text = "Thinking…".to_string();
         }
+    } else if (kind == "item_started" || kind == "item_completed") && item_is_agent_message(payload)
+    {
+        let item = payload.get("item").unwrap_or(payload);
+        text = item
+            .get("content")
+            .or_else(|| item.get("message"))
+            .or_else(|| item.get("text"))
+            .map(assistant_text_from_value)
+            .unwrap_or_default();
     } else if kind == "item_started" || kind == "item_completed" {
         let item = payload.get("item").unwrap_or(payload);
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or("tool");
@@ -4807,7 +4817,7 @@ fn full_output_text_from_event(value: &Value, payload: &Value) -> Option<String>
             .get("message")
             .or_else(|| payload.get("content"))
             .or_else(|| payload.get("text"))
-            .map(text_from_value)
+            .map(assistant_text_from_value)
             .unwrap_or_default();
     }
     let text = text.trim();
@@ -4815,7 +4825,72 @@ fn full_output_text_from_event(value: &Value, payload: &Value) -> Option<String>
 }
 
 fn output_text_from_event(value: &Value, payload: &Value) -> Option<String> {
-    full_output_text_from_event(value, payload).and_then(|text| compact_output_line(&text))
+    let text = full_output_text_from_event(value, payload)?;
+    if is_assistant_output_event(value, payload) {
+        return preserve_assistant_output(&text);
+    }
+    compact_output_line(&text)
+}
+
+fn assistant_text_from_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(assistant_text_from_value)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(map) => {
+            if let Some(text) = map.get("text") {
+                return assistant_text_from_value(text);
+            }
+            if let Some(content) = map.get("content") {
+                return assistant_text_from_value(content);
+            }
+            map.values()
+                .map(assistant_text_from_value)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => String::new(),
+    }
+}
+
+fn item_is_agent_message(payload: &Value) -> bool {
+    payload
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .map(|item_type| {
+            let item_type = item_type.to_ascii_lowercase();
+            item_type == "agentmessage"
+                || item_type == "agent_message"
+                || item_type.contains("agentmessage")
+        })
+        .unwrap_or(false)
+}
+
+fn is_assistant_output_event(value: &Value, payload: &Value) -> bool {
+    let kind = event_type(value, payload);
+    let role = payload
+        .get("role")
+        .or_else(|| value.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    role == "assistant"
+        || kind.contains("agent_message")
+        || kind.contains("assistant")
+        || ((kind == "item_started" || kind == "item_completed") && item_is_agent_message(payload))
+}
+
+fn preserve_assistant_output(text: &str) -> Option<String> {
+    const MAX_ASSISTANT_OUTPUT_CHARS: usize = 64 * 1024;
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    (!trimmed.is_empty()).then(|| trimmed.chars().take(MAX_ASSISTANT_OUTPUT_CHARS).collect())
 }
 
 fn compact_output_line(text: &str) -> Option<String> {
@@ -5362,11 +5437,7 @@ fn parse_hook_state_file(path: &Path) -> Vec<HookObservation> {
             .map(text_from_value)
             .map(|text| {
                 let trimmed = text.trim();
-                if is_approval_prompt(trimmed) {
-                    trimmed.to_string()
-                } else {
-                    trimmed.chars().take(1200).collect::<String>()
-                }
+                preserve_assistant_output(trimmed).unwrap_or_default()
             })
             .filter(|text| !text.is_empty());
         let (state, requires_attention) = if !raw_state.trim().is_empty() {
@@ -11758,21 +11829,40 @@ mod runtime_probe_tests {
     }
 
     #[test]
-    fn mobile_conversation_keeps_the_complete_assistant_message() {
+    fn desktop_output_keeps_the_complete_assistant_message() {
         let body = format!("{}\n{}", "a".repeat(3_000), "b".repeat(3_000));
         let value = serde_json::json!({
             "type": "agent_message",
             "payload": {
                 "role": "assistant",
-                "message": body,
+                "message": body.clone(),
             }
         });
         let payload = value.get("payload").expect("payload");
         let full = full_output_text_from_event(&value, payload).expect("full output");
-        let compact = output_text_from_event(&value, payload).expect("compact output");
+        let output = output_text_from_event(&value, payload).expect("assistant output");
         assert_eq!(full.chars().count(), 6_001);
-        assert_eq!(compact.chars().count(), 320);
+        assert_eq!(output.chars().count(), 6_001);
+        assert_eq!(output, body);
         assert!(full.contains('\n'));
+    }
+
+    #[test]
+    fn nested_agent_message_is_not_misclassified_as_a_tool() {
+        let value = serde_json::json!({
+            "type": "item_completed",
+            "payload": {
+                "item": {
+                    "type": "agentMessage",
+                    "content": [{"type": "text", "text": "first line"}, {"text": "second line"}],
+                }
+            }
+        });
+        let payload = value.get("payload").expect("payload");
+        assert_eq!(
+            output_text_from_event(&value, payload).as_deref(),
+            Some("first line\nsecond line")
+        );
     }
 
     #[test]

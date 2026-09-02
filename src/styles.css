@@ -3079,6 +3079,52 @@ html.floating-window-transparent #root { background: transparent !important; }
 .brand-version { margin-left: 6px; color: var(--app-muted, #7b847e); font-size: .72em; font-weight: 560; letter-spacing: 0; }
 .desktop-tv-version { margin-left: 4px; color: #93a293; font: 500 .72em 'Cascadia Mono', 'SFMono-Regular', monospace; letter-spacing: 0; }
 
+/* Full assistant replies are readable in-place. Idle replies use discrete
+   pages so the complete response can loop without a clipped three-line
+   preview; hovering pauses the page timer for inspection. */
+.desktop-tv-output {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(170, 226, 174, .55) transparent;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: unset;
+}
+.desktop-tv-output::-webkit-scrollbar,
+.desktop-tv-output-page::-webkit-scrollbar { width: 6px; height: 6px; }
+.desktop-tv-output::-webkit-scrollbar-track,
+.desktop-tv-output-page::-webkit-scrollbar-track { background: transparent; }
+.desktop-tv-output::-webkit-scrollbar-thumb,
+.desktop-tv-output-page::-webkit-scrollbar-thumb { border-radius: 6px; background: rgba(170, 226, 174, .55); }
+.desktop-tv-output.is-carousel {
+  display: flex;
+  align-items: flex-start;
+  overflow: hidden;
+}
+.desktop-tv-output-page {
+  width: 100%;
+  max-height: 100%;
+  flex: 0 0 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  animation: desktop-tv-reply-in 280ms ease both;
+}
+@keyframes desktop-tv-reply-in {
+  from { opacity: .15; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .desktop-tv-output-page { animation: none; }
+}
+
 /* Feature-page coherence pass. Keep low-content, loading, and failure states
    inside the same quiet white surface instead of turning whole sections red. */
 .app-shell .settings-panel,

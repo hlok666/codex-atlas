@@ -62,6 +62,7 @@ import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDeskt
 import type { DesktopUpdateInfo, DesktopUpdateProgress } from './lib/atlasBridge'
 import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { FloatingSessionTargetLock } from './lib/floatingSessionTarget'
+import { appendFloatingReply, splitFloatingReply } from './lib/floatingReply'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
 import packageJson from '../package.json'
 import '@fontsource-variable/geist'
@@ -431,6 +432,32 @@ function appServerSessionPatch(event: CodexAppServerEvent): Partial<Session> | n
   return null
 }
 
+function applyAppServerSessionPatch(
+  item: Session,
+  event: CodexAppServerEvent,
+  streamedReplies: Map<string, string>,
+): Session {
+  const patch = appServerSessionPatch(event)
+  const sessionId = event.params?.threadId
+  if (!patch || !sessionId) return item
+  if (event.method === 'turn/started') {
+    // A new turn starts a new assistant message. Do not let the previous
+    // completed answer become the prefix of the next streamed response.
+    streamedReplies.delete(sessionId)
+    return { ...item, ...patch, lastOutput: '' }
+  }
+  if (event.method === 'item/agentMessage/delta') {
+    const merged = appendFloatingReply(streamedReplies.get(sessionId) || '', event.params?.delta || '')
+    if (merged) streamedReplies.set(sessionId, merged)
+    return { ...item, ...patch, lastOutput: merged || item.lastOutput }
+  }
+  if (event.method === 'turn/completed') {
+    const merged = streamedReplies.get(sessionId)
+    return merged ? { ...item, ...patch, lastOutput: merged } : { ...item, ...patch }
+  }
+  return { ...item, ...patch }
+}
+
 type ApprovalOption = {
   label: string
   value: string
@@ -682,6 +709,7 @@ function App() {
   const t = (key: string) => tr(language, key)
   const commandErrorSeenRef = useRef<Map<string, number>>(new Map())
   const runtimeSyncRef = useRef<((records: RunningCodexSession[]) => void) | null>(null)
+  const streamedRepliesRef = useRef(new Map<string, string>())
 
   const showToast = (message: string) => {
     setToast(message)
@@ -1221,10 +1249,11 @@ function App() {
     }).then((cleanup) => { unlistenOutput = cleanup })
     void listenDesktopEvent<CodexAppServerEvent>('codex_app_server', (event) => {
       if (disposed) return
-      const patch = appServerSessionPatch(event)
       const sessionId = event.params?.threadId
-      if (!patch || !sessionId) return
-      setSessionItems((current) => current.map((item) => item.id === sessionId ? { ...item, ...patch } : item))
+      if (!sessionId) return
+      setSessionItems((current) => current.map((item) => item.id === sessionId
+        ? applyAppServerSessionPatch(item, event, streamedRepliesRef.current)
+        : item))
     }).then((cleanup) => { unlistenAppServer = cleanup })
     return () => {
       disposed = true
@@ -2550,6 +2579,8 @@ function FloatingMini() {
   const [quickInput, setQuickInput] = useState('')
   const [quickInputMode, setQuickInputMode] = useState<FloatingInputMode>('queue')
   const [quickAttachments, setQuickAttachments] = useState<FloatingAttachment[]>([])
+  const [carouselPage, setCarouselPage] = useState(0)
+  const [carouselPaused, setCarouselPaused] = useState(false)
   const quickFileInputRef = useRef<HTMLInputElement | null>(null)
   const quickInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null)
@@ -2557,6 +2588,7 @@ function FloatingMini() {
   const approvalOtherInputRef = useRef<HTMLInputElement | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const sessionTargetRef = useRef(new FloatingSessionTargetLock())
+  const streamedRepliesRef = useRef(new Map<string, string>())
   const eventTime = (item: Session) => item.lastEventAtMs || item.timestamp || 0
   const selectLatest = (mapped: Session[]) => {
     const lockedSessionId = sessionTargetRef.current.lockedSessionId
@@ -2766,10 +2798,11 @@ function FloatingMini() {
     }).then((cleanup) => { unlistenOutput = cleanup })
     void listenDesktopEvent<CodexAppServerEvent>('codex_app_server', (event) => {
       if (disposed) return
-      const patch = appServerSessionPatch(event)
       const sessionId = event.params?.threadId
-      if (!patch || !sessionId) return
-      setItems((current) => current.map((item) => item.id === sessionId ? { ...item, ...patch } : item))
+      if (!sessionId) return
+      setItems((current) => current.map((item) => item.id === sessionId
+        ? applyAppServerSessionPatch(item, event, streamedRepliesRef.current)
+        : item))
     }).then((cleanup) => { unlistenAppServer = cleanup })
     return () => {
       disposed = true
@@ -2848,6 +2881,34 @@ function FloatingMini() {
                   : (language === 'zh' ? '已退出' : 'Exited')
   const statusLabel = selectedItem ? `${phaseLabel} · ${selectedItem.title}` : t('floatingIdle')
   const displayOutput = selectedItem?.lastOutput || selectedItem?.lastError || (language === 'zh' ? '暂无输出' : 'No output yet')
+  const replyPages = useMemo(() => splitFloatingReply(displayOutput), [displayOutput])
+  const outputPhase = selectedItem?.liveState?.toLowerCase() || ''
+  const isIdleReply = Boolean(selectedItem
+    && !approvalRequest
+    && !isWorking
+    && !selectedItem.requiresAttention
+    && !['waiting', 'failed', 'blocked'].includes(outputPhase)
+    && (outputPhase === 'idle' || outputPhase === 'completed' || selectedItem.status === 'active'))
+  const shouldCarouselReply = isIdleReply && replyPages.length > 1 && !quickInputOpen
+  const prefersReducedMotion = useMemo(() => {
+    try {
+      return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    } catch {
+      return false
+    }
+  }, [])
+  useEffect(() => {
+    setCarouselPage(0)
+    setCarouselPaused(false)
+  }, [selectedItem?.id, displayOutput])
+  useEffect(() => {
+    if (!shouldCarouselReply || carouselPaused || prefersReducedMotion) return
+    const timer = window.setInterval(() => {
+      setCarouselPage((current) => (current + 1) % replyPages.length)
+    }, 6500)
+    return () => window.clearInterval(timer)
+  }, [carouselPaused, prefersReducedMotion, replyPages.length, shouldCarouselReply])
+  const visibleReply = replyPages[carouselPage] || displayOutput
   const dragLabel = language === 'zh' ? '拖动悬浮组件' : 'Drag widget'
   const sessionLabel = selectedItem
     ? `${selectedIndex + 1}/${orderedItems.length} · ${selectedItem.folder}`
@@ -3032,7 +3093,18 @@ function FloatingMini() {
                 <textarea ref={quickInputRef} value={quickInput} onChange={(event) => setQuickInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { closeQuickInput(); return } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={t('quickInputPlaceholder')} disabled={!actionItem || actionBusy !== null} aria-label={t('quickInputPlaceholder')} rows={2} />
                 <div className="desktop-tv-quick-attachments">{quickAttachments.map((attachment, index) => <span key={`${attachment.name}:${index}`} title={attachment.path || attachment.name}><i>{attachment.kind === 'image' ? <ImageIcon size={10} /> : <FileText size={10} />}</i>{attachment.name}<button type="button" onClick={() => setQuickAttachments((current) => current.filter((_, currentIndex) => currentIndex !== index))} aria-label={language === 'zh' ? `移除 ${attachment.name}` : `Remove ${attachment.name}`}><X size={10} /></button></span>)}</div>
                 <div className="desktop-tv-quick-tools"><label className="desktop-tv-file-button" title={language === 'zh' ? '添加文档或图片' : 'Attach a document or image'}><Paperclip size={12} /><input ref={quickFileInputRef} type="file" multiple accept="image/*,.txt,.md,.pdf,.json,.csv,.doc,.docx,.xls,.xlsx" onChange={(event) => { addQuickFiles(event.target.files); event.currentTarget.value = '' }} /></label><span>{quickInputMode === 'queue' ? (language === 'zh' ? '等待当前任务完成' : 'Wait for current task') : (language === 'zh' ? '立即打断并提交' : 'Interrupt and submit')}</span><button type="submit" disabled={(!quickInput.trim() && quickAttachments.length === 0) || !actionItem || actionBusy !== null} aria-label={t('quickInputSubmit')} title={t('quickInputSubmit')}>{actionBusy === 'input' ? <LoaderCircle className="spin" size={12} /> : <ArrowUpRight size={12} />}</button></div>
-              </form> : showOutput && <div className="desktop-tv-output" aria-live="polite">{displayOutput}</div>}
+              </form> : showOutput && <div
+                className={`desktop-tv-output${shouldCarouselReply ? ' is-carousel' : ''}`}
+                aria-live={isWorking ? 'polite' : 'off'}
+                onMouseEnter={() => setCarouselPaused(true)}
+                onMouseLeave={() => setCarouselPaused(false)}
+                onFocus={() => setCarouselPaused(true)}
+                onBlur={() => setCarouselPaused(false)}
+              >
+                {shouldCarouselReply
+                  ? <div key={`${selectedItem?.id}:${carouselPage}`} className="desktop-tv-output-page">{visibleReply}</div>
+                  : visibleReply}
+              </div>}
           </div>
         </div>
       </div>
