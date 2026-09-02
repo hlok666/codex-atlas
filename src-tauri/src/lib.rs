@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -23,7 +23,7 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use tauri_plugin_notification::NotificationExt;
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 use tungstenite::{client::IntoClientRequest, connect, http::HeaderValue, Message, WebSocket};
 use url::Url;
 use walkdir::WalkDir;
@@ -164,6 +164,101 @@ struct MobileMessageReceiptState {
 }
 
 static MOBILE_MESSAGE_RECEIPTS: OnceLock<Mutex<MobileMessageReceiptState>> = OnceLock::new();
+
+/// Authenticated mobile clients keep one lightweight server-sent event
+/// stream open. The event only wakes the client; the existing sequence-aware
+/// `/v1/sync` endpoint remains the source of truth and supplies the actual
+/// messages. A bounded channel prevents a slow phone from growing desktop
+/// memory while a model is streaming many tokens.
+static MOBILE_PUSH_SUBSCRIBERS: OnceLock<Mutex<Vec<std::sync::mpsc::SyncSender<Vec<u8>>>>> =
+    OnceLock::new();
+const MOBILE_PUSH_CHANNEL_CAPACITY: usize = 32;
+const MOBILE_PUSH_HEARTBEAT_MS: u64 = 15_000;
+
+struct MobilePushReader {
+    receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    buffer: Vec<u8>,
+    offset: usize,
+}
+
+impl MobilePushReader {
+    fn new(receiver: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            receiver,
+            buffer: Vec::new(),
+            offset: 0,
+        }
+    }
+
+    fn set_buffer(&mut self, buffer: Vec<u8>) {
+        self.buffer = buffer;
+        self.offset = 0;
+    }
+}
+
+impl Read for MobilePushReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.offset >= self.buffer.len() {
+            let next = match self
+                .receiver
+                .recv_timeout(Duration::from_millis(MOBILE_PUSH_HEARTBEAT_MS))
+            {
+                Ok(value) => value,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    b": atlas-heartbeat\n\n".to_vec()
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+            };
+            self.set_buffer(next);
+        }
+        let available = self.buffer.len().saturating_sub(self.offset);
+        let count = available.min(output.len());
+        output[..count].copy_from_slice(&self.buffer[self.offset..self.offset + count]);
+        self.offset += count;
+        if self.offset >= self.buffer.len() {
+            self.buffer.clear();
+            self.offset = 0;
+        }
+        Ok(count)
+    }
+}
+
+fn mobile_push_subscribe() -> MobilePushReader {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(MOBILE_PUSH_CHANNEL_CAPACITY);
+    let ready = serde_json::json!({
+        "type": "ready",
+        "protocol": "sse-v1",
+        "atMs": now_ms(),
+    });
+    let ready_event = format!("event: ready\ndata: {}\n\n", ready);
+    let _ = sender.try_send(ready_event.into_bytes());
+    if let Ok(mut subscribers) = MOBILE_PUSH_SUBSCRIBERS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        subscribers.push(sender);
+    }
+    MobilePushReader::new(receiver)
+}
+
+fn publish_mobile_push(reason: &str) {
+    let payload = serde_json::json!({
+        "type": "sync",
+        "reason": reason,
+        "atMs": now_ms(),
+    });
+    let event = format!("event: sync\ndata: {}\n\n", payload).into_bytes();
+    let Ok(mut subscribers) = MOBILE_PUSH_SUBSCRIBERS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    else {
+        return;
+    };
+    subscribers.retain(|subscriber| subscriber.try_send(event.clone()).is_ok());
+}
 
 const MOBILE_MESSAGE_PAGE_DEFAULT: usize = 200;
 const MOBILE_MESSAGE_PAGE_MAX: usize = 1_000;
@@ -2569,7 +2664,10 @@ fn update_mobile_balance_cache(
     state.refreshing = false;
     state.last_attempt_at_ms = now;
     state.changed_at_ms = now.max(state.changed_at_ms.saturating_add(1));
-    state.snapshot.clone()
+    let snapshot = state.snapshot.clone();
+    drop(state);
+    publish_mobile_push("balance");
+    snapshot
 }
 
 fn fetch_mobile_balance() -> Result<Vec<CcSwitchProviderBalance>, String> {
@@ -3092,6 +3190,27 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             ),
             200,
         ));
+        return;
+    }
+    if method == Method::Get && path == "/v1/events" {
+        let response = Response::new(
+            StatusCode(200),
+            vec![
+                Header::from_bytes(
+                    &b"Content-Type"[..],
+                    &b"text/event-stream; charset=utf-8"[..],
+                )
+                .expect("valid SSE content type header"),
+                Header::from_bytes(&b"Cache-Control"[..], &b"no-cache, no-transform"[..])
+                    .expect("valid SSE cache header"),
+                Header::from_bytes(&b"X-Accel-Buffering"[..], &b"no"[..])
+                    .expect("valid SSE buffering header"),
+            ],
+            mobile_push_subscribe(),
+            None,
+            None,
+        );
+        let _ = request.respond(response);
         return;
     }
     if method == Method::Get && path == "/v1/balance" {
@@ -6858,6 +6977,9 @@ fn spawn_runtime_monitor(app: AppHandle, state: AppState) {
             let signature = runtime_signature(&records);
             if !emitted_initial || signature != previous_signature {
                 let _ = app.emit("codex_runtime", &records);
+                if emitted_initial {
+                    publish_mobile_push("runtime");
+                }
                 previous_signature = signature;
                 emitted_initial = true;
             }
@@ -7163,6 +7285,11 @@ fn emit_app_server_notification(
         "codex_app_server",
         serde_json::json!({"method": method, "params": params}),
     );
+    // Wake mobile clients as soon as Codex emits a thread event. The client
+    // then uses its durable sequence cursor to fetch the exact delta.
+    if params.get("threadId").is_some() {
+        publish_mobile_push(method);
+    }
 }
 
 fn app_server_read_until<S: Read + Write>(
@@ -11616,6 +11743,22 @@ mod runtime_probe_tests {
         assert_eq!(floating_skin_corner_radii("amber", 504), (10, 10));
         assert_eq!(floating_skin_corner_radii("imac", 252), (30, 16));
         assert_eq!(floating_skin_corner_radii("tower", 252), (6, 6));
+    }
+
+    #[test]
+    fn mobile_push_stream_starts_ready_and_delivers_wake_events() {
+        let mut reader = mobile_push_subscribe();
+        let mut buffer = [0_u8; 512];
+        let size = reader.read(&mut buffer).expect("read SSE ready frame");
+        let ready = String::from_utf8_lossy(&buffer[..size]);
+        assert!(ready.contains("event: ready"));
+        assert!(ready.contains("\"protocol\":\"sse-v1\""));
+
+        publish_mobile_push("test");
+        let size = reader.read(&mut buffer).expect("read SSE sync frame");
+        let sync = String::from_utf8_lossy(&buffer[..size]);
+        assert!(sync.contains("event: sync"));
+        assert!(sync.contains("\"reason\":\"test\""));
     }
 
     #[test]
