@@ -685,6 +685,14 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             pendingVoiceSend = pendingVoiceSend + text
         }
         onDispose {
+            if (registered) runCatching { context.unregisterReceiver(receiver) }
+        }
+    }
+    DisposableEffect(voiceController) {
+        voiceController.setContinuousTranscriptListener { text ->
+            pendingVoiceSend = pendingVoiceSend + text
+        }
+        onDispose {
             voiceController.setContinuousTranscriptListener(null)
             voiceController.destroy()
             speechOutput.destroy()
