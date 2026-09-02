@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -49,10 +51,13 @@ class AtlasSyncService : Service() {
     private var syncEpoch = ""
     private var afterSeq = 0L
     private var foregroundReady = false
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        registerNetworkCallback()
         runCatching {
             startForegroundCompat(notification("Codex Atlas", "正在保持连接"))
             foregroundReady = true
@@ -87,6 +92,7 @@ class AtlasSyncService : Service() {
     }
 
     override fun onDestroy() {
+        unregisterNetworkCallback()
         syncWorker?.cancel()
         pushWorker?.cancel()
         queueWorker?.cancel()
@@ -115,6 +121,39 @@ class AtlasSyncService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun registerNetworkCallback() {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onLost(network: Network) {
+                // A Wi-Fi/mobile handover can leave the old TCP socket open
+                // without ever delivering EOF. Cancel that stream immediately
+                // so the normal candidate fallback reconnects on the new route.
+                serviceScope.launch {
+                    pushWorker?.cancel()
+                    pushWorker = null
+                    if (foregroundReady && BridgePreferences.token(this@AtlasSyncService).isNotBlank()) {
+                        pushWorker = serviceScope.launch { runPushLoop() }
+                    }
+                }
+            }
+        }
+        runCatching {
+            manager.registerDefaultNetworkCallback(callback)
+            connectivityManager = manager
+            networkCallback = callback
+        }.onFailure { error ->
+            android.util.Log.w("AtlasSyncService", "network callback unavailable", error)
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val manager = connectivityManager ?: return
+        val callback = networkCallback ?: return
+        runCatching { manager.unregisterNetworkCallback(callback) }
+        connectivityManager = null
+        networkCallback = null
+    }
 
     private suspend fun runQueueLoop() {
         while (currentCoroutineContext().isActive) {

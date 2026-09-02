@@ -31,6 +31,13 @@ private object BridgeTransport {
         .retryOnConnectionFailure(true)
         .build()
 
+    // SSE is intentionally long-lived. Keep a finite watchdog so a dead TCP
+    // socket is eventually retried, but leave enough room for a proxy to
+    // coalesce a small heartbeat before it reaches the handset.
+    val eventsHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(75, TimeUnit.SECONDS)
+        .build()
+
     private val successful = ConcurrentHashMap.newKeySet<String>()
     private val failedUntilMs = ConcurrentHashMap<String, Long>()
 
@@ -209,9 +216,10 @@ class AtlasBridgeClient(
                 .url(candidate + "/v1/events")
                 .header("Authorization", "Bearer $token")
                 .header("Accept", "text/event-stream")
+                .header("Accept-Encoding", "identity")
                 .get()
                 .build()
-            val call = http.newCall(request)
+            val call = BridgeTransport.eventsHttp.newCall(request)
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, error: java.io.IOException) {
