@@ -16,6 +16,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
+import java.io.FileOutputStream
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -339,6 +341,128 @@ class AtlasBridgeClient(
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
+    fun workspaceAny(
+        sessionId: String,
+        relativePath: String = "",
+        fallbackUrl: String = "",
+    ): AtlasWorkspaceListing {
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val query = "?path=" + java.net.URLEncoder.encode(relativePath, Charsets.UTF_8.name())
+                val request = Request.Builder()
+                    .url(candidate + sessionIdPath(sessionId, "/workspace") + query)
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    val body = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) error(bridgeError(response.code, body))
+                    val result = json.decodeFromString<AtlasWorkspaceListing>(body)
+                    BridgeTransport.succeeded(candidate)
+                    return result
+                }
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
+    fun workspacePreviewAny(
+        sessionId: String,
+        relativePath: String,
+        fallbackUrl: String = "",
+    ): AtlasWorkspaceFile {
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val query = "?path=" + java.net.URLEncoder.encode(relativePath, Charsets.UTF_8.name()) + "&preview=1"
+                val request = Request.Builder()
+                    .url(candidate + sessionIdPath(sessionId, "/workspace/file") + query)
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val body = response.body?.string().orEmpty()
+                        error(bridgeError(response.code, body))
+                    }
+                    val body = response.body?.bytes() ?: error("Atlas Bridge returned an empty workspace file")
+                    val name = response.header("X-Atlas-File-Name")
+                        ?: relativePath.substringAfterLast('/').ifBlank { "workspace-file" }
+                    val mime = response.header("Content-Type")?.substringBefore(';')?.trim()
+                        .orEmpty().ifBlank { "application/octet-stream" }
+                    BridgeTransport.succeeded(candidate)
+                    return AtlasWorkspaceFile(name, mime, body)
+                }
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
+    fun downloadWorkspaceFileAny(
+        sessionId: String,
+        relativePath: String,
+        target: File,
+        fallbackUrl: String = "",
+        onProgress: (downloaded: Long, total: Long) -> Unit = { _, _ -> },
+    ): AtlasWorkspaceDownload {
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val query = "?path=" + java.net.URLEncoder.encode(relativePath, Charsets.UTF_8.name())
+                val request = Request.Builder()
+                    .url(candidate + sessionIdPath(sessionId, "/workspace/file") + query)
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val body = response.body?.string().orEmpty()
+                        error(bridgeError(response.code, body))
+                    }
+                    val body = response.body ?: error("Atlas Bridge returned an empty workspace file")
+                    target.parentFile?.mkdirs()
+                    var downloaded = 0L
+                    val total = body.contentLength().coerceAtLeast(0L)
+                    body.byteStream().use { input ->
+                        FileOutputStream(target).use { output ->
+                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 8)
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                if (count == 0) continue
+                                output.write(buffer, 0, count)
+                                downloaded += count
+                                onProgress(downloaded, total)
+                            }
+                            output.flush()
+                        }
+                    }
+                    val name = response.header("X-Atlas-File-Name")
+                        ?: relativePath.substringAfterLast('/').ifBlank { "workspace-file" }
+                    val mime = response.header("Content-Type")?.substringBefore(';')?.trim()
+                        .orEmpty().ifBlank { "application/octet-stream" }
+                    BridgeTransport.succeeded(candidate)
+                    return AtlasWorkspaceDownload(name, mime, downloaded, target)
+                }
+            } catch (error: Throwable) {
+                target.delete()
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
     fun createSessionAny(cwd: String, prompt: String, model: String, permission: String, fallbackUrl: String = "") {
         val body = json.encodeToString(mapOf("cwd" to cwd, "prompt" to prompt, "model" to model, "permission" to permission))
         postAny("/v1/sessions", body, fallbackUrl)
@@ -428,6 +552,16 @@ class AtlasBridgeClient(
             }
         }
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
+    private fun bridgeError(code: Int, body: String): String {
+        val detail = runCatching {
+            json.parseToJsonElement(body).jsonObject["error"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull()
+        return buildString {
+            append("Atlas Bridge returned HTTP ").append(code)
+            if (!detail.isNullOrBlank()) append(": ").append(detail)
+        }
     }
 
     private fun post(path: String, body: String) {

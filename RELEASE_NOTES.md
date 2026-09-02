@@ -1,3 +1,18 @@
+# Codex Atlas 0.1.33 发布说明
+
+- 打断模式改为先向实际 Codex CLI 输入消息并提交，再发送 `Esc` 取消当前回合。
+- 队列模式继续由 Codex CLI/TUI 自己管理，不再由 Atlas 强制启动队列回合。
+- 终端不可访问时保留 CLI queue 和 app-server 兼容兜底。
+- 桌面端与 Android App 统一更新至 `0.1.33`，Android `versionCode` 更新为 `29`。
+
+# Codex Atlas 0.1.30 发布说明
+
+- 手机端新增工作区文件浏览：从会话的“更多”菜单进入对应工作区，浏览目录并查看文件大小和类型。
+- 支持在手机内预览文本、JSON、SVG 和常见图片；其他文件可下载到系统 `Download/Codex Atlas` 目录。
+- 支持通过系统分享面板分享工作区文件，下载过程使用流式传输并显示操作状态。
+- Bridge 仅允许访问会话工作目录内的真实文件，拒绝路径穿越、外部符号链接和超大文件。
+- 桌面端与 Android App 统一更新至 `0.1.30`，Android `versionCode` 更新为 `26`。
+
 # Codex Atlas 0.1.29 发布说明
 
 - Android 对话页扩大消息内容区域：标题栏压缩上下留白，输入框默认单行起步并限制最大高度。

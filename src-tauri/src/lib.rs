@@ -3,7 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     net::TcpStream,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
@@ -36,7 +36,7 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-            KEYEVENTF_UNICODE, VK_RETURN,
+            KEYEVENTF_UNICODE, VK_ESCAPE, VK_RETURN,
         },
         WindowsAndMessaging::{
             BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowTextW,
@@ -296,6 +296,9 @@ const MOBILE_SYNC_PERSIST_INTERVAL_MS: i64 = 1_500;
 const MOBILE_SESSION_CACHE_TTL_MS: i64 = 5_000;
 const MOBILE_BALANCE_REFRESH_INTERVAL_MS: i64 = 15_000;
 const MOBILE_BALANCE_STALE_AFTER_MS: i64 = 45_000;
+const MOBILE_WORKSPACE_ENTRY_LIMIT: usize = 500;
+const MOBILE_WORKSPACE_PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const MOBILE_WORKSPACE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Default)]
 struct ProcessSnapshotCache {
@@ -757,6 +760,18 @@ struct MobileSessionSummary {
     last_event_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     approval: Option<MobileApprovalRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileWorkspaceEntry {
+    name: String,
+    path: String,
+    kind: String,
+    size: u64,
+    modified_at_ms: i64,
+    mime: String,
+    previewable: bool,
 }
 
 impl From<&SessionRecord> for MobileSessionSummary {
@@ -2849,6 +2864,226 @@ fn query_parameter(url: &str, key: &str) -> Option<String> {
         .find_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
 }
 
+fn workspace_path_is_within(root: &Path, candidate: &Path) -> bool {
+    let root = normalized_path_for_match(&root.to_string_lossy());
+    let candidate = normalized_path_for_match(&candidate.to_string_lossy());
+    !root.is_empty() && (candidate == root || candidate.starts_with(&(root + "\\")))
+}
+
+fn workspace_root_for_session(session: &SessionRecord) -> Result<PathBuf, String> {
+    if session.cwd.trim().is_empty() {
+        return Err("session has no workspace directory".to_string());
+    }
+    let root = Path::new(session.cwd.trim())
+        .canonicalize()
+        .map_err(|error| format!("resolve workspace directory: {error}"))?;
+    if !root.is_dir() {
+        return Err("session workspace directory is unavailable".to_string());
+    }
+    Ok(root)
+}
+
+fn workspace_relative_components(value: &str) -> Result<PathBuf, String> {
+    let value = value.trim().replace('\\', "/");
+    if value.is_empty() || value == "." {
+        return Ok(PathBuf::new());
+    }
+    if value.len() > 2_048 || value.contains('\0') {
+        return Err("workspace path is too long or invalid".to_string());
+    }
+    let path = Path::new(&value);
+    if path.is_absolute() {
+        return Err("workspace path must be relative".to_string());
+    }
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("workspace path must stay inside the session directory".to_string())
+            }
+        }
+    }
+    Ok(relative)
+}
+
+fn resolve_workspace_path(
+    session: &SessionRecord,
+    relative: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let root = workspace_root_for_session(session)?;
+    let relative = workspace_relative_components(relative)?;
+    let candidate = root.join(relative);
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|error| format!("resolve workspace path: {error}"))?;
+    if !workspace_path_is_within(&root, &resolved) {
+        return Err("workspace path is outside the session directory".to_string());
+    }
+    Ok((root, resolved))
+}
+
+fn workspace_relative_label(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default()
+}
+
+fn workspace_mime_type(path: &Path) -> String {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "txt" | "md" | "markdown" | "log" | "csv" | "tsv" | "toml" | "ini" | "conf" | "jsonl"
+        | "yaml" | "yml" | "xml" | "html" | "htm" | "css" | "js" | "jsx" | "ts" | "tsx" | "py"
+        | "rb" | "php" | "java" | "kt" | "kts" | "rs" | "go" | "c" | "h" | "cpp" | "hpp" | "cs"
+        | "swift" | "sh" | "bash" | "zsh" | "fish" | "ps1" | "sql" | "env" | "gitignore" => {
+            if extension == "json" {
+                "application/json".to_string()
+            } else if matches!(extension.as_str(), "xml" | "html" | "htm" | "svg") {
+                "text/html; charset=utf-8".to_string()
+            } else {
+                "text/plain; charset=utf-8".to_string()
+            }
+        }
+        "json" => "application/json".to_string(),
+        "svg" => "image/svg+xml".to_string(),
+        "png" => "image/png".to_string(),
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "gif" => "image/gif".to_string(),
+        "webp" => "image/webp".to_string(),
+        "bmp" => "image/bmp".to_string(),
+        "pdf" => "application/pdf".to_string(),
+        "zip" => "application/zip".to_string(),
+        "gz" => "application/gzip".to_string(),
+        "tar" => "application/x-tar".to_string(),
+        "doc" => "application/msword".to_string(),
+        "docx" => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
+        }
+        "xls" => "application/vnd.ms-excel".to_string(),
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}
+
+fn workspace_is_previewable(path: &Path, mime: &str) -> bool {
+    mime.starts_with("text/")
+        || mime == "application/json"
+        || mime.starts_with("image/")
+        || path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("svg"))
+}
+
+fn list_workspace_entries(
+    session: &SessionRecord,
+    relative: &str,
+) -> Result<Vec<MobileWorkspaceEntry>, String> {
+    let (root, directory) = resolve_workspace_path(session, relative)?;
+    if !directory.is_dir() {
+        return Err("workspace path is not a directory".to_string());
+    }
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|error| format!("read workspace directory: {error}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_symlink() || (!file_type.is_dir() && !file_type.is_file()) {
+                return None;
+            }
+            let path = entry.path();
+            let resolved = path.canonicalize().ok()?;
+            if !workspace_path_is_within(&root, &resolved) {
+                return None;
+            }
+            let metadata = fs::metadata(&resolved).ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let kind = if metadata.is_dir() {
+                "directory"
+            } else {
+                "file"
+            };
+            let mime = workspace_mime_type(&resolved);
+            Some(MobileWorkspaceEntry {
+                name,
+                path: workspace_relative_label(&root, &path),
+                kind: kind.to_string(),
+                size: metadata.len(),
+                modified_at_ms: file_modified_ms(&resolved),
+                previewable: metadata.is_file() && workspace_is_previewable(&resolved, &mime),
+                mime,
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        (left.kind != "directory")
+            .cmp(&(right.kind != "directory"))
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+    });
+    entries.truncate(MOBILE_WORKSPACE_ENTRY_LIMIT);
+    Ok(entries)
+}
+
+fn workspace_file_for_session(
+    session: &SessionRecord,
+    relative: &str,
+    preview: bool,
+) -> Result<(PathBuf, String), String> {
+    let (_root, path) = resolve_workspace_path(session, relative)?;
+    let metadata = fs::metadata(&path).map_err(|error| format!("read workspace file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("workspace path is not a file".to_string());
+    }
+    let mime = workspace_mime_type(&path);
+    if preview && !workspace_is_previewable(&path, &mime) {
+        return Err("this file type cannot be previewed".to_string());
+    }
+    let max_bytes = if preview {
+        MOBILE_WORKSPACE_PREVIEW_MAX_BYTES
+    } else {
+        MOBILE_WORKSPACE_DOWNLOAD_MAX_BYTES
+    };
+    if metadata.len() > max_bytes {
+        return Err(if preview {
+            format!(
+                "file is too large to preview (limit {} MB)",
+                MOBILE_WORKSPACE_PREVIEW_MAX_BYTES / 1024 / 1024
+            )
+        } else {
+            format!(
+                "file is too large to download (limit {} MB)",
+                MOBILE_WORKSPACE_DOWNLOAD_MAX_BYTES / 1024 / 1024
+            )
+        });
+    }
+    Ok((path, mime))
+}
+
+fn workspace_header_filename(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("workspace-file")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn mobile_message_receipt_path() -> PathBuf {
     codex_home().join("atlas-mobile-message-receipts.json")
 }
@@ -3165,7 +3400,7 @@ fn wait_for_mobile_sync(
     }
 }
 
-fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
+fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppState) {
     let config = mobile_bridge_config();
     let auth = request
         .headers()
@@ -3316,6 +3551,107 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         let _ = request.respond(bridge_json_response(&messages, 200));
         return;
     }
+    if method == Method::Get && path.starts_with("/v1/sessions/") && path.ends_with("/workspace") {
+        let Some(session_id) = path
+            .strip_prefix("/v1/sessions/")
+            .and_then(|value| value.strip_suffix("/workspace"))
+        else {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"error": "not found"}),
+                404,
+            ));
+            return;
+        };
+        let Some(session) = find_mobile_session(session_id) else {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"error": "session not found"}),
+                404,
+            ));
+            return;
+        };
+        let relative = query_parameter(&url, "path").unwrap_or_default();
+        let entries = match list_workspace_entries(&session, &relative) {
+            Ok(entries) => entries,
+            Err(error) => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"error": error}),
+                    422,
+                ));
+                return;
+            }
+        };
+        let payload = serde_json::json!({
+            "path": relative.replace('\\', "/").trim_matches('/'),
+            "rootName": Path::new(&session.cwd)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("workspace"),
+            "entries": entries,
+        });
+        let _ = request.respond(bridge_json_response(&payload, 200));
+        return;
+    }
+    if method == Method::Get
+        && path.starts_with("/v1/sessions/")
+        && path.ends_with("/workspace/file")
+    {
+        let Some(session_id) = path
+            .strip_prefix("/v1/sessions/")
+            .and_then(|value| value.strip_suffix("/workspace/file"))
+        else {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"error": "not found"}),
+                404,
+            ));
+            return;
+        };
+        let Some(session) = find_mobile_session(session_id) else {
+            let _ = request.respond(bridge_json_response(
+                &serde_json::json!({"error": "session not found"}),
+                404,
+            ));
+            return;
+        };
+        let relative = query_parameter(&url, "path").unwrap_or_default();
+        let preview = query_parameter(&url, "preview")
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let (file_path, mime) = match workspace_file_for_session(&session, &relative, preview) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"error": error}),
+                    422,
+                ));
+                return;
+            }
+        };
+        let filename = workspace_header_filename(&file_path);
+        let file = match File::open(&file_path) {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"error": format!("open workspace file: {error}")}),
+                    422,
+                ));
+                return;
+            }
+        };
+        let mut response = Response::from_file(file);
+        if let Ok(header) = Header::from_bytes("Content-Type", mime.as_bytes()) {
+            response = response.with_header(header);
+        }
+        if let Ok(header) = Header::from_bytes(
+            "Content-Disposition",
+            format!("inline; filename=\"{filename}\"").as_bytes(),
+        ) {
+            response = response.with_header(header);
+        }
+        if let Ok(header) = Header::from_bytes("X-Atlas-File-Name", filename.as_bytes()) {
+            response = response.with_header(header);
+        }
+        let _ = request.respond(response);
+        return;
+    }
     if method != Method::Post {
         let _ = request.respond(bridge_json_response(
             &serde_json::json!({"error": "method not allowed"}),
@@ -3436,7 +3772,9 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
         }
         let result = if !chunk.final_chunk || chunk.text.trim().is_empty() {
             Ok(())
-        } else if queue_codex_message(&session, &chunk.text) {
+        } else if queue_session_message_with_attachments(&app_state, &session, &chunk.text, &[])
+            .is_ok()
+        {
             Ok(())
         } else if session.running {
             send_text_to_terminal(&session, &chunk.text, true)
@@ -3448,7 +3786,14 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
                     for delay in [250, 500, 750, 1_000] {
                         thread::sleep(Duration::from_millis(delay));
                         if let Some(refreshed) = find_session(session_id) {
-                            if queue_codex_message(&refreshed, &chunk.text) {
+                            if queue_session_message_with_attachments(
+                                &app_state,
+                                &refreshed,
+                                &chunk.text,
+                                &[],
+                            )
+                            .is_ok()
+                            {
                                 queued = true;
                                 break;
                             }
@@ -3529,12 +3874,14 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
             .filter(|text| !text.trim().is_empty())
             .unwrap_or_else(|| "继续".to_string());
         if session.running {
-            if queue_codex_message(&session, &input) {
+            if queue_session_message_with_attachments(&app_state, &session, &input, &[]).is_ok() {
                 Ok(())
             } else {
                 send_text_to_terminal(&session, &input, true)
             }
-        } else if url.ends_with("/message") && queue_codex_message(&session, &input) {
+        } else if url.ends_with("/message")
+            && queue_session_message_with_attachments(&app_state, &session, &input, &[]).is_ok()
+        {
             // `codex queue` can persist a message while the interactive
             // terminal is closed; the next resume consumes it.
             Ok(())
@@ -3546,7 +3893,15 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
                     for delay in [250, 500, 750, 1_000] {
                         thread::sleep(Duration::from_millis(delay));
                         if let Some(refreshed) = find_session(session_id) {
-                            if refreshed.running && queue_codex_message(&refreshed, &input) {
+                            if refreshed.running
+                                && queue_session_message_with_attachments(
+                                    &app_state,
+                                    &refreshed,
+                                    &input,
+                                    &[],
+                                )
+                                .is_ok()
+                            {
                                 queued = true;
                                 break;
                             }
@@ -3587,8 +3942,8 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request) {
     let _ = request.respond(response);
 }
 
-fn spawn_mobile_bridge() {
-    thread::spawn(|| {
+fn spawn_mobile_bridge(app_state: AppState) {
+    thread::spawn(move || {
         let Ok(server) = Server::http(("0.0.0.0", MOBILE_BRIDGE_PORT)) else {
             return;
         };
@@ -3596,7 +3951,8 @@ fn spawn_mobile_bridge() {
             // Long-poll requests can wait for several seconds. Handle each
             // request independently so a waiting mobile client cannot block
             // status, command, or pairing requests from other clients.
-            thread::spawn(move || handle_mobile_bridge_request(request));
+            let state_for_request = app_state.clone();
+            thread::spawn(move || handle_mobile_bridge_request(request, state_for_request));
         }
     });
 }
@@ -4587,6 +4943,40 @@ fn send_text_to_terminal(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn send_escape_to_terminal(session: &SessionRecord) -> Result<(), String> {
+    let window = terminal_window_for_session(session)
+        .or_else(|| {
+            if !session.foreground {
+                return None;
+            }
+            foreground_terminal_window()
+        })
+        .ok_or_else(|| "no terminal window was found for the running session".to_string())?;
+    if !window_is_foreground(window) {
+        focus_terminal_window(window)?;
+    }
+    let escape_inputs = [
+        keyboard_input(VK_ESCAPE, 0, 0),
+        keyboard_input(VK_ESCAPE, 0, KEYEVENTF_KEYUP),
+    ];
+    send_keyboard_events(&escape_inputs)?;
+    if !window_is_foreground(window) {
+        return Err("Codex terminal lost focus before Escape was submitted".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn send_text_to_terminal_then_escape(session: &SessionRecord, input: &str) -> Result<(), String> {
+    // Submit the prompt through the interactive CLI first. Escape is sent
+    // only after the terminal has received the prompt so Codex can preserve
+    // its own queued-message semantics while cancelling the active turn.
+    send_text_to_terminal(session, input, true)?;
+    thread::sleep(Duration::from_millis(55));
+    send_escape_to_terminal(session)
+}
+
 #[cfg(not(target_os = "windows"))]
 fn send_text_to_terminal(
     _session: &SessionRecord,
@@ -4594,6 +4984,11 @@ fn send_text_to_terminal(
     _focus_terminal: bool,
 ) -> Result<(), String> {
     Err("terminal input fallback is currently available on Windows only".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn send_text_to_terminal_then_escape(_session: &SessionRecord, _input: &str) -> Result<(), String> {
+    Err("terminal interrupt fallback is currently available on Windows only".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -7351,7 +7746,11 @@ fn app_server_read_until<S: Read + Write>(
                     emit_app_server_notification(app, &value, active_turns);
                 } else if value.get("id").and_then(Value::as_u64) == Some(request_id) {
                     if let Some(error) = value.get("error") {
-                        return Err(error.to_string());
+                        return Err(error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| error.to_string()));
                     }
                     return Ok(value.get("result").cloned().unwrap_or(Value::Null));
                 }
@@ -7514,6 +7913,17 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
                             }
                         }
                     }
+                    Ok(Message::Binary(bytes)) => {
+                        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                            if value.get("method").is_some() {
+                                emit_app_server_notification(
+                                    &app_for_thread,
+                                    &value,
+                                    &turns_for_thread,
+                                );
+                            }
+                        }
+                    }
                     Ok(Message::Ping(payload)) => {
                         let _ = socket.send(Message::Pong(payload));
                     }
@@ -7576,11 +7986,10 @@ fn app_server_user_input(input: &str, attachments: &[FloatingAttachment]) -> Vec
     items
 }
 
-fn app_server_send_message(
+fn app_server_send_interrupt(
     state: &AppState,
     session: &SessionRecord,
     input: &str,
-    mode: &str,
     attachments: &[FloatingAttachment],
 ) -> Result<bool, String> {
     let items = app_server_user_input(input, attachments);
@@ -7590,7 +7999,7 @@ fn app_server_send_message(
     let client_message_id = format!("atlas-{}", now_ms());
     // A newly-created app-server does not automatically hydrate threads that
     // were started by the interactive CLI. Resume the exact thread first so
-    // turn/start and turn/steer operate on the same durable conversation.
+    // turn/steer operates on the same durable conversation.
     let mut resume_params = serde_json::json!({
         "threadId": session.id,
         "excludeTurns": true,
@@ -7600,59 +8009,39 @@ fn app_server_send_message(
     }
     app_server_request(state, "thread/resume", resume_params)?;
 
-    if mode.trim().eq_ignore_ascii_case("interrupt") {
-        let active_turn = state
-            .app_server
-            .lock()
-            .ok()
-            .and_then(|server| server.as_ref().cloned())
-            .and_then(|server| {
-                server
-                    .active_turns
-                    .lock()
-                    .ok()
-                    .and_then(|turns| turns.get(&session.id).cloned())
-            });
-        if let Some(turn_id) = active_turn {
-            let steer = app_server_request(
-                state,
-                "turn/steer",
-                serde_json::json!({
-                    "threadId": session.id,
-                    "expectedTurnId": turn_id,
-                    "input": items,
-                    "clientUserMessageId": client_message_id,
-                }),
-            );
-            if steer.is_ok() {
-                return Ok(true);
-            }
-        }
-        return Err(
-            "the Atlas app-server does not own an active turn for this session".to_string(),
+    let active_turn = state
+        .app_server
+        .lock()
+        .ok()
+        .and_then(|server| server.as_ref().cloned())
+        .and_then(|server| {
+            server
+                .active_turns
+                .lock()
+                .ok()
+                .and_then(|turns| turns.get(&session.id).cloned())
+        });
+    if let Some(turn_id) = active_turn {
+        let steer = app_server_request(
+            state,
+            "turn/steer",
+            serde_json::json!({
+                "threadId": session.id,
+                "expectedTurnId": turn_id,
+                "input": items,
+                "clientUserMessageId": client_message_id,
+            }),
         );
+        if steer.is_ok() {
+            return Ok(true);
+        }
     }
-    let result = app_server_request(
-        state,
-        "turn/start",
-        serde_json::json!({
-            "threadId": session.id,
-            "cwd": if session.cwd.trim().is_empty() { Value::Null } else { Value::String(session.cwd.clone()) },
-            "input": items,
-            "clientUserMessageId": client_message_id,
-        }),
-    )?;
-    // Codex's successful turn/start response is allowed to have a null
-    // result. The JSON-RPC error field is the authoritative rejection signal;
-    // treating null as failure caused the floating widget to fall back to
-    // terminal injection even after the daemon had accepted the message.
-    let _ = result;
-    Ok(true)
+    Err("the Atlas app-server does not own an active turn for this session".to_string())
 }
 
-/// Queue through Atlas's app-server after the official `codex queue` command
-/// is unavailable. The response is validated so an empty JSON-RPC success can
-/// never be reported to the floating window as a delivered message.
+/// Queue through Atlas's app-server as a compatibility fallback. Codex owns
+/// queue consumption; Atlas must never force-start a queued turn because the
+/// interactive CLI may already be managing the same thread.
 fn app_server_queue_message(
     state: &AppState,
     session: &SessionRecord,
@@ -7683,6 +8072,50 @@ fn app_server_queue_message(
     )?;
     validate_app_server_queue_receipt(&result, &session.id, &client_message_id)?;
     Ok(true)
+}
+
+fn queue_session_message_with_attachments(
+    state: &AppState,
+    session: &SessionRecord,
+    input: &str,
+    attachments: &[FloatingAttachment],
+) -> Result<(), String> {
+    queue_session_message_with_attachments_focus(state, session, input, attachments, false)
+}
+
+/// Deliver queue-mode input to the real Codex CLI first. An interactive TUI
+/// already has the correct queue lifecycle, so typing into it lets Codex hold
+/// the message until the active turn ends. The CLI queue and app-server queue
+/// are durable fallbacks for a background or exited session.
+fn queue_session_message_with_attachments_focus(
+    state: &AppState,
+    session: &SessionRecord,
+    input: &str,
+    attachments: &[FloatingAttachment],
+    focus_terminal: bool,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    match send_text_to_terminal(session, input, focus_terminal) {
+        Ok(()) => return Ok(()),
+        Err(error) => errors.push(format!("Codex terminal queue: {error}")),
+    }
+    match queue_codex_message_with_attachments_detailed(session, input, attachments) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            errors.push(format!("codex queue: {error}"));
+            match app_server_queue_message(state, session, input, attachments) {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    errors.push("app-server queue did not accept the message".to_string());
+                    Err(errors.join("; "))
+                }
+                Err(error) => {
+                    errors.push(format!("app-server queue: {error}"));
+                    Err(errors.join("; "))
+                }
+            }
+        }
+    }
 }
 
 fn validate_app_server_queue_receipt(
@@ -7722,18 +8155,6 @@ fn validate_app_server_queue_receipt(
         ));
     }
     Ok(submission_id.to_string())
-}
-
-fn queue_codex_message(session: &SessionRecord, input: &str) -> bool {
-    queue_codex_message_with_attachments(session, input, &[])
-}
-
-fn queue_codex_message_with_attachments(
-    session: &SessionRecord,
-    input: &str,
-    attachments: &[FloatingAttachment],
-) -> bool {
-    queue_codex_message_with_attachments_detailed(session, input, attachments).is_ok()
 }
 
 /// Queue through the installed Codex CLI and retain stderr for user-visible
@@ -7802,11 +8223,6 @@ fn codex_queue_receipt(output: &str, thread_id: &str) -> Option<String> {
         (reported_thread == thread_id && session_id_like(submission_id.trim()))
             .then(|| submission_id.trim().to_string())
     })
-}
-
-fn is_continue_prompt(input: &str) -> bool {
-    let normalized = input.trim();
-    normalized.eq_ignore_ascii_case("continue") || normalized == "继续"
 }
 
 #[cfg(target_os = "windows")]
@@ -8176,36 +8592,15 @@ fn send_session_input(
     input: String,
     focus_terminal: Option<bool>,
 ) -> Result<bool, String> {
-    // External terminals do not expose stdin to Atlas. `codex queue` is the
-    // supported cross-process path. A manual click can additionally focus the
-    // exact terminal window and inject the prompt if queue is unavailable.
     let session = find_session_for_command(&session_id)?;
-    let mut delivery_errors = Vec::new();
-    match queue_codex_message_with_attachments_detailed(&session, &input, &[]) {
-        Ok(()) => return Ok(true),
-        Err(error) => delivery_errors.push(format!("codex queue: {error}")),
-    }
-    match app_server_queue_message(&state, &session, &input, &[]) {
-        Ok(true) => return Ok(true),
-        Ok(false) => {
-            delivery_errors.push("app-server queue did not accept the message".to_string())
-        }
-        Err(error) => delivery_errors.push(format!("app-server queue: {error}")),
-    }
-    match app_server_send_message(&state, &session, &input, "queue", &[]) {
-        Ok(true) => return Ok(true),
-        Ok(false) => delivery_errors.push("app-server send did not accept the message".to_string()),
-        Err(error) => delivery_errors.push(format!("app-server send: {error}")),
-    }
-    // `codex queue` is deliberately allowed for an exited thread too. This
-    // persists the prompt without opening or focusing a terminal; the user
-    // can activate the queued thread separately when needed.
-    if focus_terminal.unwrap_or(false) || is_continue_prompt(&input) {
-        return send_text_to_terminal(&session, &input, focus_terminal.unwrap_or(false))
-            .map(|_| true)
-            .map_err(|error| format!("{}; terminal: {error}", delivery_errors.join("; ")));
-    }
-    Err(delivery_errors.join("; "))
+    queue_session_message_with_attachments_focus(
+        &state,
+        &session,
+        &input,
+        &[],
+        focus_terminal.unwrap_or(false),
+    )
+    .map(|_| true)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -8247,43 +8642,22 @@ fn send_floating_message(
     }
     let mut delivery_errors = Vec::new();
     if request.mode.trim().eq_ignore_ascii_case("interrupt") {
-        match app_server_send_message(&state, &session, &input, "interrupt", &request.attachments) {
+        match send_text_to_terminal_then_escape(&session, &input) {
+            Ok(()) => return Ok(true),
+            Err(error) => delivery_errors.push(format!("Codex terminal interrupt: {error}")),
+        }
+        // Keep app-server steering only as a compatibility fallback for
+        // sessions whose terminal cannot be addressed directly.
+        match app_server_send_interrupt(&state, &session, &input, &request.attachments) {
             Ok(true) => return Ok(true),
             Ok(false) => delivery_errors.push("app-server did not accept the message".to_string()),
             Err(error) => delivery_errors.push(format!("app-server: {error}")),
         }
-        if !session.running && terminal_window_for_session(&session).is_none() {
-            return Err(format!(
-                "{}; {}",
-                delivery_errors.join("; "),
-                "the session is not running and no matching terminal was found"
-            ));
-        }
-        return send_text_to_terminal(&session, &input, true)
-            .map(|_| true)
-            .map_err(|error| format!("{}; terminal: {error}", delivery_errors.join("; ")));
+        return Err(delivery_errors.join("; "));
     }
-    match queue_codex_message_with_attachments_detailed(&session, &input, &request.attachments) {
+    match queue_session_message_with_attachments(&state, &session, &input, &request.attachments) {
         Ok(()) => return Ok(true),
-        Err(error) => delivery_errors.push(format!("codex queue: {error}")),
-    }
-    match app_server_queue_message(&state, &session, &input, &request.attachments) {
-        Ok(true) => return Ok(true),
-        Ok(false) => delivery_errors.push("app-server did not accept the message".to_string()),
-        Err(error) => delivery_errors.push(format!("app-server queue: {error}")),
-    }
-    match app_server_send_message(&state, &session, &input, "queue", &request.attachments) {
-        Ok(true) => return Ok(true),
-        Ok(false) => delivery_errors.push("app-server did not accept the message".to_string()),
-        Err(error) => delivery_errors.push(format!("app-server send: {error}")),
-    }
-    // `codex queue` is not present in older CLI releases. In that case use the
-    // same real terminal input path as the explicit continue action so the
-    // floating widget still submits the message and Enter reliably.
-    if session.running || terminal_window_for_session(&session).is_some() {
-        return send_text_to_terminal(&session, &input, true)
-            .map(|_| true)
-            .map_err(|error| format!("{}; terminal: {error}", delivery_errors.join("; ")));
+        Err(error) => delivery_errors.push(error),
     }
     Err(delivery_errors.join("; "))
 }
@@ -11660,7 +12034,7 @@ pub fn run() {
                 }
             }
             let _ = build_tray(app.handle());
-            spawn_mobile_bridge();
+            spawn_mobile_bridge(app_state.clone());
             // Tunnel startup performs network handshakes and must never block
             // Tauri setup. Run both optional transports in the background so
             // the main window is usable immediately even when a host is down.
@@ -11825,6 +12199,57 @@ mod runtime_probe_tests {
     }
 
     #[test]
+    fn workspace_paths_are_relative_and_stay_inside_the_root() {
+        assert!(workspace_relative_components("").is_ok());
+        assert!(workspace_relative_components("src/main.rs").is_ok());
+        assert!(workspace_relative_components("../outside").is_err());
+        assert!(workspace_relative_components("src/../../outside").is_err());
+        assert!(workspace_relative_components("C:/outside").is_err());
+        assert!(workspace_relative_components("/outside").is_err());
+
+        let root = Path::new(r"C:\work\project");
+        assert!(workspace_path_is_within(
+            root,
+            Path::new(r"C:\work\project\src")
+        ));
+        assert!(workspace_path_is_within(root, root));
+        assert!(!workspace_path_is_within(
+            root,
+            Path::new(r"C:\work\project-old")
+        ));
+        assert!(!workspace_path_is_within(root, Path::new(r"C:\work\other")));
+    }
+
+    #[test]
+    fn workspace_mime_types_mark_text_and_images_previewable() {
+        assert_eq!(
+            workspace_mime_type(Path::new("notes.md")),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            workspace_mime_type(Path::new("data.json")),
+            "application/json"
+        );
+        assert_eq!(workspace_mime_type(Path::new("diagram.png")), "image/png");
+        assert_eq!(
+            workspace_mime_type(Path::new("archive.zip")),
+            "application/zip"
+        );
+        assert!(workspace_is_previewable(
+            Path::new("notes.md"),
+            "text/plain; charset=utf-8"
+        ));
+        assert!(workspace_is_previewable(
+            Path::new("diagram.png"),
+            "image/png"
+        ));
+        assert!(!workspace_is_previewable(
+            Path::new("archive.zip"),
+            "application/zip"
+        ));
+    }
+
+    #[test]
     fn skill_detail_keeps_the_skill_record_nested() {
         let detail = SkillDetail {
             skill: SkillRecord {
@@ -11864,14 +12289,6 @@ mod runtime_probe_tests {
             Some(id.to_string())
         );
         assert!(!session_id_like("not-a-session-id"));
-    }
-
-    #[test]
-    fn recognizes_localized_continue_prompts() {
-        assert!(is_continue_prompt("continue"));
-        assert!(is_continue_prompt("  CONTINUE\n"));
-        assert!(is_continue_prompt("继续"));
-        assert!(!is_continue_prompt("resume"));
     }
 
     #[test]

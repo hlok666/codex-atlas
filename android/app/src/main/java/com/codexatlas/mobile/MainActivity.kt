@@ -3,16 +3,20 @@ package com.codexatlas.mobile
 import android.Manifest
 import android.appwidget.AppWidgetManager
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.SystemClock
 import android.provider.Settings
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -28,6 +32,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,8 +60,13 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Create
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -85,6 +96,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.layout.RowScope
@@ -96,6 +109,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
@@ -246,7 +260,13 @@ private enum class MobilePage {
     Conversation,
     Queue,
     Settings,
+    Workspace,
 }
+
+private data class WorkspacePreviewState(
+    val path: String,
+    val file: AtlasWorkspaceFile,
+)
 
 fun primaryBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
     ConnectionRoute.Auto -> if (details.preferTunnel) details.tunnelUrl else details.lanUrl
@@ -327,6 +347,80 @@ private fun connectionFailureMessage(error: Throwable, chinese: Boolean): String
             if (chinese) "无法连接设备" else "Could not reach the device"
         else -> if (chinese) "连接失败，请重试" else "Connection failed; try again"
     }
+}
+
+private fun workspaceFileName(value: String): String {
+    val normalized = value.trim()
+        .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+        .trim()
+        .take(96)
+    return normalized.ifBlank { "workspace-file" }
+}
+
+private fun workspaceSizeLabel(size: Long, chinese: Boolean): String {
+    if (size < 1_024L) return if (chinese) "$size B" else "$size B"
+    if (size < 1_024L * 1_024L) return "${size / 1_024L} KB"
+    if (size < 1_024L * 1_024L * 1_024L) return "${"%.1f".format(Locale.US, size / 1_048_576.0)} MB"
+    return "${"%.1f".format(Locale.US, size / 1_073_741_824.0)} GB"
+}
+
+private fun workspaceCacheFile(context: Context, sessionId: String, name: String): java.io.File {
+    val sessionKey = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80).ifBlank { "session" }
+    return java.io.File(context.cacheDir, "workspace/$sessionKey/${workspaceFileName(name)}")
+}
+
+private fun shareWorkspaceFile(context: Context, file: java.io.File, mime: String, chinese: Boolean) {
+    if (!file.isFile) {
+        Toast.makeText(context, if (chinese) "文件尚未下载" else "File is not downloaded", Toast.LENGTH_SHORT).show()
+        return
+    }
+    runCatching {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND)
+            .setType(mime.substringBefore(';').ifBlank { "application/octet-stream" })
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(Intent.createChooser(intent, if (chinese) "分享工作区文件" else "Share workspace file"))
+    }.onFailure { error ->
+        Toast.makeText(context, error.message ?: if (chinese) "无法分享文件" else "Unable to share file", Toast.LENGTH_LONG).show()
+    }
+}
+
+private fun saveWorkspaceFileToDownloads(
+    context: Context,
+    file: java.io.File,
+    name: String,
+    mime: String,
+    chinese: Boolean,
+): String {
+    val normalizedMime = mime.substringBefore(';').ifBlank { "application/octet-stream" }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, workspaceFileName(name))
+            put(MediaStore.Downloads.MIME_TYPE, normalizedMime)
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Codex Atlas")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error(if (chinese) "无法创建下载文件" else "Could not create the download file")
+        try {
+            context.contentResolver.openOutputStream(uri)?.use { output ->
+                file.inputStream().use { input -> input.copyTo(output) }
+            } ?: error(if (chinese) "无法写入下载文件" else "Could not write the download file")
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            context.contentResolver.update(uri, values, null, null)
+            return if (chinese) "已保存到 Download/Codex Atlas" else "Saved to Download/Codex Atlas"
+        } catch (error: Throwable) {
+            context.contentResolver.delete(uri, null, null)
+            throw error
+        }
+    }
+    val directory = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        ?: error(if (chinese) "无法访问下载目录" else "Downloads directory is unavailable")
+    val target = java.io.File(directory, workspaceFileName(name))
+    file.inputStream().use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+    return target.absolutePath
 }
 
 private fun openVoiceInputSettings(context: Context, chinese: Boolean) {
@@ -552,6 +646,15 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var pendingVoiceSend by remember { mutableStateOf<List<String>>(emptyList()) }
     var pushPulse by remember { mutableStateOf(0L) }
     var readRepliesAloud by remember { mutableStateOf(BridgePreferences.readRepliesAloud(context)) }
+    var workspaceSessionId by remember { mutableStateOf("") }
+    var workspacePath by remember { mutableStateOf("") }
+    var workspaceListing by remember { mutableStateOf<AtlasWorkspaceListing?>(null) }
+    var workspaceLoading by remember { mutableStateOf(false) }
+    var workspaceError by remember { mutableStateOf<String?>(null) }
+    var workspacePreview by remember { mutableStateOf<WorkspacePreviewState?>(null) }
+    var workspaceActionPath by remember { mutableStateOf<String?>(null) }
+    var workspaceActionError by remember { mutableStateOf<String?>(null) }
+    var workspaceReload by remember { mutableStateOf(0) }
     val voiceController = remember(context, zh) {
         VoiceInputController(context, zh) { next -> voiceSnapshot = next }
     }
@@ -596,7 +699,14 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         if (granted) scannerVisible = true
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    BackHandler(enabled = mobilePage != MobilePage.Home) { mobilePage = MobilePage.Home }
+    BackHandler(enabled = mobilePage != MobilePage.Home) {
+        if (mobilePage == MobilePage.Workspace && workspacePreview != null) {
+            workspacePreview = null
+            workspaceActionError = null
+        } else {
+            mobilePage = if (mobilePage == MobilePage.Workspace) MobilePage.Conversation else MobilePage.Home
+        }
+    }
 
     fun beginVoiceInput(continuous: Boolean) {
         pendingVoiceMode = continuous
@@ -605,6 +715,145 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             voiceController.start(message, continuous)
         } else {
             audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun openWorkspace(sessionId: String = selectedSessionId) {
+        val target = sessionId.trim()
+        if (target.isEmpty()) {
+            Toast.makeText(context, if (zh) "当前会话没有可用工作区" else "The current session has no workspace", Toast.LENGTH_SHORT).show()
+            return
+        }
+        workspaceSessionId = target
+        workspacePath = ""
+        workspaceListing = null
+        workspaceError = null
+        workspacePreview = null
+        workspaceActionPath = null
+        workspaceActionError = null
+        mobilePage = MobilePage.Workspace
+    }
+
+    fun workspaceDownload(relativePath: String, shareAfter: Boolean = false) {
+        val details = MainActivity.parsePairing(pairing) ?: return
+        val sessionId = workspaceSessionId
+        if (sessionId.isBlank() || relativePath.isBlank() || workspaceActionPath != null) return
+        workspaceActionPath = relativePath
+        workspaceActionError = null
+        scope.launch {
+            val target = workspaceCacheFile(context, sessionId, relativePath)
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    AtlasBridgeClient(primary, details.token).downloadWorkspaceFileAny(
+                        sessionId,
+                        relativePath,
+                        target,
+                        fallback,
+                    )
+                }
+            }
+            result.onSuccess { download ->
+                if (shareAfter) {
+                    shareWorkspaceFile(context, download.file, download.mime, zh)
+                } else {
+                    runCatching {
+                        saveWorkspaceFileToDownloads(context, download.file, download.name, download.mime, zh)
+                    }.onSuccess { messageText ->
+                        Toast.makeText(context, messageText, Toast.LENGTH_LONG).show()
+                    }.onFailure { error ->
+                        Toast.makeText(context, error.message ?: if (zh) "保存文件失败" else "Could not save file", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }.onFailure { error ->
+                workspaceActionError = error.message ?: if (zh) "获取文件失败" else "Could not fetch file"
+            }
+            workspaceActionPath = null
+        }
+    }
+
+    fun workspaceShare(relativePath: String) {
+        val details = MainActivity.parsePairing(pairing) ?: return
+        val sessionId = workspaceSessionId
+        if (sessionId.isBlank() || relativePath.isBlank() || workspaceActionPath != null) return
+        workspaceActionPath = relativePath
+        workspaceActionError = null
+        scope.launch {
+            val target = workspaceCacheFile(context, sessionId, relativePath)
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (target.isFile && target.length() > 0) {
+                        AtlasWorkspaceDownload(
+                            target.name,
+                            workspaceListing?.entries?.firstOrNull { it.path == relativePath }?.mime ?: "application/octet-stream",
+                            target.length(),
+                            target,
+                        )
+                    } else {
+                        val primary = primaryBridgeUrl(details, connectionRoute)
+                        val fallback = fallbackBridgeUrl(details, connectionRoute)
+                        AtlasBridgeClient(primary, details.token).downloadWorkspaceFileAny(
+                            sessionId,
+                            relativePath,
+                            target,
+                            fallback,
+                        )
+                    }
+                }
+            }
+            result.onSuccess { download -> shareWorkspaceFile(context, download.file, download.mime, zh) }
+                .onFailure { error -> workspaceActionError = error.message ?: if (zh) "分享文件失败" else "Could not share file" }
+            workspaceActionPath = null
+        }
+    }
+
+    fun workspacePreview(relativePath: String) {
+        val details = MainActivity.parsePairing(pairing) ?: return
+        val sessionId = workspaceSessionId
+        if (sessionId.isBlank() || relativePath.isBlank() || workspaceActionPath != null) return
+        workspaceActionPath = relativePath
+        workspaceActionError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    AtlasBridgeClient(primary, details.token).workspacePreviewAny(sessionId, relativePath, fallback)
+                }
+            }
+            result.onSuccess { file -> workspacePreview = WorkspacePreviewState(relativePath, file) }
+                .onFailure { error -> workspaceActionError = error.message ?: if (zh) "预览文件失败" else "Could not preview file" }
+            workspaceActionPath = null
+        }
+    }
+
+    LaunchedEffect(mobilePage, workspaceSessionId, workspacePath, selectedDeviceId, connectionRoute, pairing, workspaceReload) {
+        if (mobilePage != MobilePage.Workspace) return@LaunchedEffect
+        val details = MainActivity.parsePairing(pairing)
+        val sessionId = workspaceSessionId
+        if (details == null || sessionId.isBlank()) {
+            workspaceError = if (zh) "没有可用的工作区连接" else "No workspace connection is available"
+            workspaceListing = null
+            return@LaunchedEffect
+        }
+        workspaceLoading = true
+        workspaceError = null
+        val requestedPath = workspacePath
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val primary = primaryBridgeUrl(details, connectionRoute)
+                val fallback = fallbackBridgeUrl(details, connectionRoute)
+                AtlasBridgeClient(primary, details.token).workspaceAny(sessionId, requestedPath, fallback)
+            }
+        }
+        if (mobilePage == MobilePage.Workspace && workspaceSessionId == sessionId && workspacePath == requestedPath) {
+            result.onSuccess { workspaceListing = it }
+                .onFailure { error ->
+                    workspaceListing = null
+                    workspaceError = error.message ?: if (zh) "读取工作区失败" else "Could not read workspace"
+                }
+            workspaceLoading = false
         }
     }
 
@@ -946,6 +1195,54 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             queuedMessageCount = queuedMessages.size
             if (!sent) AtlasSyncService.start(context)
         }
+    }
+
+    if (mobilePage == MobilePage.Workspace) {
+        val workspaceSession = sessions.firstOrNull { it.id == workspaceSessionId }
+        MobileWorkspacePage(
+            chinese = zh,
+            sessionTitle = workspaceSession?.title?.ifBlank { null } ?: if (zh) "工作区文件" else "Workspace files",
+            workspaceName = workspaceListing?.rootName
+                ?: workspaceSession?.cwd?.let { it.substringAfterLast('/').substringAfterLast('\\') }?.ifBlank { null }
+                ?: if (zh) "工作区" else "Workspace",
+            currentPath = workspacePath,
+            listing = workspaceListing,
+            loading = workspaceLoading,
+            error = workspaceError,
+            preview = workspacePreview,
+            actionPath = workspaceActionPath,
+            actionError = workspaceActionError,
+            onBack = {
+                workspacePreview = null
+                workspaceActionError = null
+                mobilePage = MobilePage.Conversation
+            },
+            onUp = {
+                workspacePreview = null
+                workspaceActionError = null
+                workspacePath = workspacePath.substringBeforeLast('/', "")
+            },
+            onRefresh = {
+                workspacePreview = null
+                workspaceError = null
+                workspaceReload += 1
+            },
+            onOpenDirectory = { path ->
+                workspacePreview = null
+                workspaceActionError = null
+                workspacePath = path
+            },
+            onClosePreview = {
+                workspacePreview = null
+                workspaceActionError = null
+            },
+            onPreview = ::workspacePreview,
+            onDownload = { path -> workspaceDownload(path) },
+            onShare = ::workspaceShare,
+            onSavePreview = { path -> workspaceDownload(path) },
+            onSharePreview = { path -> workspaceShare(path) },
+        )
+        return
     }
 
     if (mobilePage == MobilePage.Queue) {
@@ -1353,6 +1650,13 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                         },
                                         enabled = !messageBusy && !voiceSnapshot.active,
                                     )
+                                    DropdownMenuItem(
+                                        text = { Text(if (zh) "工作区文件" else "Workspace files") },
+                                        onClick = {
+                                            conversationMenuExpanded = false
+                                            openWorkspace(conversationId)
+                                        },
+                                    )
                                     if (queuedMessageCount > 0) {
                                         DropdownMenuItem(
                                             text = { Text(if (zh) "发送队列 $queuedMessageCount" else "Queue $queuedMessageCount") },
@@ -1759,6 +2063,265 @@ private fun MobileQueuePage(
 }
 
 @Composable
+private fun MobileWorkspacePage(
+    chinese: Boolean,
+    sessionTitle: String,
+    workspaceName: String,
+    currentPath: String,
+    listing: AtlasWorkspaceListing?,
+    loading: Boolean,
+    error: String?,
+    preview: WorkspacePreviewState?,
+    actionPath: String?,
+    actionError: String?,
+    onBack: () -> Unit,
+    onClosePreview: () -> Unit,
+    onUp: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenDirectory: (String) -> Unit,
+    onPreview: (String) -> Unit,
+    onDownload: (String) -> Unit,
+    onShare: (String) -> Unit,
+    onSavePreview: (String) -> Unit,
+    onSharePreview: (String) -> Unit,
+) {
+    val previewFile = preview?.file
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFFCFDFC))
+            .safeDrawingPadding(),
+    ) {
+        if (previewFile != null) {
+            val previewPath = preview?.path.orEmpty()
+            MobilePageHeader(
+                title = previewFile.name,
+                chinese = chinese,
+                onBack = onClosePreview,
+                trailing = {
+                    Text(
+                        previewFile.mime.substringBefore(';'),
+                        color = Color(0xFF7A867B),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+            androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                val isText = previewFile.mime.startsWith("text/") || previewFile.mime == "application/json" || previewFile.mime == "image/svg+xml"
+                if (isText) {
+                    val text = remember(previewPath, previewFile.name, previewFile.bytes.size) {
+                        previewFile.bytes.toString(Charsets.UTF_8)
+                    }
+                    Text(
+                        text = text,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.White, RoundedCornerShape(8.dp))
+                            .border(1.dp, Color(0xFFE6EAE6), RoundedCornerShape(8.dp))
+                            .padding(14.dp),
+                        color = Color(0xFF26332A),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else if (previewFile.mime.startsWith("image/")) {
+                    val bitmap = remember(previewPath, previewFile.name, previewFile.bytes.size) {
+                        BitmapFactory.decodeByteArray(previewFile.bytes, 0, previewFile.bytes.size)
+                    }
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = previewFile.name,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 560.dp)
+                                .background(Color.White, RoundedCornerShape(8.dp))
+                                .border(1.dp, Color(0xFFE6EAE6), RoundedCornerShape(8.dp))
+                                .padding(8.dp),
+                            contentScale = ContentScale.Fit,
+                        )
+                    } else {
+                        Text(
+                            if (chinese) "图片预览失败，请下载文件后打开" else "Image preview failed. Download the file to open it.",
+                            color = Color(0xFF7A867B),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    }
+                } else {
+                    Text(
+                        if (chinese) "此文件类型不支持预览，请下载后使用其他应用打开" else "This file type cannot be previewed here. Download it to open in another app.",
+                        color = Color(0xFF7A867B),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+                Text(
+                    "${workspaceSizeLabel(previewFile.bytes.size.toLong(), chinese)} · ${previewFile.mime.substringBefore(';')}",
+                    color = Color(0xFF7A867B),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                    .navigationBarsPadding(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { onSavePreview(previewPath) },
+                    enabled = actionPath == null,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(8.dp))
+                    Text(if (chinese) "保存" else "Save")
+                }
+                Button(
+                    onClick = { onSharePreview(previewPath) },
+                    enabled = actionPath == null,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(8.dp))
+                    Text(if (chinese) "分享" else "Share")
+                }
+            }
+        } else {
+            MobilePageHeader(
+                title = if (chinese) "工作区文件" else "Workspace files",
+                chinese = chinese,
+                onBack = onBack,
+                trailing = {
+                    IconButton(onClick = onRefresh, enabled = !loading) {
+                        Icon(Icons.Filled.Refresh, contentDescription = if (chinese) "刷新" else "Refresh")
+                    }
+                },
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    workspaceName,
+                    color = Color(0xFF26332A),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (currentPath.isBlank()) "${if (chinese) "根目录" else "Root"} · $sessionTitle" else currentPath,
+                    color = Color(0xFF7A867B),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            androidx.compose.material3.HorizontalDivider(
+                modifier = Modifier.padding(top = 10.dp),
+                color = Color(0xFFE6EAE6),
+            )
+            if (currentPath.isNotBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = actionPath == null, onClick = onUp)
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null, tint = Color(0xFF2F7C3B))
+                    Spacer(Modifier.size(8.dp))
+                    Text(if (chinese) "返回上级" else "Parent folder", color = Color(0xFF2F7C3B), style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+            when {
+                loading -> Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color(0xFF2F7C3B))
+                }
+                error != null -> Column(
+                    modifier = Modifier.fillMaxWidth().weight(1f).padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(error, color = Color(0xFFB44A45), style = MaterialTheme.typography.bodyLarge)
+                    OutlinedButton(onClick = onRefresh) { Text(if (chinese) "重试" else "Retry") }
+                }
+                listing?.entries.isNullOrEmpty() -> Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(if (chinese) "此目录为空" else "This folder is empty", color = Color(0xFF7A867B), style = MaterialTheme.typography.bodyLarge)
+                }
+                else -> LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp),
+                ) {
+                    itemsIndexed(listing?.entries.orEmpty(), key = { _, item -> item.path }) { _, item ->
+                        val busy = actionPath == item.path
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !busy, onClick = {
+                                    if (item.kind == "directory") onOpenDirectory(item.path)
+                                    else if (item.previewable) onPreview(item.path)
+                                    else onDownload(item.path)
+                                })
+                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Icon(
+                                if (item.kind == "directory") Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
+                                contentDescription = null,
+                                tint = if (item.kind == "directory") Color(0xFFB17A2E) else Color(0xFF6C816F),
+                                modifier = Modifier.size(24.dp),
+                            )
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(item.name, color = Color(0xFF26332A), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (item.kind != "directory") {
+                                    Text(workspaceSizeLabel(item.size, chinese), color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                            if (busy) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else if (item.kind != "directory") {
+                                IconButton(onClick = { onDownload(item.path) }) {
+                                    Icon(Icons.Filled.Download, contentDescription = if (chinese) "下载" else "Download", modifier = Modifier.size(20.dp))
+                                }
+                                IconButton(onClick = { onShare(item.path) }) {
+                                    Icon(Icons.Filled.Share, contentDescription = if (chinese) "分享" else "Share", modifier = Modifier.size(20.dp))
+                                }
+                            }
+                        }
+                        androidx.compose.material3.HorizontalDivider(
+                            modifier = Modifier.padding(start = 56.dp),
+                            color = Color(0xFFE6EAE6),
+                        )
+                    }
+                }
+            }
+            if (!actionError.isNullOrBlank()) {
+                Text(
+                    actionError,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    color = Color(0xFFB44A45),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun MobileSettingsPage(
     chinese: Boolean,
     profile: AtlasDeviceProfile?,
@@ -1894,6 +2457,7 @@ private fun MobileBottomNav(current: MobilePage, chinese: Boolean, onSelect: (Mo
                     MobilePage.Conversation -> Icons.Filled.Create
                     MobilePage.Queue -> Icons.AutoMirrored.Filled.List
                     MobilePage.Settings -> Icons.Filled.Settings
+                    MobilePage.Workspace -> Icons.Filled.Folder
                 }
                 NavigationBarItem(
                     selected = current == page,

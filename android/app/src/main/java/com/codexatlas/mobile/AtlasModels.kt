@@ -150,3 +150,34 @@ data class AtlasDictationChunk(
     @SerialName("final") val finalChunk: Boolean = false,
     val clientMessageId: String = "",
 )
+
+@Serializable
+data class AtlasWorkspaceEntry(
+    val name: String = "",
+    val path: String = "",
+    val kind: String = "file",
+    val size: Long = 0,
+    val modifiedAtMs: Long = 0,
+    val mime: String = "application/octet-stream",
+    val previewable: Boolean = false,
+)
+
+@Serializable
+data class AtlasWorkspaceListing(
+    val path: String = "",
+    val rootName: String = "workspace",
+    val entries: List<AtlasWorkspaceEntry> = emptyList(),
+)
+
+data class AtlasWorkspaceFile(
+    val name: String,
+    val mime: String,
+    val bytes: ByteArray,
+)
+
+data class AtlasWorkspaceDownload(
+    val name: String,
+    val mime: String,
+    val size: Long,
+    val file: java.io.File,
+)
