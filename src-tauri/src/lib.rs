@@ -173,7 +173,27 @@ static MOBILE_MESSAGE_RECEIPTS: OnceLock<Mutex<MobileMessageReceiptState>> = Onc
 static MOBILE_PUSH_SUBSCRIBERS: OnceLock<Mutex<Vec<std::sync::mpsc::SyncSender<Vec<u8>>>>> =
     OnceLock::new();
 const MOBILE_PUSH_CHANNEL_CAPACITY: usize = 32;
-const MOBILE_PUSH_HEARTBEAT_MS: u64 = 15_000;
+// Keep the application-level heartbeat below common reverse-proxy idle
+// limits. tiny_http's chunked writer may coalesce small frames, so the client
+// also uses a longer read timeout and keeps sequence sync as the fallback.
+const MOBILE_PUSH_HEARTBEAT_MS: u64 = 10_000;
+const MOBILE_PUSH_CHUNK_BYTES: usize = 8 * 1024;
+
+fn flushable_mobile_sse_frame(mut frame: Vec<u8>) -> Vec<u8> {
+    // tiny_http's chunked encoder buffers up to 8 KiB before it writes a
+    // chunk. Pad the wake-only frame with an SSE comment so a heartbeat or
+    // update is flushed immediately instead of waiting for another event.
+    if frame.len() < MOBILE_PUSH_CHUNK_BYTES {
+        let remaining = MOBILE_PUSH_CHUNK_BYTES - frame.len();
+        if remaining >= 2 {
+            frame.extend(std::iter::repeat(b' ').take(remaining - 2));
+            frame.extend_from_slice(b"\n\n");
+        } else {
+            frame.extend(std::iter::repeat(b' ').take(remaining));
+        }
+    }
+    frame
+}
 
 struct MobilePushReader {
     receiver: std::sync::mpsc::Receiver<Vec<u8>>,
@@ -208,7 +228,7 @@ impl Read for MobilePushReader {
             {
                 Ok(value) => value,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    b": atlas-heartbeat\n\n".to_vec()
+                    flushable_mobile_sse_frame(b": atlas-heartbeat\n\n".to_vec())
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             };
@@ -234,7 +254,7 @@ fn mobile_push_subscribe() -> MobilePushReader {
         "atMs": now_ms(),
     });
     let ready_event = format!("event: ready\ndata: {}\n\n", ready);
-    let _ = sender.try_send(ready_event.into_bytes());
+    let _ = sender.try_send(flushable_mobile_sse_frame(ready_event.into_bytes()));
     if let Ok(mut subscribers) = MOBILE_PUSH_SUBSCRIBERS
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
@@ -250,7 +270,8 @@ fn publish_mobile_push(reason: &str) {
         "reason": reason,
         "atMs": now_ms(),
     });
-    let event = format!("event: sync\ndata: {}\n\n", payload).into_bytes();
+    let event =
+        flushable_mobile_sse_frame(format!("event: sync\ndata: {}\n\n", payload).into_bytes());
     let Ok(mut subscribers) = MOBILE_PUSH_SUBSCRIBERS
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
@@ -11748,14 +11769,16 @@ mod runtime_probe_tests {
     #[test]
     fn mobile_push_stream_starts_ready_and_delivers_wake_events() {
         let mut reader = mobile_push_subscribe();
-        let mut buffer = [0_u8; 512];
+        let mut buffer = [0_u8; MOBILE_PUSH_CHUNK_BYTES];
         let size = reader.read(&mut buffer).expect("read SSE ready frame");
+        assert_eq!(size, MOBILE_PUSH_CHUNK_BYTES);
         let ready = String::from_utf8_lossy(&buffer[..size]);
         assert!(ready.contains("event: ready"));
         assert!(ready.contains("\"protocol\":\"sse-v1\""));
 
         publish_mobile_push("test");
         let size = reader.read(&mut buffer).expect("read SSE sync frame");
+        assert_eq!(size, MOBILE_PUSH_CHUNK_BYTES);
         let sync = String::from_utf8_lossy(&buffer[..size]);
         assert!(sync.contains("event: sync"));
         assert!(sync.contains("\"reason\":\"test\""));
