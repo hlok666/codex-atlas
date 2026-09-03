@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "codex-atlas"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "dirs",
  "keyring",
@@ -584,6 +584,7 @@ dependencies = [
  "tungstenite",
  "url",
  "walkdir",
+ "webview2-com",
  "windows-sys 0.61.2",
 ]
 

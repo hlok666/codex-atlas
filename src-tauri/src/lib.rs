@@ -5,7 +5,10 @@ use std::{
     net::TcpStream,
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -19,6 +22,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, Update
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
+    window::Color,
     AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
@@ -297,8 +301,13 @@ const MOBILE_SESSION_CACHE_TTL_MS: i64 = 5_000;
 const MOBILE_BALANCE_REFRESH_INTERVAL_MS: i64 = 15_000;
 const MOBILE_BALANCE_STALE_AFTER_MS: i64 = 45_000;
 const MOBILE_WORKSPACE_ENTRY_LIMIT: usize = 500;
-const MOBILE_WORKSPACE_PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const MOBILE_WORKSPACE_PREVIEW_MAX_BYTES: u64 = 24 * 1024 * 1024;
 const MOBILE_WORKSPACE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+const FLOATING_HEARTBEAT_STALE_MS: i64 = 20_000;
+const FLOATING_RELOAD_COOLDOWN_MS: i64 = 30_000;
+static FLOATING_LAST_HEARTBEAT_MS: AtomicI64 = AtomicI64::new(0);
+static FLOATING_LAST_RELOAD_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Default)]
 struct ProcessSnapshotCache {
@@ -2975,10 +2984,20 @@ fn workspace_is_previewable(path: &Path, mime: &str) -> bool {
     mime.starts_with("text/")
         || mime == "application/json"
         || mime.starts_with("image/")
+        || mime == "application/pdf"
+        || mime == "application/msword"
+        || mime == "application/vnd.ms-excel"
+        || mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        || mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         || path
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("svg"))
+            .is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "svg" | "pdf" | "doc" | "docx" | "xls" | "xlsx"
+                )
+            })
 }
 
 fn list_workspace_entries(
@@ -8895,6 +8914,73 @@ fn apply_floating_window_shape(_window: &tauri::WebviewWindow, _skin: &str) -> R
     Ok(())
 }
 
+fn prepare_floating_window_surface(window: &WebviewWindow) {
+    // Keep the native and WebView surfaces in the same light color while the
+    // renderer starts or recovers, avoiding a platform-default black flash.
+    let _ = window.set_background_color(Some(Color(247, 250, 246, 255)));
+}
+
+#[cfg(target_os = "windows")]
+fn attach_floating_webview_recovery(window: &WebviewWindow) {
+    let recovery_window = window.clone();
+    let _ = window.with_webview(move |platform_webview| {
+        use webview2_com::ProcessFailedEventHandler;
+
+        let controller = platform_webview.controller();
+        let Ok(webview) = (unsafe { controller.CoreWebView2() }) else {
+            return;
+        };
+        let handler = ProcessFailedEventHandler::create(Box::new(move |sender, _args| {
+            let now = now_ms();
+            FLOATING_LAST_RELOAD_MS.store(now, Ordering::Relaxed);
+            FLOATING_LAST_HEARTBEAT_MS.store(now, Ordering::Relaxed);
+            if let Some(sender) = sender {
+                unsafe { sender.Reload()? };
+            } else {
+                let _ = recovery_window.reload();
+            }
+            Ok(())
+        }));
+        let mut token = 0_i64;
+        let _ = unsafe { webview.add_ProcessFailed(&handler, &mut token) };
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_floating_webview_recovery(_window: &WebviewWindow) {}
+
+#[tauri::command]
+fn floating_window_heartbeat() -> bool {
+    FLOATING_LAST_HEARTBEAT_MS.store(now_ms(), Ordering::Relaxed);
+    true
+}
+
+fn spawn_floating_window_watchdog(app: AppHandle) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(5));
+        let Some(window) = app.get_webview_window("floating") else {
+            continue;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let now = now_ms();
+        let heartbeat = FLOATING_LAST_HEARTBEAT_MS.load(Ordering::Relaxed);
+        let last_reload = FLOATING_LAST_RELOAD_MS.load(Ordering::Relaxed);
+        if heartbeat <= 0
+            || now.saturating_sub(heartbeat) <= FLOATING_HEARTBEAT_STALE_MS
+            || now.saturating_sub(last_reload) <= FLOATING_RELOAD_COOLDOWN_MS
+        {
+            continue;
+        }
+        FLOATING_LAST_RELOAD_MS.store(now, Ordering::Relaxed);
+        FLOATING_LAST_HEARTBEAT_MS.store(now, Ordering::Relaxed);
+        prepare_floating_window_surface(&window);
+        let _ = window.reload();
+        let _ = apply_floating_window_shape(&window, &stored_floating_window_skin());
+    });
+}
+
 fn stored_floating_window_size() -> f64 {
     fs::read_to_string(floating_window_size_path())
         .ok()
@@ -8979,19 +9065,27 @@ async fn set_floating_window_visible(app: AppHandle, visible: bool) -> Result<bo
             // combinations, so Windows uses an opaque surface clipped by a
             // native region. WebKit can keep its native transparent surface.
             #[cfg(target_os = "windows")]
-            let builder = builder.transparent(false);
+            let builder = builder
+                .transparent(false)
+                .background_color(Color(247, 250, 246, 255));
             #[cfg(not(target_os = "windows"))]
             let builder = builder.transparent(true);
-            builder
+            let window = builder
                 .shadow(false)
                 .focusable(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .build()
-                .map_err(|error| format!("create floating window: {error}"))?
+                .map_err(|error| format!("create floating window: {error}"))?;
+            prepare_floating_window_surface(&window);
+            attach_floating_webview_recovery(&window);
+            FLOATING_LAST_HEARTBEAT_MS.store(now_ms(), Ordering::Relaxed);
+            window
         }
     };
     if visible {
+        prepare_floating_window_surface(&window);
+        FLOATING_LAST_HEARTBEAT_MS.store(now_ms(), Ordering::Relaxed);
         apply_floating_window_shape(&window, &stored_floating_window_skin())?;
         window
             .show()
@@ -12057,6 +12151,7 @@ pub fn run() {
             }
             let state = app.state::<AppState>().inner().clone();
             spawn_runtime_monitor(app.handle().clone(), state);
+            spawn_floating_window_watchdog(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -12069,6 +12164,7 @@ pub fn run() {
             set_floating_window_size,
             set_floating_window_shape,
             set_floating_always_on_top,
+            floating_window_heartbeat,
             show_notification,
             list_sessions,
             list_running_codex_sessions,
@@ -12221,7 +12317,7 @@ mod runtime_probe_tests {
     }
 
     #[test]
-    fn workspace_mime_types_mark_text_and_images_previewable() {
+    fn workspace_mime_types_mark_supported_documents_previewable() {
         assert_eq!(
             workspace_mime_type(Path::new("notes.md")),
             "text/plain; charset=utf-8"
@@ -12242,6 +12338,18 @@ mod runtime_probe_tests {
         assert!(workspace_is_previewable(
             Path::new("diagram.png"),
             "image/png"
+        ));
+        assert!(workspace_is_previewable(
+            Path::new("report.pdf"),
+            "application/pdf"
+        ));
+        assert!(workspace_is_previewable(
+            Path::new("report.docx"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ));
+        assert!(workspace_is_previewable(
+            Path::new("table.xlsx"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ));
         assert!(!workspace_is_previewable(
             Path::new("archive.zip"),

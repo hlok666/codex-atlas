@@ -497,6 +497,11 @@ export async function setFloatingWindowShape(skin: string): Promise<string | nul
   return invokeDesktop<string>('set_floating_window_shape', { skin })
 }
 
+/** Lets the native watchdog recover only a stalled floating WebView. */
+export async function floatingWindowHeartbeat(): Promise<boolean | null> {
+  return invokeDesktop<boolean>('floating_window_heartbeat', undefined, false)
+}
+
 /** Matches CC Switch's get_balance Tauri command: base_url + api_key. */
 export async function getCcSwitchBalance(request: CcSwitchBalanceRequest): Promise<CcSwitchBalanceResponse | null> {
   return invokeDesktop<CcSwitchBalanceResponse>('get_balance', request)

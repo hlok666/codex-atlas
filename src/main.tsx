@@ -58,7 +58,7 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, floatingWindowHeartbeat, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
 import type { DesktopUpdateInfo, DesktopUpdateProgress } from './lib/atlasBridge'
 import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { FloatingSessionTargetLock } from './lib/floatingSessionTarget'
@@ -2744,6 +2744,19 @@ function FloatingMini() {
       document.documentElement.style.removeProperty('--floating-font-scale')
     }
   }, [floatingSize, floatingFontScale])
+  useEffect(() => {
+    const heartbeat = () => void floatingWindowHeartbeat()
+    heartbeat()
+    const timer = window.setInterval(heartbeat, 5_000)
+    const onVisibilityChange = () => {
+      if (!document.hidden) heartbeat()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [])
   useEffect(() => {
     const syncNativeShape = () => void setFloatingWindowShape(floatingSkin)
     syncNativeShape()

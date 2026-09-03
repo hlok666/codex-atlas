@@ -1948,19 +1948,19 @@ html.floating-window-transparent #root { background: transparent !important; }
 .desktop-tv-leds .yellow { background: #dfb03d; }
 .desktop-tv-leds .green { background: #49bb70; }
 .desktop-tv-widget.active .desktop-tv-leds .green { opacity: 1; box-shadow: 0 0 0 3px rgba(73,187,112,.12); }
-.desktop-tv-widget.working .desktop-tv-leds .green { opacity: .7; animation: desktop-tv-led-breathe 1.7s ease-in-out infinite; }
+.desktop-tv-widget.working .desktop-tv-leds .green { opacity: .7; box-shadow: 0 0 0 3px rgba(73,187,112,.12); animation: desktop-tv-led-breathe 1.7s ease-in-out infinite; will-change: opacity, transform; }
 .desktop-tv-widget.warning .desktop-tv-leds .yellow { opacity: 1; box-shadow: 0 0 0 3px rgba(223,176,61,.13); }
 .desktop-tv-widget.blocked .desktop-tv-leds .red { opacity: 1; box-shadow: 0 0 0 3px rgba(217,84,80,.13); }
 .desktop-tv-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-height: 0; height: auto; padding: clamp(6px, 3.2%, 18px) clamp(8px, 4.4%, 24px) clamp(3px, 1.6%, 9px); }
 .desktop-tv-screen-frame { min-width: 0; min-height: 0; flex: 1; padding: 5px; border: 1px solid #bfc9bd; border-radius: 17px; background: linear-gradient(145deg, #e1e6df, #c7d0c4); box-shadow: inset 2px 2px 4px rgba(255,255,255,.68), inset -2px -3px 5px rgba(109,124,106,.24); }
 .desktop-tv-screen { position: relative; display: flex; flex-direction: column; height: 100%; overflow: hidden; padding: 9px 11px; border: 1px solid #9eafa0; border-radius: 12px 12px 17px 17px; color: #b8f3bd; background: radial-gradient(circle at 48% 40%, #28412f 0%, #122319 78%); box-shadow: inset 0 0 17px rgba(103,209,121,.2), inset 0 0 3px rgba(0,0,0,.72), 0 1px rgba(255,255,255,.5); font-family: 'Cascadia Mono', 'SFMono-Regular', monospace; }
-.desktop-tv-screen::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(115deg, rgba(255,255,255,.15), transparent 26%, transparent 75%, rgba(255,255,255,.04)); mix-blend-mode: screen; }
+.desktop-tv-screen::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(115deg, rgba(255,255,255,.12), transparent 26%, transparent 75%, rgba(255,255,255,.04)); opacity: .72; }
 .desktop-tv-scanlines { position: absolute; inset: 0; pointer-events: none; opacity: .23; background: repeating-linear-gradient(to bottom, transparent 0, transparent 3px, rgba(159,236,166,.28) 4px); }
 .desktop-tv-screen-head { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #91d99c; font-size: 10px; line-height: 1; }
 .desktop-tv-screen-head span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-tv-screen-head b { flex: 0 0 auto; color: #76bd80; font-size: 9px; font-weight: 500; }
 .desktop-tv-status-dot { width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%; background: #55c87a; box-shadow: 0 0 0 4px rgba(85,200,122,.15), 0 0 8px rgba(85,200,122,.55); }
-.desktop-tv-widget.working .desktop-tv-status-dot { animation: desktop-tv-led-breathe 1.7s ease-in-out infinite; }
+.desktop-tv-widget.working .desktop-tv-status-dot { animation: desktop-tv-led-breathe 1.7s ease-in-out infinite; will-change: opacity, transform; }
 .desktop-tv-widget.idle .desktop-tv-status-dot { background: #aeb8ae; box-shadow: 0 0 0 3px rgba(174,184,174,.12); }
 .desktop-tv-widget.warning .desktop-tv-status-dot { background: #e1b74c; box-shadow: 0 0 0 3px rgba(225,183,76,.12); }
 .desktop-tv-widget.blocked .desktop-tv-status-dot { background: #e2615c; box-shadow: 0 0 0 3px rgba(226,97,92,.12); }
@@ -2010,12 +2010,12 @@ html.floating-window-transparent #root { background: transparent !important; }
 .desktop-tv-context-choice svg.is-hidden { visibility: hidden; }
 .desktop-tv-context-choice svg.is-selected { color: #3f994c; }
 @keyframes desktop-tv-led-breathe {
-  0%, 100% { opacity: .55; box-shadow: 0 0 0 2px rgba(73,187,112,.1), 0 0 3px rgba(73,187,112,.18); }
-  50% { opacity: 1; box-shadow: 0 0 0 4px rgba(73,187,112,.16), 0 0 12px rgba(73,187,112,.58); }
+  0%, 100% { opacity: .55; transform: scale(.84); }
+  50% { opacity: 1; transform: scale(1); }
 }
 @media (prefers-reduced-motion: reduce) {
   .desktop-tv-widget.working .desktop-tv-leds .green,
-  .desktop-tv-widget.working .desktop-tv-status-dot { animation: none; opacity: 1; }
+  .desktop-tv-widget.working .desktop-tv-status-dot { animation: none; opacity: 1; will-change: auto; }
 }
 
 /* CRT presets share the same responsive bounds; each preset can shape its

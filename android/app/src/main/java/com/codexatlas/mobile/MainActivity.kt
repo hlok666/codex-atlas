@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -33,7 +32,6 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +63,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Settings
@@ -96,8 +95,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.layout.RowScope
@@ -266,6 +263,7 @@ private enum class MobilePage {
 private data class WorkspacePreviewState(
     val path: String,
     val file: AtlasWorkspaceFile,
+    val cacheFile: java.io.File,
 )
 
 fun primaryBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
@@ -383,6 +381,26 @@ private fun shareWorkspaceFile(context: Context, file: java.io.File, mime: Strin
         context.startActivity(Intent.createChooser(intent, if (chinese) "分享工作区文件" else "Share workspace file"))
     }.onFailure { error ->
         Toast.makeText(context, error.message ?: if (chinese) "无法分享文件" else "Unable to share file", Toast.LENGTH_LONG).show()
+    }
+}
+
+private fun openWorkspaceFile(context: Context, file: java.io.File, mime: String, chinese: Boolean) {
+    if (!file.isFile) {
+        Toast.makeText(context, if (chinese) "文件尚未下载" else "File is not downloaded", Toast.LENGTH_SHORT).show()
+        return
+    }
+    runCatching {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, mime.substringBefore(';').ifBlank { "application/octet-stream" })
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(intent)
+    }.onFailure {
+        Toast.makeText(
+            context,
+            if (chinese) "没有可打开此文件的应用" else "No app is available to open this file",
+            Toast.LENGTH_LONG,
+        ).show()
     }
 }
 
@@ -685,14 +703,6 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             pendingVoiceSend = pendingVoiceSend + text
         }
         onDispose {
-            if (registered) runCatching { context.unregisterReceiver(receiver) }
-        }
-    }
-    DisposableEffect(voiceController) {
-        voiceController.setContinuousTranscriptListener { text ->
-            pendingVoiceSend = pendingVoiceSend + text
-        }
-        onDispose {
             voiceController.setContinuousTranscriptListener(null)
             voiceController.destroy()
             speechOutput.destroy()
@@ -827,11 +837,62 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 runCatching {
                     val primary = primaryBridgeUrl(details, connectionRoute)
                     val fallback = fallbackBridgeUrl(details, connectionRoute)
-                    AtlasBridgeClient(primary, details.token).workspacePreviewAny(sessionId, relativePath, fallback)
+                    val file = AtlasBridgeClient(primary, details.token)
+                        .workspacePreviewAny(sessionId, relativePath, fallback)
+                    val target = workspaceCacheFile(context, sessionId, file.name)
+                    target.parentFile?.mkdirs()
+                    target.writeBytes(file.bytes)
+                    WorkspacePreviewState(relativePath, file, target)
                 }
             }
-            result.onSuccess { file -> workspacePreview = WorkspacePreviewState(relativePath, file) }
+            result.onSuccess { workspacePreview = it }
                 .onFailure { error -> workspaceActionError = error.message ?: if (zh) "预览文件失败" else "Could not preview file" }
+            workspaceActionPath = null
+        }
+    }
+
+    fun workspaceOpen(relativePath: String) {
+        val details = MainActivity.parsePairing(pairing) ?: return
+        val sessionId = workspaceSessionId
+        if (sessionId.isBlank() || relativePath.isBlank() || workspaceActionPath != null) return
+        workspaceActionPath = relativePath
+        workspaceActionError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val currentPreview = workspacePreview?.takeIf { it.path == relativePath }
+                    if (currentPreview != null && currentPreview.cacheFile.isFile) {
+                        AtlasWorkspaceDownload(
+                            currentPreview.file.name,
+                            currentPreview.file.mime,
+                            currentPreview.cacheFile.length(),
+                            currentPreview.cacheFile,
+                        )
+                    } else {
+                        val target = workspaceCacheFile(context, sessionId, relativePath)
+                        if (target.isFile && target.length() > 0) {
+                            AtlasWorkspaceDownload(
+                                target.name,
+                                workspaceListing?.entries?.firstOrNull { it.path == relativePath }?.mime
+                                    ?: "application/octet-stream",
+                                target.length(),
+                                target,
+                            )
+                        } else {
+                            val primary = primaryBridgeUrl(details, connectionRoute)
+                            val fallback = fallbackBridgeUrl(details, connectionRoute)
+                            AtlasBridgeClient(primary, details.token).downloadWorkspaceFileAny(
+                                sessionId,
+                                relativePath,
+                                target,
+                                fallback,
+                            )
+                        }
+                    }
+                }
+            }
+            result.onSuccess { download -> openWorkspaceFile(context, download.file, download.mime, zh) }
+                .onFailure { error -> workspaceActionError = error.message ?: if (zh) "打开文件失败" else "Could not open file" }
             workspaceActionPath = null
         }
     }
@@ -1247,6 +1308,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             onPreview = ::workspacePreview,
             onDownload = { path -> workspaceDownload(path) },
             onShare = ::workspaceShare,
+            onOpenPreview = ::workspaceOpen,
             onSavePreview = { path -> workspaceDownload(path) },
             onSharePreview = { path -> workspaceShare(path) },
         )
@@ -2090,6 +2152,7 @@ private fun MobileWorkspacePage(
     onPreview: (String) -> Unit,
     onDownload: (String) -> Unit,
     onShare: (String) -> Unit,
+    onOpenPreview: (String) -> Unit,
     onSavePreview: (String) -> Unit,
     onSharePreview: (String) -> Unit,
 ) {
@@ -2121,55 +2184,16 @@ private fun MobileWorkspacePage(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val isText = previewFile.mime.startsWith("text/") || previewFile.mime == "application/json" || previewFile.mime == "image/svg+xml"
-                if (isText) {
-                    val text = remember(previewPath, previewFile.name, previewFile.bytes.size) {
-                        previewFile.bytes.toString(Charsets.UTF_8)
-                    }
-                    Text(
-                        text = text,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color.White, RoundedCornerShape(8.dp))
-                            .border(1.dp, Color(0xFFE6EAE6), RoundedCornerShape(8.dp))
-                            .padding(14.dp),
-                        color = Color(0xFF26332A),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                } else if (previewFile.mime.startsWith("image/")) {
-                    val bitmap = remember(previewPath, previewFile.name, previewFile.bytes.size) {
-                        BitmapFactory.decodeByteArray(previewFile.bytes, 0, previewFile.bytes.size)
-                    }
-                    if (bitmap != null) {
-                        Image(
-                            bitmap = bitmap.asImageBitmap(),
-                            contentDescription = previewFile.name,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 560.dp)
-                                .background(Color.White, RoundedCornerShape(8.dp))
-                                .border(1.dp, Color(0xFFE6EAE6), RoundedCornerShape(8.dp))
-                                .padding(8.dp),
-                            contentScale = ContentScale.Fit,
-                        )
-                    } else {
-                        Text(
-                            if (chinese) "图片预览失败，请下载文件后打开" else "Image preview failed. Download the file to open it.",
-                            color = Color(0xFF7A867B),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                    }
-                } else {
-                    Text(
-                        if (chinese) "此文件类型不支持预览，请下载后使用其他应用打开" else "This file type cannot be previewed here. Download it to open in another app.",
-                        color = Color(0xFF7A867B),
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                }
+                WorkspaceFilePreview(
+                    file = previewFile,
+                    cacheFile = preview.cacheFile,
+                    pathKey = previewPath,
+                    chinese = chinese,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                )
                 Text(
                     "${workspaceSizeLabel(previewFile.bytes.size.toLong(), chinese)} · ${previewFile.mime.substringBefore(';')}",
                     color = Color(0xFF7A867B),
@@ -2184,6 +2208,15 @@ private fun MobileWorkspacePage(
                     .navigationBarsPadding(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                OutlinedButton(
+                    onClick = { onOpenPreview(previewPath) },
+                    enabled = actionPath == null,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text(if (chinese) "打开" else "Open")
+                }
                 OutlinedButton(
                     onClick = { onSavePreview(previewPath) },
                     enabled = actionPath == null,

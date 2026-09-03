@@ -20,8 +20,8 @@ android {
         applicationId = "com.codexatlas.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 29
-        versionName = "0.1.33"
+        versionCode = 30
+        versionName = "0.1.34"
     }
 
     buildFeatures {
@@ -72,4 +72,5 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.4.1")
     implementation("androidx.camera:camera-view:1.4.1")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    testImplementation("junit:junit:4.13.2")
 }
