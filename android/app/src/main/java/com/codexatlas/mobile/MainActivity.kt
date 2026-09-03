@@ -264,6 +264,7 @@ private data class WorkspacePreviewState(
     val path: String,
     val file: AtlasWorkspaceFile,
     val cacheFile: java.io.File,
+    val sizeBytes: Long,
 )
 
 fun primaryBridgeUrl(details: PairingDetails, route: ConnectionRoute): String = when (route) {
@@ -349,9 +350,12 @@ private fun connectionFailureMessage(error: Throwable, chinese: Boolean): String
 
 private fun workspaceFileName(value: String): String {
     val normalized = value.trim()
-        .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+        .map { character ->
+            if (character.isISOControl() || character in "\\/:*?\"<>|") '_' else character
+        }
+        .joinToString("")
         .trim()
-        .take(96)
+        .take(240)
     return normalized.ifBlank { "workspace-file" }
 }
 
@@ -832,17 +836,34 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         if (sessionId.isBlank() || relativePath.isBlank() || workspaceActionPath != null) return
         workspaceActionPath = relativePath
         workspaceActionError = null
+        val entryMime = workspaceListing?.entries?.firstOrNull { it.path == relativePath }?.mime.orEmpty()
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val primary = primaryBridgeUrl(details, connectionRoute)
                     val fallback = fallbackBridgeUrl(details, connectionRoute)
-                    val file = AtlasBridgeClient(primary, details.token)
-                        .workspacePreviewAny(sessionId, relativePath, fallback)
-                    val target = workspaceCacheFile(context, sessionId, file.name)
-                    target.parentFile?.mkdirs()
-                    target.writeBytes(file.bytes)
-                    WorkspacePreviewState(relativePath, file, target)
+                    val client = AtlasBridgeClient(primary, details.token)
+                    val previewKind = workspacePreviewKind(relativePath, entryMime)
+                    if (previewKind == WorkspacePreviewKind.Pdf) {
+                        // PDFs are streamed directly to disk. Keeping the whole archive in a
+                        // ByteArray is the main source of OOM crashes on larger documents.
+                        val target = workspaceCacheFile(context, sessionId, relativePath)
+                        val download = client.downloadWorkspaceFileAny(
+                            sessionId = sessionId,
+                            relativePath = relativePath,
+                            target = target,
+                            fallbackUrl = fallback,
+                            preview = true,
+                        )
+                        val file = AtlasWorkspaceFile(download.name, download.mime)
+                        WorkspacePreviewState(relativePath, file, download.file, download.size)
+                    } else {
+                        val file = client.workspacePreviewAny(sessionId, relativePath, fallback)
+                        val target = workspaceCacheFile(context, sessionId, file.name)
+                        target.parentFile?.mkdirs()
+                        target.writeBytes(file.bytes)
+                        WorkspacePreviewState(relativePath, file, target, file.bytes.size.toLong())
+                    }
                 }
             }
             result.onSuccess { workspacePreview = it }
@@ -2021,6 +2042,7 @@ private fun MobilePageHeader(
     chinese: Boolean,
     onBack: (() -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
+    maxTitleLines: Int? = null,
 ) {
     Row(
         modifier = Modifier
@@ -2044,6 +2066,8 @@ private fun MobilePageHeader(
             style = MaterialTheme.typography.titleLarge,
             color = Color(0xFF1F2A22),
             fontWeight = FontWeight.SemiBold,
+            maxLines = maxTitleLines ?: Int.MAX_VALUE,
+            overflow = if (maxTitleLines == null) TextOverflow.Clip else TextOverflow.Ellipsis,
         )
         trailing?.invoke()
     }
@@ -2157,6 +2181,8 @@ private fun MobileWorkspacePage(
     onSharePreview: (String) -> Unit,
 ) {
     val previewFile = preview?.file
+    var menuPath by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(currentPath) { menuPath = null }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2165,19 +2191,20 @@ private fun MobileWorkspacePage(
     ) {
         if (previewFile != null) {
             val previewPath = preview?.path.orEmpty()
+            val previewKey = "${preview?.cacheFile?.absolutePath.orEmpty()}::$previewPath"
             MobilePageHeader(
                 title = previewFile.name,
                 chinese = chinese,
                 onBack = onClosePreview,
                 trailing = {
-                    Text(
-                        previewFile.mime.substringBefore(';'),
-                        color = Color(0xFF7A867B),
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    WorkspaceFileIcon(
+                        name = previewFile.name,
+                        mime = previewFile.mime,
+                        kind = "file",
+                        chinese = chinese,
                     )
                 },
+                maxTitleLines = 2,
             )
             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
             Column(
@@ -2190,12 +2217,12 @@ private fun MobileWorkspacePage(
                 WorkspaceFilePreview(
                     file = previewFile,
                     cacheFile = preview.cacheFile,
-                    pathKey = previewPath,
+                    pathKey = previewKey,
                     chinese = chinese,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 )
                 Text(
-                    "${workspaceSizeLabel(previewFile.bytes.size.toLong(), chinese)} · ${previewFile.mime.substringBefore(';')}",
+                    "${workspaceSizeLabel(preview?.sizeBytes ?: previewFile.bytes.size.toLong(), chinese)} · ${previewFile.mime.substringBefore(';')}",
                     color = Color(0xFF7A867B),
                     style = MaterialTheme.typography.labelMedium,
                 )
@@ -2300,10 +2327,11 @@ private fun MobileWorkspacePage(
                 listing?.entries.isNullOrEmpty() -> Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(if (chinese) "此目录为空" else "This folder is empty", color = Color(0xFF7A867B), style = MaterialTheme.typography.bodyLarge)
                 }
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp),
-                ) {
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp),
+                    ) {
                     itemsIndexed(listing?.entries.orEmpty(), key = { _, item -> item.path }) { _, item ->
                         val busy = actionPath == item.path
                         Row(
@@ -2314,30 +2342,69 @@ private fun MobileWorkspacePage(
                                     else if (item.previewable) onPreview(item.path)
                                     else onDownload(item.path)
                                 })
+                                .heightIn(min = 68.dp)
                                 .padding(horizontal = 20.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            Icon(
-                                if (item.kind == "directory") Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
-                                contentDescription = null,
-                                tint = if (item.kind == "directory") Color(0xFFB17A2E) else Color(0xFF6C816F),
-                                modifier = Modifier.size(24.dp),
+                            WorkspaceFileIcon(
+                                name = item.name,
+                                mime = item.mime,
+                                kind = item.kind,
+                                chinese = chinese,
                             )
                             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(item.name, color = Color(0xFF26332A), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    item.name,
+                                    color = Color(0xFF26332A),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    lineHeight = 20.sp,
+                                )
                                 if (item.kind != "directory") {
-                                    Text(workspaceSizeLabel(item.size, chinese), color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
+                                    val category = workspaceFileCategory(item.name, item.mime, item.kind)
+                                    Text(
+                                        "${workspaceFileTypeLabel(category, item.name, chinese)} · ${workspaceSizeLabel(item.size, chinese)}",
+                                        color = Color(0xFF7A867B),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                             }
                             if (busy) {
                                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                             } else if (item.kind != "directory") {
-                                IconButton(onClick = { onDownload(item.path) }) {
-                                    Icon(Icons.Filled.Download, contentDescription = if (chinese) "下载" else "Download", modifier = Modifier.size(20.dp))
-                                }
-                                IconButton(onClick = { onShare(item.path) }) {
-                                    Icon(Icons.Filled.Share, contentDescription = if (chinese) "分享" else "Share", modifier = Modifier.size(20.dp))
+                                Box {
+                                    IconButton(onClick = { menuPath = item.path }) {
+                                        Icon(
+                                            Icons.Filled.MoreVert,
+                                            contentDescription = if (chinese) "文件操作" else "File actions",
+                                            modifier = Modifier.size(20.dp),
+                                        )
+                                    }
+                                    DropdownMenu(
+                                        expanded = menuPath == item.path,
+                                        onDismissRequest = { menuPath = null },
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text(if (chinese) "下载" else "Download") },
+                                            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
+                                            onClick = {
+                                                menuPath = null
+                                                onDownload(item.path)
+                                            },
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(if (chinese) "分享" else "Share") },
+                                            leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
+                                            onClick = {
+                                                menuPath = null
+                                                onShare(item.path)
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -2346,6 +2413,7 @@ private fun MobileWorkspacePage(
                             color = Color(0xFFE6EAE6),
                         )
                     }
+                }
                 }
             }
             if (!actionError.isNullOrBlank()) {

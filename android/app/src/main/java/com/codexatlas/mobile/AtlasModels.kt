@@ -172,7 +172,7 @@ data class AtlasWorkspaceListing(
 data class AtlasWorkspaceFile(
     val name: String,
     val mime: String,
-    val bytes: ByteArray,
+    val bytes: ByteArray = ByteArray(0),
 )
 
 data class AtlasWorkspaceDownload(

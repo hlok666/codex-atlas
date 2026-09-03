@@ -33,6 +33,13 @@ private object BridgeTransport {
         .retryOnConnectionFailure(true)
         .build()
 
+    // Workspace downloads can legitimately take longer than an API poll on a
+    // mobile connection. Keep the normal client strict while allowing a
+    // bounded window for a large PDF to finish streaming to disk.
+    val fileHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(5, TimeUnit.MINUTES)
+        .build()
+
     // SSE is intentionally long-lived. Keep a finite watchdog so a dead TCP
     // socket is eventually retried, but leave enough room for a proxy to
     // coalesce a small heartbeat before it reaches the handset.
@@ -102,6 +109,19 @@ private fun bridgeCandidates(primary: String, fallback: String): List<String> {
             }
         }
     }.distinct())
+}
+
+private fun workspaceResponseName(response: Response, relativePath: String): String {
+    // The bridge header is ASCII-safe and older builds replace non-ASCII
+    // characters with underscores. The path came from the JSON listing, so its
+    // basename is the most faithful display/download name.
+    val pathName = relativePath
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .trim()
+    return pathName.ifBlank {
+        response.header("X-Atlas-File-Name")?.trim().orEmpty()
+    }.ifBlank { "workspace-file" }
 }
 
 class AtlasBridgeClient(
@@ -392,8 +412,7 @@ class AtlasBridgeClient(
                         error(bridgeError(response.code, body))
                     }
                     val body = response.body?.bytes() ?: error("Atlas Bridge returned an empty workspace file")
-                    val name = response.header("X-Atlas-File-Name")
-                        ?: relativePath.substringAfterLast('/').ifBlank { "workspace-file" }
+                    val name = workspaceResponseName(response, relativePath)
                     val mime = response.header("Content-Type")?.substringBefore(';')?.trim()
                         .orEmpty().ifBlank { "application/octet-stream" }
                     BridgeTransport.succeeded(candidate)
@@ -413,18 +432,23 @@ class AtlasBridgeClient(
         target: File,
         fallbackUrl: String = "",
         onProgress: (downloaded: Long, total: Long) -> Unit = { _, _ -> },
+        preview: Boolean = false,
     ): AtlasWorkspaceDownload {
         val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
             try {
-                val query = "?path=" + java.net.URLEncoder.encode(relativePath, Charsets.UTF_8.name())
+                val query = buildString {
+                    append("?path=")
+                    append(java.net.URLEncoder.encode(relativePath, Charsets.UTF_8.name()))
+                    if (preview) append("&preview=1")
+                }
                 val request = Request.Builder()
                     .url(candidate + sessionIdPath(sessionId, "/workspace/file") + query)
                     .header("Authorization", "Bearer $token")
                     .get()
                     .build()
-                http.newCall(request).execute().use { response ->
+                BridgeTransport.fileHttp.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         val body = response.body?.string().orEmpty()
                         error(bridgeError(response.code, body))
@@ -447,8 +471,7 @@ class AtlasBridgeClient(
                             output.flush()
                         }
                     }
-                    val name = response.header("X-Atlas-File-Name")
-                        ?: relativePath.substringAfterLast('/').ifBlank { "workspace-file" }
+                    val name = workspaceResponseName(response, relativePath)
                     val mime = response.header("Content-Type")?.substringBefore(';')?.trim()
                         .orEmpty().ifBlank { "application/octet-stream" }
                     BridgeTransport.succeeded(candidate)

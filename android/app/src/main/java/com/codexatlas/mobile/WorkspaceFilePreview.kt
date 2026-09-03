@@ -26,6 +26,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -36,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +60,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.xml.sax.Attributes
 import org.xml.sax.InputSource
@@ -60,12 +73,45 @@ import java.io.StringReader
 import java.util.Locale
 import java.util.zip.ZipInputStream
 import javax.xml.parsers.SAXParserFactory
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private const val OFFICE_XML_ENTRY_LIMIT = 8 * 1024 * 1024
 private const val OFFICE_PREVIEW_CHAR_LIMIT = 200_000
 private const val XLSX_PREVIEW_ROW_LIMIT = 250
 private const val XLSX_PREVIEW_COLUMN_LIMIT = 50
+private const val PDF_MAX_RENDER_WIDTH = 1_280
+private const val PDF_MAX_RENDER_HEIGHT = 1_920
+private const val PDF_MAX_RENDER_PIXELS = 1_800_000L
+private const val IMAGE_MAX_PREVIEW_WIDTH = 2_048
+private const val IMAGE_MAX_PREVIEW_HEIGHT = 2_048
+private const val IMAGE_MAX_PREVIEW_PIXELS = 2_000_000L
+
+internal data class PreviewDimensions(val width: Int, val height: Int)
+
+internal fun pdfPreviewDimensions(sourceWidth: Int, sourceHeight: Int): PreviewDimensions {
+    val safeWidth = sourceWidth.coerceAtLeast(1)
+    val safeHeight = sourceHeight.coerceAtLeast(1)
+    val sourcePixels = safeWidth.toDouble() * safeHeight.toDouble()
+    // A modest 2x source scale keeps normal letter-sized pages crisp while
+    // the pixel budget remains the hard ceiling for unusually large pages.
+    val pixelScale = sqrt(PDF_MAX_RENDER_PIXELS.toDouble() / sourcePixels)
+    val scale = min(
+        2.0,
+        min(
+            pixelScale,
+            min(
+                PDF_MAX_RENDER_WIDTH.toDouble() / safeWidth.toDouble(),
+                PDF_MAX_RENDER_HEIGHT.toDouble() / safeHeight.toDouble(),
+            ),
+        ),
+    )
+    return PreviewDimensions(
+        width = (safeWidth.toDouble() * scale).roundToInt().coerceIn(1, PDF_MAX_RENDER_WIDTH),
+        height = (safeHeight.toDouble() * scale).roundToInt().coerceIn(1, PDF_MAX_RENDER_HEIGHT),
+    )
+}
 
 internal enum class WorkspacePreviewKind {
     Text,
@@ -75,6 +121,96 @@ internal enum class WorkspacePreviewKind {
     Docx,
     Xlsx,
     External,
+}
+
+/** Stable semantic categories keep the file list readable even before a preview is opened. */
+internal enum class WorkspaceFileCategory {
+    Directory,
+    Pdf,
+    Image,
+    Document,
+    Spreadsheet,
+    Code,
+    Archive,
+    Audio,
+    Video,
+    Generic,
+}
+
+internal fun workspaceFileCategory(
+    name: String,
+    mime: String,
+    kind: String = "file",
+): WorkspaceFileCategory {
+    if (kind.equals("directory", ignoreCase = true)) return WorkspaceFileCategory.Directory
+    val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+    val normalizedMime = mime.substringBefore(';').lowercase(Locale.ROOT)
+    return when {
+        extension == "pdf" || normalizedMime == "application/pdf" -> WorkspaceFileCategory.Pdf
+        normalizedMime.startsWith("image/") || extension in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg") -> WorkspaceFileCategory.Image
+        normalizedMime.startsWith("audio/") || extension in setOf("mp3", "wav", "m4a", "flac", "ogg") -> WorkspaceFileCategory.Audio
+        normalizedMime.startsWith("video/") || extension in setOf("mp4", "mov", "mkv", "webm", "avi") -> WorkspaceFileCategory.Video
+        normalizedMime == "application/zip" || normalizedMime == "application/gzip" ||
+            extension in setOf("zip", "gz", "bz2", "7z", "rar", "tar") -> WorkspaceFileCategory.Archive
+        normalizedMime.contains("spreadsheet") || normalizedMime == "application/vnd.ms-excel" ||
+            extension in setOf("xls", "xlsx", "csv", "tsv") -> WorkspaceFileCategory.Spreadsheet
+        normalizedMime.contains("word") || normalizedMime == "application/msword" ||
+            extension in setOf("doc", "docx", "odt", "rtf") -> WorkspaceFileCategory.Document
+        normalizedMime.startsWith("text/") || normalizedMime == "application/json" ||
+            extension in setOf("txt", "md", "markdown", "log", "toml", "ini", "conf", "json", "yaml", "yml", "xml", "html", "htm", "css", "js", "jsx", "ts", "tsx", "py", "rb", "php", "java", "kt", "kts", "rs", "go", "c", "h", "cpp", "hpp", "cs", "swift", "sh", "bash", "zsh", "fish", "ps1", "sql", "env") -> WorkspaceFileCategory.Code
+        else -> WorkspaceFileCategory.Generic
+    }
+}
+
+internal fun workspaceFileTypeLabel(category: WorkspaceFileCategory, name: String, chinese: Boolean): String {
+    if (category == WorkspaceFileCategory.Directory) return if (chinese) "文件夹" else "Folder"
+    val extension = name.substringAfterLast('.', "").uppercase(Locale.ROOT)
+    return when (category) {
+        WorkspaceFileCategory.Pdf -> "PDF"
+        WorkspaceFileCategory.Image -> extension.ifBlank { if (chinese) "图片" else "Image" }
+        WorkspaceFileCategory.Document -> extension.ifBlank { if (chinese) "文档" else "Document" }
+        WorkspaceFileCategory.Spreadsheet -> extension.ifBlank { if (chinese) "表格" else "Sheet" }
+        WorkspaceFileCategory.Code -> extension.ifBlank { if (chinese) "文本" else "Text" }
+        WorkspaceFileCategory.Archive -> extension.ifBlank { if (chinese) "压缩包" else "Archive" }
+        WorkspaceFileCategory.Audio -> extension.ifBlank { if (chinese) "音频" else "Audio" }
+        WorkspaceFileCategory.Video -> extension.ifBlank { if (chinese) "视频" else "Video" }
+        WorkspaceFileCategory.Generic, WorkspaceFileCategory.Directory -> extension.ifBlank { if (chinese) "文件" else "File" }
+    }
+}
+
+@Composable
+internal fun WorkspaceFileIcon(
+    name: String,
+    mime: String,
+    kind: String,
+    chinese: Boolean,
+) {
+    val category = workspaceFileCategory(name, mime, kind)
+    val (icon, tint, background) = when (category) {
+        WorkspaceFileCategory.Directory -> Triple(Icons.Filled.Folder, Color(0xFFB17A2E), Color(0xFFFFF4DE))
+        WorkspaceFileCategory.Pdf -> Triple(Icons.Filled.PictureAsPdf, Color(0xFFC94F4A), Color(0xFFFFECEA))
+        WorkspaceFileCategory.Image -> Triple(Icons.Filled.Photo, Color(0xFF3E82C4), Color(0xFFEAF4FF))
+        WorkspaceFileCategory.Document -> Triple(Icons.Filled.Description, Color(0xFF4C70B5), Color(0xFFEDF2FF))
+        WorkspaceFileCategory.Spreadsheet -> Triple(Icons.Filled.TableChart, Color(0xFF2F8752), Color(0xFFEAF8EF))
+        WorkspaceFileCategory.Code -> Triple(Icons.Filled.Code, Color(0xFF68727D), Color(0xFFF0F2F4))
+        WorkspaceFileCategory.Archive -> Triple(Icons.Filled.Archive, Color(0xFFB17A2E), Color(0xFFFFF4DE))
+        WorkspaceFileCategory.Audio -> Triple(Icons.Filled.AudioFile, Color(0xFFA34B83), Color(0xFFFFEEF8))
+        WorkspaceFileCategory.Video -> Triple(Icons.Filled.VideoFile, Color(0xFFB65A38), Color(0xFFFFF0EA))
+        WorkspaceFileCategory.Generic -> Triple(Icons.Filled.InsertDriveFile, Color(0xFF6C816F), Color(0xFFF0F3F0))
+    }
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .background(background, androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = workspaceFileTypeLabel(category, name, chinese),
+            tint = tint,
+            modifier = Modifier.size(21.dp),
+        )
+    }
 }
 
 internal fun workspacePreviewKind(name: String, mime: String): WorkspacePreviewKind {
@@ -157,8 +293,10 @@ private fun WorkspaceImagePreview(file: AtlasWorkspaceFile, pathKey: String, chi
     var bitmap by remember(pathKey) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(pathKey) { mutableStateOf(false) }
     LaunchedEffect(pathKey, file.bytes.size) {
+        bitmap?.let { if (!it.isRecycled) it.recycle() }
+        bitmap = null
         val decoded = withContext(Dispatchers.IO) {
-            BitmapFactory.decodeByteArray(file.bytes, 0, file.bytes.size)
+            runCatching { decodePreviewBitmap(file.bytes) }.getOrNull()
         }
         bitmap = decoded
         failed = decoded == null
@@ -179,6 +317,45 @@ private fun WorkspaceImagePreview(file: AtlasWorkspaceFile, pathKey: String, chi
         }
         else -> WorkspacePreviewLoading()
     }
+}
+
+private fun decodePreviewBitmap(bytes: ByteArray): Bitmap? {
+    if (bytes.isEmpty()) return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    val width = bounds.outWidth
+    val height = bounds.outHeight
+    if (width <= 0 || height <= 0) return null
+    val sourcePixels = width.toDouble() * height.toDouble()
+    val scale = min(
+        min(
+            IMAGE_MAX_PREVIEW_WIDTH.toDouble() / width.toDouble(),
+            IMAGE_MAX_PREVIEW_HEIGHT.toDouble() / height.toDouble(),
+        ),
+        if (sourcePixels > IMAGE_MAX_PREVIEW_PIXELS) {
+            sqrt(IMAGE_MAX_PREVIEW_PIXELS.toDouble() / sourcePixels)
+        } else {
+            1.0
+        },
+    ).coerceAtMost(1.0)
+    val desiredWidth = (width * scale).roundToInt().coerceAtLeast(1)
+    val desiredHeight = (height * scale).roundToInt().coerceAtLeast(1)
+    var sample = 1
+    while (width / sample > desiredWidth || height / sample > desiredHeight) {
+        sample = (sample shl 1).takeIf { it > 0 } ?: Int.MAX_VALUE
+        if (sample == Int.MAX_VALUE) break
+    }
+    return BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply {
+            inSampleSize = sample
+            // Preserve alpha for screenshots and diagrams while the pixel
+            // budget keeps the allocation bounded.
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        },
+    )
 }
 
 @Composable
@@ -228,20 +405,14 @@ private class PdfPreviewHandle private constructor(
     private val renderer: PdfRenderer,
 ) {
     private val lock = Any()
+    private var closed = false
     val pageCount: Int = renderer.pageCount
 
     fun render(index: Int): Bitmap = synchronized(lock) {
+        check(!closed) { "PDF renderer is closed" }
         renderer.openPage(index).use { page ->
-            val sourceWidth = page.width.coerceAtLeast(1)
-            val sourceHeight = page.height.coerceAtLeast(1)
-            var targetWidth = (sourceWidth * 2).coerceIn(720, 1_600)
-            var targetHeight = (sourceHeight.toDouble() * targetWidth / sourceWidth).roundToInt().coerceAtLeast(1)
-            if (targetHeight > 2_400) {
-                val scale = 2_400.0 / targetHeight
-                targetWidth = (targetWidth * scale).roundToInt().coerceAtLeast(1)
-                targetHeight = 2_400
-            }
-            Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888).also { bitmap ->
+            val dimensions = pdfPreviewDimensions(page.width, page.height)
+            Bitmap.createBitmap(dimensions.width, dimensions.height, Bitmap.Config.ARGB_8888).also { bitmap ->
                 bitmap.eraseColor(android.graphics.Color.WHITE)
                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
             }
@@ -249,6 +420,8 @@ private class PdfPreviewHandle private constructor(
     }
 
     fun close() = synchronized(lock) {
+        if (closed) return@synchronized
+        closed = true
         renderer.close()
         descriptor.close()
     }
@@ -268,36 +441,89 @@ private class PdfPreviewHandle private constructor(
 
 @Composable
 private fun WorkspacePdfPreview(file: File, pathKey: String, chinese: Boolean) {
-    val handleResult = remember(pathKey, file.length(), file.lastModified()) { runCatching { PdfPreviewHandle.open(file) } }
-    val handle = handleResult.getOrNull()
-    DisposableEffect(handle) {
-        onDispose { handle?.close() }
+    val fileLength = file.length()
+    val fileModified = file.lastModified()
+    var handle by remember(pathKey, fileLength, fileModified) { mutableStateOf<PdfPreviewHandle?>(null) }
+    var openError by remember(pathKey, fileLength, fileModified) { mutableStateOf<String?>(null) }
+    LaunchedEffect(pathKey, fileLength, fileModified) {
+        handle = null
+        openError = null
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                require(file.isFile && file.length() > 0L) { "PDF file is empty" }
+                PdfPreviewHandle.open(file)
+            }
+        }
+        result.onSuccess { opened -> handle = opened }
+            .onFailure { error -> openError = error.message ?: "PDF preview failed" }
     }
-    if (handle == null || handle.pageCount == 0) {
+    var pageIndex by remember(pathKey) { mutableStateOf(0) }
+    var bitmap by remember(pathKey) { mutableStateOf<Bitmap?>(null) }
+    var renderError by remember(pathKey) { mutableStateOf<String?>(null) }
+    val currentBitmap = rememberUpdatedState(bitmap)
+    val handleForEffect = handle
+    DisposableEffect(handle) {
+        onDispose { handleForEffect?.close() }
+    }
+    DisposableEffect(pathKey) {
+        onDispose {
+            currentBitmap.value?.let { if (!it.isRecycled) it.recycle() }
+        }
+    }
+    if (openError != null) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Text(
-                handleResult.exceptionOrNull()?.message
-                    ?: if (chinese) "PDF 中没有可显示的页面" else "This PDF has no displayable pages",
+                openError.orEmpty(),
                 color = Color(0xFF68736B),
                 fontSize = 16.sp,
             )
         }
         return
     }
-    var pageIndex by remember(pathKey) { mutableStateOf(0) }
-    var bitmap by remember(pathKey) { mutableStateOf<Bitmap?>(null) }
-    var renderError by remember(pathKey) { mutableStateOf<String?>(null) }
+    if (handle == null) {
+        WorkspacePreviewLoading()
+        return
+    }
+    if (handle!!.pageCount == 0) {
+        Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+            Text(
+                if (chinese) "PDF 中没有可显示的页面" else "This PDF has no displayable pages",
+                color = Color(0xFF68736B),
+                fontSize = 16.sp,
+            )
+        }
+        return
+    }
     LaunchedEffect(handle, pageIndex) {
+        val activeHandle = handle ?: return@LaunchedEffect
+        val safePageIndex = pageIndex.coerceIn(0, activeHandle.pageCount - 1)
+        if (safePageIndex != pageIndex) {
+            pageIndex = safePageIndex
+            return@LaunchedEffect
+        }
+        val previous = bitmap
         bitmap = null
+        if (previous != null && !previous.isRecycled) previous.recycle()
         renderError = null
-        runCatching { withContext(Dispatchers.IO) { handle.render(pageIndex) } }
-            .onSuccess { bitmap = it }
-            .onFailure { renderError = it.message ?: "PDF render failed" }
+        var rendered: Bitmap? = null
+        try {
+            rendered = withContext(Dispatchers.IO) { activeHandle.render(safePageIndex) }
+            check(currentCoroutineContext().isActive) { "PDF render cancelled" }
+            bitmap = rendered
+            rendered = null
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            renderError = when (error) {
+                is OutOfMemoryError -> if (chinese) "PDF 页面过大，已降低预览分辨率后仍无法显示" else "This PDF page is too large to render on this device"
+                else -> error.message ?: "PDF render failed"
+            }
+        }
+        rendered?.let { if (!it.isRecycled) it.recycle() }
     }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxWidth().weight(1f).padding(8.dp), contentAlignment = Alignment.Center) {
             when {
-                bitmap != null -> Image(
+                bitmap != null && !bitmap!!.isRecycled -> Image(
                     bitmap = bitmap!!.asImageBitmap(),
                     contentDescription = if (chinese) "PDF 第 ${pageIndex + 1} 页" else "PDF page ${pageIndex + 1}",
                     modifier = Modifier.fillMaxSize(),
@@ -319,15 +545,15 @@ private fun WorkspacePdfPreview(file: File, pathKey: String, chinese: Boolean) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = if (chinese) "上一页" else "Previous page")
             }
             Text(
-                "${pageIndex + 1} / ${handle.pageCount}",
+                "${pageIndex + 1} / ${handle!!.pageCount}",
                 modifier = Modifier.padding(horizontal = 12.dp),
                 color = Color(0xFF26332A),
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
             )
             IconButton(
-                onClick = { pageIndex = (pageIndex + 1).coerceAtMost(handle.pageCount - 1) },
-                enabled = pageIndex < handle.pageCount - 1,
+                onClick = { pageIndex = (pageIndex + 1).coerceAtMost(handle!!.pageCount - 1) },
+                enabled = pageIndex < handle!!.pageCount - 1,
             ) {
                 Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = if (chinese) "下一页" else "Next page")
             }

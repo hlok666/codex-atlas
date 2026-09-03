@@ -301,7 +301,11 @@ const MOBILE_SESSION_CACHE_TTL_MS: i64 = 5_000;
 const MOBILE_BALANCE_REFRESH_INTERVAL_MS: i64 = 15_000;
 const MOBILE_BALANCE_STALE_AFTER_MS: i64 = 45_000;
 const MOBILE_WORKSPACE_ENTRY_LIMIT: usize = 500;
+// PDF preview requests are streamed to mobile storage before rendering, so a
+// larger cap is safe for that format. Keep the regular preview cap conservative
+// because text, office and image previews are still decoded in the app.
 const MOBILE_WORKSPACE_PREVIEW_MAX_BYTES: u64 = 24 * 1024 * 1024;
+const MOBILE_WORKSPACE_PDF_PREVIEW_MAX_BYTES: u64 = 128 * 1024 * 1024;
 const MOBILE_WORKSPACE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 const FLOATING_HEARTBEAT_STALE_MS: i64 = 20_000;
@@ -3067,7 +3071,9 @@ fn workspace_file_for_session(
     if preview && !workspace_is_previewable(&path, &mime) {
         return Err("this file type cannot be previewed".to_string());
     }
-    let max_bytes = if preview {
+    let max_bytes = if preview && mime == "application/pdf" {
+        MOBILE_WORKSPACE_PDF_PREVIEW_MAX_BYTES
+    } else if preview {
         MOBILE_WORKSPACE_PREVIEW_MAX_BYTES
     } else {
         MOBILE_WORKSPACE_DOWNLOAD_MAX_BYTES
@@ -3076,7 +3082,7 @@ fn workspace_file_for_session(
         return Err(if preview {
             format!(
                 "file is too large to preview (limit {} MB)",
-                MOBILE_WORKSPACE_PREVIEW_MAX_BYTES / 1024 / 1024
+                max_bytes / 1024 / 1024
             )
         } else {
             format!(

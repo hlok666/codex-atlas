@@ -1,6 +1,7 @@
 package com.codexatlas.mobile
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipEntry
@@ -46,6 +47,25 @@ class WorkspaceFilePreviewTest {
         assertEquals(WorkspacePreviewKind.Docx, workspacePreviewKind("notes.docx", "application/octet-stream"))
         assertEquals(WorkspacePreviewKind.Xlsx, workspacePreviewKind("table.xlsx", "application/octet-stream"))
         assertEquals(WorkspacePreviewKind.External, workspacePreviewKind("legacy.doc", "application/msword"))
+    }
+
+    @Test
+    fun fileCategoriesUseDistinctPortableTypeSignals() {
+        assertEquals(WorkspaceFileCategory.Pdf, workspaceFileCategory("report.pdf", "application/octet-stream"))
+        assertEquals(WorkspaceFileCategory.Image, workspaceFileCategory("screen.png", "image/png"))
+        assertEquals(WorkspaceFileCategory.Document, workspaceFileCategory("notes.docx", "application/octet-stream"))
+        assertEquals(WorkspaceFileCategory.Spreadsheet, workspaceFileCategory("table.xlsx", "application/octet-stream"))
+        assertEquals(WorkspaceFileCategory.Code, workspaceFileCategory("main.kt", "text/plain"))
+        assertEquals(WorkspaceFileCategory.Archive, workspaceFileCategory("bundle.zip", "application/zip"))
+        assertEquals(WorkspaceFileCategory.Directory, workspaceFileCategory("src", "", "directory"))
+    }
+
+    @Test
+    fun pdfPreviewDimensionsStayBoundedForHugePages() {
+        val dimensions = pdfPreviewDimensions(Int.MAX_VALUE, Int.MAX_VALUE)
+        assertTrue(dimensions.width in 1..1_280)
+        assertTrue(dimensions.height in 1..1_920)
+        assertTrue(dimensions.width.toLong() * dimensions.height <= 1_800_000L)
     }
 
     private fun zip(vararg entries: Pair<String, String>): ByteArray {
