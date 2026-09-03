@@ -51,6 +51,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -96,6 +98,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.ui.text.font.FontWeight
@@ -615,6 +618,62 @@ private fun TextButton(
 }
 
 @Composable
+private fun MessageModeSelector(
+    mode: AtlasMessageMode,
+    chinese: Boolean,
+    enabled: Boolean,
+    onModeChange: (AtlasMessageMode) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFFF1F4F1),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(4.dp).selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            AtlasMessageMode.entries.forEach { option ->
+                val selected = mode == option
+                Box(
+                    modifier = Modifier
+                        .height(40.dp)
+                        .background(
+                            if (selected) Color.White else Color.Transparent,
+                            RoundedCornerShape(8.dp),
+                        )
+                        .selectable(
+                            selected = selected,
+                            enabled = enabled,
+                            role = Role.RadioButton,
+                            onClick = { onModeChange(option) },
+                        )
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = when (option) {
+                            AtlasMessageMode.Queue -> if (chinese) "排队" else "Queue"
+                            AtlasMessageMode.Interrupt -> if (chinese) "打断" else "Interrupt"
+                        },
+                        color = when {
+                            !enabled -> Color(0xFF9AA39B)
+                            selected -> Color(0xFF2F7C3B)
+                            else -> Color(0xFF667466)
+                        },
+                        fontSize = 13.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = "") {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -638,6 +697,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var messageRequestToken by remember { mutableStateOf(0L) }
     var connectionRequestToken by remember { mutableStateOf(0L) }
     var message by remember { mutableStateOf("") }
+    var sendMode by remember {
+        mutableStateOf(AtlasMessageMode.fromKey(BridgePreferences.sendMode(context)))
+    }
     var queuedMessageCount by remember { mutableStateOf(AtlasMessageQueue.count(context)) }
     var queuedMessages by remember { mutableStateOf(AtlasMessageQueue.items(context)) }
     var queueControl by remember { mutableStateOf(AtlasMessageQueue.control(context)) }
@@ -1838,7 +1900,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                         fun sendToConversation(text: String) {
                             val normalized = text.trim()
                             if (normalized.isEmpty() || conversationId.isBlank() || messageBusy) return
-                            val queued = AtlasMessageQueue.enqueue(context, conversationId, normalized)
+                            val queued = AtlasMessageQueue.enqueue(context, conversationId, normalized, sendMode)
                             val immediate = queueControl == AtlasQueueControl.Running && state is ConnectionState.Connected
                             message = ""
                             messageError = null
@@ -1865,6 +1927,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                             normalized,
                                             fallback,
                                             claimed.clientMessageId,
+                                            claimed.mode,
                                         )
                                     }.fold(
                                         onSuccess = {
@@ -1909,6 +1972,16 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+                            MessageModeSelector(
+                                mode = sendMode,
+                                chinese = zh,
+                                enabled = !messageBusy,
+                                onModeChange = { next ->
+                                    sendMode = next
+                                    BridgePreferences.saveSendMode(context, next)
+                                },
+                                modifier = Modifier.align(Alignment.End),
+                            )
                             OutlinedTextField(
                                 value = message,
                                 onValueChange = { message = it },
@@ -1926,7 +1999,10 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                         } else {
                                             Icon(
                                                 Icons.AutoMirrored.Filled.Send,
-                                                contentDescription = if (zh) "发送" else "Send",
+                                                contentDescription = when (sendMode) {
+                                                    AtlasMessageMode.Queue -> if (zh) "排队发送" else "Send to queue"
+                                                    AtlasMessageMode.Interrupt -> if (zh) "打断并发送" else "Interrupt and send"
+                                                },
                                                 modifier = Modifier.size(19.dp),
                                             )
                                         }

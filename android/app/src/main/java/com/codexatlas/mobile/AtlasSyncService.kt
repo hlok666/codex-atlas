@@ -196,6 +196,7 @@ class AtlasSyncService : Service() {
                     queued.text,
                     fallback,
                     queued.clientMessageId,
+                    queued.mode,
                 )
                 AtlasMessageQueue.remove(this, queued.id)
                 sendBroadcast(Intent(ACTION_UPDATED).setPackage(packageName))

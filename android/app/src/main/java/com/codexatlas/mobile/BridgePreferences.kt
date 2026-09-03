@@ -13,6 +13,7 @@ object BridgePreferences {
     private const val SYNC_SEQ = "syncSeq"
     private const val DEVICES = "devices"
     private const val SELECTED_DEVICE = "selectedDevice"
+    private const val SEND_MODE = "sendMode"
     private val json = Json { ignoreUnknownKeys = true }
     fun url(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("url", "http://127.0.0.1:15730") ?: ""
     fun token(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("token", "") ?: ""
@@ -22,6 +23,8 @@ object BridgePreferences {
     fun connectionRoute(context: Context): String = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         .getString("connectionRoute", if (preferTunnel(context)) "server" else "auto") ?: "auto"
     fun readRepliesAloud(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("readRepliesAloud", false)
+    fun sendMode(context: Context): String = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .getString(SEND_MODE, AtlasMessageMode.Queue.key) ?: AtlasMessageMode.Queue.key
     fun save(context: Context, url: String, token: String, sessionId: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("url", url.trim())
@@ -33,6 +36,10 @@ object BridgePreferences {
 
     fun saveReadRepliesAloud(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("readRepliesAloud", enabled).apply()
+    }
+
+    fun saveSendMode(context: Context, mode: AtlasMessageMode) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(SEND_MODE, mode.key).apply()
     }
     fun savePairing(context: Context, lanUrl: String, tunnelUrl: String, token: String, preferTunnel: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()

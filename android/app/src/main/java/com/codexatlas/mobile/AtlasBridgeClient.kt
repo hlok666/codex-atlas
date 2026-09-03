@@ -512,10 +512,12 @@ class AtlasBridgeClient(
         text: String,
         fallbackUrl: String = "",
         clientMessageId: String = "",
+        mode: String = AtlasMessageMode.Queue.key,
     ) {
         val payload = buildMap {
             put("text", text)
             if (clientMessageId.isNotBlank()) put("clientMessageId", clientMessageId)
+            put("mode", AtlasMessageMode.fromKey(mode).key)
         }
         postAny(sessionIdPath(sessionId, "/message"), json.encodeToString(payload), fallbackUrl)
     }

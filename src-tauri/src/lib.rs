@@ -957,6 +957,22 @@ struct MobileSessionInputRequest {
     text: String,
     #[serde(default)]
     client_message_id: String,
+    #[serde(default)]
+    mode: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobileMessageMode {
+    Queue,
+    Interrupt,
+}
+
+fn mobile_message_mode(value: &str) -> MobileMessageMode {
+    if value.trim().eq_ignore_ascii_case("interrupt") {
+        MobileMessageMode::Interrupt
+    } else {
+        MobileMessageMode::Queue
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3865,6 +3881,10 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
     let client_message_id = request_body
         .as_ref()
         .and_then(|value| normalize_mobile_client_message_id(&value.client_message_id));
+    let message_mode = request_body
+        .as_ref()
+        .map(|value| mobile_message_mode(&value.mode))
+        .unwrap_or(MobileMessageMode::Queue);
     let claim = client_message_id
         .as_deref()
         .map(|id| claim_mobile_message(session_id, id));
@@ -3898,7 +3918,9 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
             .map(|request| request.text.clone())
             .filter(|text| !text.trim().is_empty())
             .unwrap_or_else(|| "继续".to_string());
-        if session.running {
+        if url.ends_with("/message") && message_mode == MobileMessageMode::Interrupt {
+            interrupt_session_message(&app_state, &session, &input, &[])
+        } else if session.running {
             if queue_session_message_with_attachments(&app_state, &session, &input, &[]).is_ok() {
                 Ok(())
             } else {
@@ -8665,26 +8687,42 @@ fn send_floating_message(
     if input.trim().is_empty() && request.attachments.is_empty() {
         return Ok(false);
     }
-    let mut delivery_errors = Vec::new();
     if request.mode.trim().eq_ignore_ascii_case("interrupt") {
-        match send_text_to_terminal_then_escape(&session, &input) {
-            Ok(()) => return Ok(true),
-            Err(error) => delivery_errors.push(format!("Codex terminal interrupt: {error}")),
-        }
-        // Keep app-server steering only as a compatibility fallback for
-        // sessions whose terminal cannot be addressed directly.
-        match app_server_send_interrupt(&state, &session, &input, &request.attachments) {
-            Ok(true) => return Ok(true),
-            Ok(false) => delivery_errors.push("app-server did not accept the message".to_string()),
-            Err(error) => delivery_errors.push(format!("app-server: {error}")),
-        }
-        return Err(delivery_errors.join("; "));
+        return interrupt_session_message(&state, &session, &input, &request.attachments)
+            .map(|_| true);
     }
+    let mut delivery_errors = Vec::new();
     match queue_session_message_with_attachments(&state, &session, &input, &request.attachments) {
         Ok(()) => return Ok(true),
         Err(error) => delivery_errors.push(error),
     }
     Err(delivery_errors.join("; "))
+}
+
+fn interrupt_session_message(
+    state: &AppState,
+    session: &SessionRecord,
+    input: &str,
+    attachments: &[FloatingAttachment],
+) -> Result<(), String> {
+    let mut delivery_errors = Vec::new();
+    match send_text_to_terminal_then_escape(session, input) {
+        Ok(()) => return Ok(()),
+        Err(error) => delivery_errors.push(format!("Codex terminal interrupt: {error}")),
+    }
+    // Keep app-server steering only as a compatibility fallback for sessions
+    // whose terminal cannot be addressed directly.
+    match app_server_send_interrupt(state, session, input, attachments) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            delivery_errors.push("app-server did not accept the message".to_string());
+            Err(delivery_errors.join("; "))
+        }
+        Err(error) => {
+            delivery_errors.push(format!("app-server: {error}"));
+            Err(delivery_errors.join("; "))
+        }
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -12461,6 +12499,23 @@ mod runtime_probe_tests {
         assert_eq!(mobile_message_receipt_key("session-1", ""), None);
         assert_eq!(mobile_message_receipt_key("", "msg-1"), None);
         assert_eq!(normalize_mobile_client_message_id(&"x".repeat(161)), None);
+    }
+
+    #[test]
+    fn mobile_message_mode_defaults_to_queue_and_accepts_interrupt() {
+        let legacy: MobileSessionInputRequest =
+            serde_json::from_str(r#"{"text":"hello"}"#).expect("legacy mobile request");
+        let interrupt: MobileSessionInputRequest = serde_json::from_str(
+            r#"{"text":"stop here","clientMessageId":"message-1","mode":"interrupt"}"#,
+        )
+        .expect("interrupt mobile request");
+
+        assert_eq!(mobile_message_mode(&legacy.mode), MobileMessageMode::Queue);
+        assert_eq!(
+            mobile_message_mode(&interrupt.mode),
+            MobileMessageMode::Interrupt
+        );
+        assert_eq!(mobile_message_mode("unexpected"), MobileMessageMode::Queue);
     }
 
     #[test]

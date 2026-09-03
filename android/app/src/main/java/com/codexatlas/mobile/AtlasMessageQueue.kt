@@ -15,12 +15,23 @@ data class QueuedAtlasMessage(
     val createdAtMs: Long,
     /** Stable id forwarded to the desktop Bridge for idempotent delivery. */
     val clientMessageId: String = "",
+    val mode: String = AtlasMessageMode.Queue.key,
     val state: String = AtlasQueueItemState.Pending.key,
     val attempts: Int = 0,
     val lastError: String? = null,
     val lastAttemptAtMs: Long = 0,
     val nextAttemptAtMs: Long = 0,
 )
+
+enum class AtlasMessageMode(val key: String) {
+    Queue("queue"),
+    Interrupt("interrupt");
+
+    companion object {
+        fun fromKey(value: String): AtlasMessageMode =
+            entries.firstOrNull { it.key.equals(value.trim(), ignoreCase = true) } ?: Queue
+    }
+}
 
 enum class AtlasQueueItemState(val key: String) {
     Pending("pending"),
@@ -51,12 +62,18 @@ object AtlasMessageQueue {
     private val json = Json { ignoreUnknownKeys = true }
     private val lock = Any()
 
-    fun enqueue(context: Context, sessionId: String, text: String): QueuedAtlasMessage {
+    fun enqueue(
+        context: Context,
+        sessionId: String,
+        text: String,
+        mode: AtlasMessageMode = AtlasMessageMode.Queue,
+    ): QueuedAtlasMessage {
         val item = QueuedAtlasMessage(
             id = UUID.randomUUID().toString(),
             sessionId = sessionId,
             text = text,
             createdAtMs = System.currentTimeMillis(),
+            mode = mode.key,
         )
         synchronized(lock) {
             val next = (read(context) + item).takeLast(100)
@@ -179,6 +196,7 @@ object AtlasMessageQueue {
         return items.map { item ->
             item.copy(
                 clientMessageId = item.clientMessageId.ifBlank { item.id },
+                mode = AtlasMessageMode.fromKey(item.mode).key,
                 state = AtlasQueueItemState.fromKey(item.state).key,
             )
         }
