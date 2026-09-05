@@ -79,6 +79,10 @@ struct AppServerHandle {
     endpoint: String,
     tx: std::sync::mpsc::Sender<AppServerCommand>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
+    /// Threads observed on the long-lived app-server connection. A thread can
+    /// be idle while its next-turn settings are still mutable, so tracking
+    /// only active turns is not enough for an immediate defaults update.
+    known_threads: Arc<Mutex<HashSet<String>>>,
 }
 
 enum AppServerCommand {
@@ -845,6 +849,18 @@ pub struct CodexInfo {
     pub model_provider: Option<String>,
     pub provider_name: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// The canonical Atlas permission derived from the root Codex config.
+    /// This is intentionally separate from the CC Switch provider model.
+    pub permission: Option<String>,
+    /// Number of connected threads that accepted an immediate runtime update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_threads_applied: Option<u32>,
+    /// Number of currently running turns that accepted a model/effort update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_turns_applied: Option<u32>,
+    /// Best-effort diagnostics when a live thread could not be updated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_apply_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -876,13 +892,27 @@ struct DesktopUpdateProgress {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexModelOption {
     pub slug: String,
     pub display_name: String,
     pub official: bool,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRuntimeDefaults {
+    pub model: String,
+    pub permission: String,
+    pub reasoning_effort: String,
+    pub provider: String,
+    pub provider_model: Option<String>,
+    pub models: Vec<CodexModelOption>,
+    pub source: String,
+    pub fetched_at_ms: i64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -932,6 +962,19 @@ pub struct NewCodexSessionRequest {
     pub model: String,
     #[serde(default)]
     pub permission: String,
+    #[serde(default)]
+    pub reasoning_effort: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexRuntimeDefaultsInput {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    permission: String,
+    #[serde(default)]
+    reasoning_effort: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -3527,6 +3570,11 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         let _ = request.respond(bridge_json_response(&balance, 200));
         return;
     }
+    if method == Method::Get && path == "/v1/runtime/defaults" {
+        let defaults = tauri::async_runtime::block_on(get_codex_runtime_defaults());
+        let _ = request.respond(bridge_json_response(&defaults, 200));
+        return;
+    }
     if method == Method::Get && path == "/v1/status" {
         match mobile_status_snapshot() {
             Some(snapshot) => {
@@ -3716,6 +3764,35 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
     }
     let mut body = String::new();
     let _ = request.as_reader().read_to_string(&mut body);
+    if url == "/v1/runtime/defaults" {
+        let input = match serde_json::from_str::<CodexRuntimeDefaultsInput>(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"ok": false, "error": format!("invalid runtime defaults: {error}")}),
+                    400,
+                ));
+                return;
+            }
+        };
+        let result = write_codex_defaults(
+            input.model,
+            input.permission,
+            input.reasoning_effort,
+            Some(&app_state),
+        );
+        let response = match result {
+            Ok(_) => {
+                let defaults = tauri::async_runtime::block_on(get_codex_runtime_defaults());
+                bridge_json_response(&defaults, 200)
+            }
+            Err(error) => {
+                bridge_json_response(&serde_json::json!({"ok": false, "error": error}), 422)
+            }
+        };
+        let _ = request.respond(response);
+        return;
+    }
     if url == "/v1/sessions" {
         let request_body = match serde_json::from_str::<NewCodexSessionRequest>(&body) {
             Ok(request_body) => request_body,
@@ -3727,7 +3804,8 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
                 return;
             }
         };
-        let response = match create_codex_session_sync(request_body, None) {
+        let remote = app_server_endpoint(&app_state);
+        let response = match create_codex_session_sync(request_body, remote.as_deref()) {
             Ok(true) => bridge_json_response(&serde_json::json!({"ok": true}), 201),
             Ok(false) => bridge_json_response(&serde_json::json!({"ok": false}), 409),
             Err(error) => {
@@ -3826,7 +3904,8 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         } else if session.running {
             send_text_to_terminal(&session, &chunk.text, true)
         } else {
-            match launch_codex_resume_terminal(&session, None) {
+            match launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
+            {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -3913,10 +3992,11 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
     }
     let result = if url.ends_with("/activate") {
         if session.running {
-            focus_session_terminal(&session)
-                .or_else(|_| launch_codex_resume_terminal(&session, None))
+            focus_session_terminal(&session).or_else(|_| {
+                launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
+            })
         } else {
-            launch_codex_resume_terminal(&session, None)
+            launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
         }
     } else {
         let input = request_body
@@ -3939,7 +4019,8 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
             // terminal is closed; the next resume consumes it.
             Ok(())
         } else if url.ends_with("/message") {
-            match launch_codex_resume_terminal(&session, None) {
+            match launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
+            {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -7714,12 +7795,27 @@ fn emit_app_server_notification(
     app: &AppHandle,
     value: &Value,
     active_turns: &Arc<Mutex<HashMap<String, String>>>,
+    known_threads: &Arc<Mutex<HashSet<String>>>,
 ) {
     let method = value
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let params = value.get("params").cloned().unwrap_or(Value::Null);
+    if let Some(thread_id) = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Ok(mut threads) = known_threads.lock() {
+            if matches!(method, "thread/closed" | "thread/deleted") {
+                threads.remove(thread_id);
+            } else {
+                threads.insert(thread_id.to_string());
+            }
+        }
+    }
     if method == "turn/started" {
         if let (Some(thread_id), Some(turn_id)) = (
             params.get("threadId").and_then(Value::as_str),
@@ -7754,6 +7850,7 @@ fn app_server_read_until<S: Read + Write>(
     socket: &mut WebSocket<S>,
     app: &AppHandle,
     active_turns: &Arc<Mutex<HashMap<String, String>>>,
+    known_threads: &Arc<Mutex<HashSet<String>>>,
     request_id: u64,
     deadline: Instant,
 ) -> Result<Value, String> {
@@ -7766,7 +7863,7 @@ fn app_server_read_until<S: Read + Write>(
                 let value: Value = serde_json::from_str(text.as_ref())
                     .map_err(|error| format!("invalid app-server JSON: {error}"))?;
                 if value.get("method").is_some() {
-                    emit_app_server_notification(app, &value, active_turns);
+                    emit_app_server_notification(app, &value, active_turns, known_threads);
                     continue;
                 }
                 if value.get("id").and_then(Value::as_u64) != Some(request_id) {
@@ -7785,7 +7882,7 @@ fn app_server_read_until<S: Read + Write>(
                 let value: Value = serde_json::from_slice(&bytes)
                     .map_err(|error| format!("invalid app-server binary JSON: {error}"))?;
                 if value.get("method").is_some() {
-                    emit_app_server_notification(app, &value, active_turns);
+                    emit_app_server_notification(app, &value, active_turns, known_threads);
                 } else if value.get("id").and_then(Value::as_u64) == Some(request_id) {
                     if let Some(error) = value.get("error") {
                         return Err(error
@@ -7857,7 +7954,9 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
     let child = command.spawn().ok()?;
     let (tx, rx) = std::sync::mpsc::channel::<AppServerCommand>();
     let active_turns = Arc::new(Mutex::new(HashMap::new()));
+    let known_threads = Arc::new(Mutex::new(HashSet::new()));
     let turns_for_thread = active_turns.clone();
+    let known_threads_for_thread = known_threads.clone();
     let endpoint_for_thread = endpoint.clone();
     let auth_token_for_thread = auth_token.clone();
     let app_for_thread = app.clone();
@@ -7907,6 +8006,7 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
                 &mut socket,
                 &app_for_thread,
                 &turns_for_thread,
+                &known_threads_for_thread,
                 request_id,
                 Instant::now() + Duration::from_secs(10),
             )
@@ -7935,6 +8035,7 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
                             &mut socket,
                             &app_for_thread,
                             &turns_for_thread,
+                            &known_threads_for_thread,
                             id,
                             Instant::now() + Duration::from_secs(30),
                         )
@@ -7951,6 +8052,7 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
                                     &app_for_thread,
                                     &value,
                                     &turns_for_thread,
+                                    &known_threads_for_thread,
                                 );
                             }
                         }
@@ -7962,6 +8064,7 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
                                     &app_for_thread,
                                     &value,
                                     &turns_for_thread,
+                                    &known_threads_for_thread,
                                 );
                             }
                         }
@@ -7989,6 +8092,7 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
         endpoint,
         tx,
         active_turns,
+        known_threads,
     })
 }
 
@@ -7999,6 +8103,20 @@ fn app_server_request(state: &AppState, method: &str, params: Value) -> Result<V
         .map_err(|_| "app-server state unavailable".to_string())?
         .clone()
         .ok_or_else(|| "Codex app-server is not available".to_string())?;
+    if let Some(thread_id) = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Ok(mut threads) = server.known_threads.lock() {
+            if matches!(method, "thread/closed" | "thread/deleted") {
+                threads.remove(thread_id);
+            } else {
+                threads.insert(thread_id.to_string());
+            }
+        }
+    }
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     server
         .tx
@@ -8056,6 +8174,199 @@ fn app_server_interrupt_active_turn(
         serde_json::json!({"threadId": session.id, "turnId": turn_id}),
     )?;
     Ok(true)
+}
+
+#[derive(Debug, Default)]
+struct RuntimeDefaultsApplyReport {
+    threads_applied: u32,
+    turns_applied: u32,
+    errors: Vec<String>,
+}
+
+fn runtime_approval_policy(permission: &str) -> &'static str {
+    codex_permission_overrides(permission).0
+}
+
+fn runtime_sandbox_mode(permission: &str) -> &'static str {
+    codex_permission_overrides(permission).1
+}
+
+/// `thread/settings/update` uses a structured camelCase sandbox policy while
+/// `thread/resume` still accepts the older string `sandbox` field. Keep both
+/// representations in one place so the two paths cannot drift.
+fn runtime_sandbox_policy(permission: &str, cwd: &str) -> Value {
+    match runtime_sandbox_mode(permission) {
+        "read-only" => serde_json::json!({
+            "type": "readOnly",
+            "networkAccess": true,
+        }),
+        "danger-full-access" => serde_json::json!({
+            "type": "dangerFullAccess",
+        }),
+        _ => {
+            let roots = if cwd.trim().is_empty() {
+                Vec::<String>::new()
+            } else {
+                vec![cwd.trim().to_string()]
+            };
+            serde_json::json!({
+                "type": "workspaceWrite",
+                "writableRoots": roots,
+                "networkAccess": true,
+                "excludeTmpdirEnvVar": false,
+                "excludeSlashTmp": false,
+            })
+        }
+    }
+}
+
+fn runtime_thread_settings_params(
+    thread_id: &str,
+    cwd: &str,
+    model: &str,
+    permission: &str,
+    reasoning_effort: &str,
+) -> Value {
+    let mut params = serde_json::json!({
+        "threadId": thread_id,
+        "approvalPolicy": runtime_approval_policy(permission),
+        "sandboxPolicy": runtime_sandbox_policy(permission, cwd),
+        "model": model,
+        "effort": reasoning_effort,
+    });
+    if !cwd.trim().is_empty() {
+        params["cwd"] = Value::String(cwd.trim().to_string());
+    }
+    params
+}
+
+fn runtime_thread_resume_params(
+    thread_id: &str,
+    cwd: &str,
+    model: &str,
+    permission: &str,
+) -> Value {
+    let mut params = serde_json::json!({
+        "threadId": thread_id,
+        "excludeTurns": true,
+        "model": model,
+        "approvalPolicy": runtime_approval_policy(permission),
+        "sandbox": runtime_sandbox_mode(permission),
+    });
+    if !cwd.trim().is_empty() {
+        params["cwd"] = Value::String(cwd.trim().to_string());
+    }
+    params
+}
+
+/// Apply defaults to every thread Atlas knows about and to the current turn
+/// where Codex exposes the experimental turn-level update. The config file is
+/// still the source for future processes; this best-effort protocol pass is
+/// what makes a change visible without restarting an active conversation.
+fn apply_defaults_to_active_threads(
+    state: &AppState,
+    model: &str,
+    permission: &str,
+    reasoning_effort: &str,
+) -> RuntimeDefaultsApplyReport {
+    let Some(server) = state
+        .app_server
+        .lock()
+        .ok()
+        .and_then(|server| server.as_ref().cloned())
+    else {
+        return RuntimeDefaultsApplyReport {
+            errors: vec!["Codex app-server is not available".to_string()],
+            ..RuntimeDefaultsApplyReport::default()
+        };
+    };
+    let known = server
+        .known_threads
+        .lock()
+        .ok()
+        .map(|threads| threads.clone())
+        .unwrap_or_default();
+    let active_turns = server
+        .active_turns
+        .lock()
+        .ok()
+        .map(|turns| turns.clone())
+        .unwrap_or_default();
+    let sessions = list_sessions_sync().unwrap_or_default();
+    let mut thread_ids = known;
+    thread_ids.extend(active_turns.keys().cloned());
+    // A remote CLI can be visible to the process scanner before its first
+    // notification reaches Atlas. Include those running records so the first
+    // settings change still reaches the conversation.
+    thread_ids.extend(
+        sessions
+            .iter()
+            .filter(|session| session.running)
+            .map(|session| session.id.clone()),
+    );
+    let mut thread_ids = thread_ids.into_iter().collect::<Vec<_>>();
+    thread_ids.sort();
+    thread_ids.dedup();
+
+    let mut report = RuntimeDefaultsApplyReport::default();
+    for thread_id in thread_ids {
+        let session = sessions.iter().find(|session| session.id == thread_id);
+        let cwd = session
+            .map(|session| session.cwd.as_str())
+            .unwrap_or_default();
+        let settings =
+            runtime_thread_settings_params(&thread_id, cwd, model, permission, reasoning_effort);
+        let thread_result = app_server_request(state, "thread/settings/update", settings);
+        if thread_result.is_ok() {
+            report.threads_applied += 1;
+        } else {
+            // If the thread was discovered from the process table rather than
+            // an app-server notification, attach it once and retry the update.
+            let resume = runtime_thread_resume_params(&thread_id, cwd, model, permission);
+            let retry = app_server_request(state, "thread/resume", resume).and_then(|_| {
+                app_server_request(
+                    state,
+                    "thread/settings/update",
+                    runtime_thread_settings_params(
+                        &thread_id,
+                        cwd,
+                        model,
+                        permission,
+                        reasoning_effort,
+                    ),
+                )
+            });
+            if retry.is_ok() {
+                report.threads_applied += 1;
+            } else {
+                let detail = retry
+                    .err()
+                    .or_else(|| thread_result.err())
+                    .unwrap_or_else(|| "thread settings update failed".to_string());
+                report.errors.push(format!("{thread_id}: {detail}"));
+            }
+        }
+        if let Some(turn_id) = active_turns.get(&thread_id) {
+            let turn_result = app_server_request(
+                state,
+                "turn/settings/update",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "model": model,
+                    "effort": reasoning_effort,
+                }),
+            );
+            if turn_result.is_ok() {
+                report.turns_applied += 1;
+            } else if let Err(error) = turn_result {
+                report
+                    .errors
+                    .push(format!("{thread_id}/{turn_id}: {error}"));
+            }
+        }
+    }
+    report
 }
 
 /// Queue through Atlas's app-server as a compatibility fallback. Codex owns
@@ -8404,6 +8715,26 @@ fn codex_permission_overrides(permission: &str) -> (&'static str, &'static str) 
     }
 }
 
+fn codex_permission_label(approval_policy: Option<&str>, sandbox_mode: Option<&str>) -> String {
+    match (
+        approval_policy.unwrap_or_default().trim(),
+        sandbox_mode.unwrap_or_default().trim(),
+    ) {
+        ("never", "danger-full-access") => "Full access".to_string(),
+        (_, "read-only") => "Read only".to_string(),
+        _ => "Workspace write".to_string(),
+    }
+}
+
+fn normalize_reasoning_effort(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "high" => "high",
+        "xhigh" | "extra-high" | "extra_high" => "xhigh",
+        _ => "medium",
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn launch_codex_new_terminal(
     request: &NewCodexSessionRequest,
@@ -8418,11 +8749,12 @@ fn launch_codex_new_terminal(
     let codex = powershell_single_quote(&codex_executable());
     let cwd = powershell_single_quote(&request.cwd);
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
+    let reasoning_effort = normalize_reasoning_effort(&request.reasoning_effort);
     let remote_arg = remote
         .map(|value| format!(" --remote '{}'", powershell_single_quote(value)))
         .unwrap_or_default();
     let mut script = format!(
-        "$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} -c 'approval_policy=\"{approval}\"' -c 'sandbox_mode=\"{sandbox}\"'",
+        "$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} -c 'approval_policy=\"{approval}\"' -c 'sandbox_mode=\"{sandbox}\"' -c 'model_reasoning_effort=\"{reasoning_effort}\"'",
     );
     if !request.model.trim().is_empty() {
         script.push_str(&format!(
@@ -8481,16 +8813,18 @@ fn launch_codex_new_terminal(
         ));
     }
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
+    let reasoning_effort = normalize_reasoning_effort(&request.reasoning_effort);
     let remote_arg = remote
         .map(|value| format!(" --remote '{}'", shell_single_quote(value)))
         .unwrap_or_default();
     let mut command = format!(
-        "cd -- '{}' && export TERM=xterm-256color && '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"'",
+        "cd -- '{}' && export TERM=xterm-256color && '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"' -c 'model_reasoning_effort=\"{}\"'",
         shell_single_quote(&request.cwd),
         shell_single_quote(&codex_executable()),
         remote_arg,
         approval,
-        sandbox
+        sandbox,
+        reasoning_effort,
     );
     if !request.model.trim().is_empty() {
         command.push_str(&format!(
@@ -8524,16 +8858,18 @@ fn launch_codex_new_terminal(
         ));
     }
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
+    let reasoning_effort = normalize_reasoning_effort(&request.reasoning_effort);
     let remote_arg = remote
         .map(|value| format!(" --remote '{}'", shell_single_quote(value)))
         .unwrap_or_default();
     let mut command = format!(
-        "cd -- '{}' && exec '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"'",
+        "cd -- '{}' && exec '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"' -c 'model_reasoning_effort=\"{}\"'",
         shell_single_quote(&request.cwd),
         shell_single_quote(&codex_executable()),
         remote_arg,
         approval,
-        sandbox
+        sandbox,
+        reasoning_effort,
     );
     if !request.model.trim().is_empty() {
         command.push_str(&format!(
@@ -10150,23 +10486,130 @@ fn extract_balance(body: &str) -> Option<(f64, Option<f64>, Option<String>, Opti
     None
 }
 
-fn parse_toml_string(config: &str, key: &str) -> Option<String> {
-    config.lines().find_map(|line| {
-        let (candidate_key, value) = line.split_once('=')?;
-        if candidate_key.trim() != key {
-            return None;
+fn toml_line_without_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
         }
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        (!value.is_empty()).then(|| value.to_string())
-    })
+        match (quote, character) {
+            (Some('"'), '\\') => escaped = true,
+            (Some(current), value) if value == current => quote = None,
+            (None, '"') | (None, '\'') => quote = Some(character),
+            (None, '#') => return &line[..index],
+            _ => {}
+        }
+    }
+    line
 }
 
-fn parse_toml_section_string(config: &str, section: &str, key: &str) -> Option<String> {
+fn parse_toml_scalar_string(value: &str) -> Option<String> {
+    let value = toml_line_without_comment(value).trim();
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        let unquoted = &value[1..value.len() - 1];
+        return (!unquoted.is_empty())
+            .then(|| unquoted.replace("\\\"", "\"").replace("\\\\", "\\"));
+    }
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn parse_toml_string(config: &str, key: &str) -> Option<String> {
+    for line in config.lines() {
+        let without_comment = toml_line_without_comment(line).trim();
+        if without_comment.is_empty() || without_comment.starts_with('[') {
+            // Root Codex settings are required before the first table. Once a
+            // table starts, identically named provider keys must never shadow
+            // the root value.
+            if without_comment.starts_with('[') {
+                break;
+            }
+            continue;
+        }
+        let Some((candidate_key, value)) = without_comment.split_once('=') else {
+            continue;
+        };
+        if candidate_key.trim() == key {
+            return parse_toml_scalar_string(value);
+        }
+    }
+    None
+}
+
+/// Parse a TOML table header into its logical key segments. Provider names
+/// may contain dots, so `[model_providers."relay.eu"]` must remain a
+/// two-segment path rather than being mistaken for three nested tables.
+fn toml_section_parts(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim();
+    let body = if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
+        &trimmed[2..trimmed.len() - 2]
+    } else if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    if body.trim().is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for character in body.chars() {
+        if let Some(delimiter) = quote {
+            current.push(character);
+            if delimiter == '"' && escaped {
+                escaped = false;
+                continue;
+            }
+            if delimiter == '"' && character == '\\' {
+                escaped = true;
+                continue;
+            }
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' => {
+                current.push(character);
+                quote = Some(character);
+            }
+            '.' => {
+                let segment = current.trim();
+                if segment.is_empty() {
+                    return None;
+                }
+                parts.push(parse_toml_scalar_string(segment)?);
+                current.clear();
+            }
+            _ => current.push(character),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    let segment = current.trim();
+    if segment.is_empty() {
+        return None;
+    }
+    parts.push(parse_toml_scalar_string(segment)?);
+    Some(parts)
+}
+
+fn parse_toml_section_parts_string(config: &str, expected: &[String], key: &str) -> Option<String> {
     let mut active = false;
     for line in config.lines() {
-        let trimmed = line.trim();
+        let trimmed = toml_line_without_comment(line).trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            active = trimmed.trim_matches(['[', ']']) == section;
+            active = toml_section_parts(trimmed)
+                .map(|parts| parts == expected)
+                .unwrap_or(false);
             continue;
         }
         if !active {
@@ -10175,15 +10618,33 @@ fn parse_toml_section_string(config: &str, section: &str, key: &str) -> Option<S
         let Some((candidate, value)) = trimmed.split_once('=') else {
             continue;
         };
-        if candidate.trim() != key {
-            continue;
-        }
-        let value = value.trim();
-        if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-            return Some(value[1..value.len() - 1].to_string());
+        if candidate.trim() == key {
+            return parse_toml_scalar_string(value);
         }
     }
     None
+}
+
+fn parse_toml_section_string(config: &str, section: &str, key: &str) -> Option<String> {
+    let expected = toml_section_parts(section)?;
+    parse_toml_section_parts_string(config, &expected, key)
+}
+
+fn parse_toml_provider_section_string(config: &str, provider: &str, key: &str) -> Option<String> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return None;
+    }
+    let is_bare = provider
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'));
+    let section = if is_bare {
+        format!("model_providers.{provider}")
+    } else {
+        let escaped = provider.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("model_providers.\"{escaped}\"")
+    };
+    parse_toml_section_string(config, &section, key)
 }
 
 fn upsert_root_toml_string(config: &str, key: &str, value: &str) -> String {
@@ -10237,6 +10698,20 @@ fn provider_credentials(
     if let Some(config) = settings.get("config").and_then(Value::as_str) {
         base_url = parse_toml_string(config, "base_url").unwrap_or_default();
         model = parse_toml_string(config, "model");
+        // CC Switch stores Codex relay settings in the selected provider
+        // table (for example `[model_providers.custom]`), not at the TOML
+        // root. Read that table explicitly so `/models` and `/v1/models`
+        // are queried from the active upstream rather than from a stale
+        // local cache.
+        if let Some(provider) = parse_toml_string(config, "model_provider") {
+            if base_url.trim().is_empty() {
+                base_url = parse_toml_provider_section_string(config, &provider, "base_url")
+                    .unwrap_or_default();
+            }
+            if model.is_none() {
+                model = parse_toml_provider_section_string(config, &provider, "model");
+            }
+        }
     }
     if let Some(auth) = settings.get("auth").and_then(Value::as_object) {
         api_key = auth
@@ -10294,7 +10769,8 @@ fn provider_credentials(
     )
 }
 
-fn current_cc_switch_provider_data() -> Option<(String, String, Option<String>, Value, Value)> {
+fn current_cc_switch_provider_data(
+) -> Option<(String, String, Option<String>, Value, Value, String)> {
     let db_path = home_dir().join(".cc-switch").join("cc-switch.db");
     if !db_path.exists() {
         return None;
@@ -10340,7 +10816,7 @@ fn current_cc_switch_provider_data() -> Option<(String, String, Option<String>, 
     let settings = serde_json::from_str::<Value>(&selected.2).unwrap_or(Value::Null);
     let meta = serde_json::from_str::<Value>(&selected.3).unwrap_or(Value::Null);
     let (base_url, api_key, model, _) = provider_credentials(&settings, &meta);
-    Some((base_url, api_key, model, settings, meta))
+    Some((base_url, api_key, model, settings, meta, selected.1))
 }
 
 #[tauri::command]
@@ -10484,20 +10960,18 @@ fn get_codex_info() -> CodexInfo {
         }
     }
     let config = fs::read_to_string(codex_config_path()).unwrap_or_default();
-    let mut model = parse_toml_string(&config, "model");
-    if let Some((_, _, provider_model, _, _)) = current_cc_switch_provider_data() {
-        if provider_model
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            model = provider_model;
-        }
-    }
+    let model = parse_toml_string(&config, "model");
     let model_provider = parse_toml_string(&config, "model_provider");
-    let provider_name = model_provider.as_deref().and_then(|provider| {
-        parse_toml_section_string(&config, &format!("model_providers.{provider}"), "name")
-    });
+    let provider_name = model_provider
+        .as_deref()
+        .and_then(|provider| parse_toml_provider_section_string(&config, provider, "name"));
     let reasoning_effort = parse_toml_string(&config, "model_reasoning_effort");
+    let approval_policy = parse_toml_string(&config, "approval_policy");
+    let sandbox_mode = parse_toml_string(&config, "sandbox_mode");
+    let permission = Some(codex_permission_label(
+        approval_policy.as_deref(),
+        sandbox_mode.as_deref(),
+    ));
     CodexInfo {
         installed: !version.is_empty() || executable != "codex",
         version: version.trim().trim_start_matches("codex-cli ").to_string(),
@@ -10506,6 +10980,10 @@ fn get_codex_info() -> CodexInfo {
         model_provider,
         provider_name,
         reasoning_effort,
+        permission,
+        active_threads_applied: None,
+        active_turns_applied: None,
+        active_apply_error: None,
     }
 }
 
@@ -11278,29 +11756,37 @@ fn install_desktop_update(app: AppHandle, path: String) -> Result<bool, String> 
     Ok(true)
 }
 
-/// Reads the catalog maintained by Codex itself instead of shipping a stale
-/// model list in Atlas. The cache is refreshed by the CLI during normal use.
-/// A configured custom model is retained as a non-official option so users of
-/// CC Switch or another provider can still switch back to it.
-#[tauri::command]
-async fn get_codex_models() -> Vec<CodexModelOption> {
+fn model_source_priority(source: &str) -> u8 {
+    match source {
+        "provider-api" => 4,
+        "cc-switch" => 3,
+        "current-config" => 2,
+        "codex-cache" => 1,
+        _ => 0,
+    }
+}
+
+/// Reads the active provider first. Codex's local cache is deliberately a
+/// fallback: it describes the official client, not necessarily the models
+/// exposed by a CC Switch relay currently handling `/v1/responses`.
+async fn collect_codex_models() -> Vec<CodexModelOption> {
     let config = fs::read_to_string(codex_config_path()).unwrap_or_default();
     let current_model =
         parse_toml_string(&config, "model").filter(|model| !model.trim().is_empty());
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
+    let provider_data = current_cc_switch_provider_data();
+    let mut by_slug: HashMap<String, CodexModelOption> = HashMap::new();
+    let mut provider_models: HashMap<String, CodexModelOption> = HashMap::new();
 
-    let add_model = |models: &mut Vec<CodexModelOption>,
-                     seen: &mut HashSet<String>,
+    let add_model = |models: &mut HashMap<String, CodexModelOption>,
                      slug: &str,
                      display_name: Option<&str>,
                      official: bool,
                      source: &str| {
         let slug = slug.trim();
-        if slug.is_empty() || !seen.insert(slug.to_string()) {
+        if slug.is_empty() {
             return;
         }
-        models.push(CodexModelOption {
+        let candidate = CodexModelOption {
             slug: slug.to_string(),
             display_name: display_name
                 .map(str::trim)
@@ -11309,53 +11795,99 @@ async fn get_codex_models() -> Vec<CodexModelOption> {
                 .to_string(),
             official,
             source: source.to_string(),
-        });
+        };
+        let replace = models
+            .get(slug)
+            .map(|existing| model_source_priority(source) > model_source_priority(&existing.source))
+            .unwrap_or(true);
+        if replace {
+            models.insert(slug.to_string(), candidate);
+        }
     };
 
-    let cache_path = codex_home().join("models_cache.json");
-    if let Ok(raw) = fs::read_to_string(cache_path) {
-        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-            if let Some(entries) = value.get("models").and_then(Value::as_array) {
+    // 1. Ask the selected CC Switch provider. A provider may expose either
+    // `/models` or the OpenAI-compatible `/v1/models` route.
+    if let Some((base_url, api_key, provider_model, settings, meta, _provider_name)) =
+        provider_data.as_ref()
+    {
+        let normalized = base_url.trim().trim_end_matches('/');
+        if !normalized.is_empty() {
+            let mut endpoints = vec![format!("{normalized}/models")];
+            if !normalized.ends_with("/v1") {
+                endpoints.push(format!("{normalized}/v1/models"));
+            } else if let Some(root) = normalized.strip_suffix("/v1") {
+                endpoints.push(format!("{root}/models"));
+            }
+            let client = Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(6))
+                .build()
+                .unwrap_or_else(|_| Client::new());
+            for endpoint in endpoints {
+                let mut request = client.get(&endpoint);
+                if !api_key.trim().is_empty() {
+                    request = request
+                        .bearer_auth(api_key.trim())
+                        .header("X-API-Key", api_key.trim());
+                }
+                let response = request.send().await;
+                let Ok(response) = response else { continue };
+                if !response.status().is_success() {
+                    continue;
+                }
+                let Ok(value) = response.json::<Value>().await else {
+                    continue;
+                };
+                let entries = value
+                    .get("data")
+                    .or_else(|| value.get("models"))
+                    .and_then(Value::as_array)
+                    .or_else(|| value.as_array());
+                let Some(entries) = entries else { continue };
                 for entry in entries {
-                    let Some(slug) = entry
-                        .get("slug")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|slug| !slug.is_empty())
-                    else {
-                        continue;
+                    let (slug, display) = match entry {
+                        Value::String(value) => (value.as_str(), None),
+                        Value::Object(_) => (
+                            entry
+                                .get("id")
+                                .or_else(|| entry.get("slug"))
+                                .or_else(|| entry.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            entry
+                                .get("display_name")
+                                .or_else(|| entry.get("displayName"))
+                                .or_else(|| entry.get("name"))
+                                .and_then(Value::as_str),
+                        ),
+                        _ => ("", None),
                     };
-                    let visible = entry
-                        .get("visibility")
-                        .and_then(Value::as_str)
-                        .map(|value| !value.eq_ignore_ascii_case("hide"))
-                        .unwrap_or(true);
-                    let supported = entry
-                        .get("supported_in_api")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true);
-                    if !visible || !supported {
-                        continue;
-                    }
-                    add_model(
-                        &mut models,
-                        &mut seen,
-                        slug,
-                        entry.get("display_name").and_then(Value::as_str),
-                        true,
-                        "codex-cache",
-                    );
+                    add_model(&mut provider_models, slug, display, false, "provider-api");
+                }
+                if !provider_models.is_empty() {
+                    break;
                 }
             }
         }
-    }
 
-    // CC Switch is the source of truth for users running a custom relay. Its
-    // selected Codex provider can expose a model in settings or in its API.
-    let provider_data = current_cc_switch_provider_data();
-    if let Some((base_url, api_key, provider_model, settings, meta)) = provider_data.as_ref() {
+        // A successful provider catalog is authoritative. Do not append the
+        // official Codex cache or CC Switch's stale selected-model metadata to
+        // it, otherwise the picker exposes models the active relay cannot use.
+        if !provider_models.is_empty() {
+            let mut models = provider_models.into_values().collect::<Vec<_>>();
+            models.sort_by(|left, right| {
+                left.display_name
+                    .to_lowercase()
+                    .cmp(&right.display_name.to_lowercase())
+                    .then_with(|| left.slug.cmp(&right.slug))
+            });
+            return models;
+        }
+
+        // 2. CC Switch metadata remains useful when a relay does not expose
+        // a model endpoint (and still identifies the selected model).
         if let Some(model) = provider_model.as_deref() {
-            add_model(&mut models, &mut seen, model, None, false, "cc-switch");
+            add_model(&mut by_slug, model, None, false, "cc-switch");
         }
         for source in [settings, meta] {
             for key in [
@@ -11384,89 +11916,123 @@ async fn get_codex_models() -> Vec<CodexModelOption> {
                             ),
                             _ => ("", None),
                         };
-                        add_model(&mut models, &mut seen, slug, display, false, "cc-switch");
+                        add_model(&mut by_slug, slug, display, false, "cc-switch");
                     }
-                }
-            }
-        }
-        if !base_url.trim().is_empty() && !api_key.trim().is_empty() {
-            let normalized = base_url.trim().trim_end_matches('/');
-            let mut endpoints = vec![format!("{normalized}/models")];
-            if !normalized.ends_with("/v1") {
-                endpoints.push(format!("{normalized}/v1/models"));
-            } else if let Some(root) = normalized.strip_suffix("/v1") {
-                endpoints.push(format!("{root}/models"));
-            }
-            let client = Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(4))
-                .build()
-                .unwrap_or_else(|_| Client::new());
-            for endpoint in endpoints {
-                let response = client
-                    .get(&endpoint)
-                    .bearer_auth(api_key.trim())
-                    .header("X-API-Key", api_key.trim())
-                    .send()
-                    .await;
-                let Ok(response) = response else { continue };
-                if !response.status().is_success() {
-                    continue;
-                }
-                let Ok(value) = response.json::<Value>().await else {
-                    continue;
-                };
-                let entries = value
-                    .get("data")
-                    .or_else(|| value.get("models"))
-                    .and_then(Value::as_array);
-                if let Some(entries) = entries {
-                    for entry in entries {
-                        let (slug, display) = match entry {
-                            Value::String(value) => (value.as_str(), None),
-                            Value::Object(_) => (
-                                entry
-                                    .get("id")
-                                    .or_else(|| entry.get("slug"))
-                                    .or_else(|| entry.get("name"))
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default(),
-                                entry
-                                    .get("display_name")
-                                    .or_else(|| entry.get("displayName"))
-                                    .or_else(|| entry.get("name"))
-                                    .and_then(Value::as_str),
-                            ),
-                            _ => ("", None),
-                        };
-                        add_model(&mut models, &mut seen, slug, display, false, "provider-api");
-                    }
-                }
-                if models.iter().any(|model| model.source == "provider-api") {
-                    break;
                 }
             }
         }
     }
 
-    if let Some(model) = current_model {
-        add_model(
-            &mut models,
-            &mut seen,
-            &model,
-            None,
-            false,
-            "current-config",
-        );
+    // 3. Only use the local Codex catalog when CC Switch is not configured at
+    // all. When a provider is selected but its endpoint is unavailable, the
+    // picker must not silently advertise unrelated official models.
+    if provider_data.is_none() {
+        let cache_path = codex_home().join("models_cache.json");
+        if let Ok(raw) = fs::read_to_string(cache_path) {
+            if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+                if let Some(entries) = value.get("models").and_then(Value::as_array) {
+                    for entry in entries {
+                        let Some(slug) = entry
+                            .get("slug")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|slug| !slug.is_empty())
+                        else {
+                            continue;
+                        };
+                        let visible = entry
+                            .get("visibility")
+                            .and_then(Value::as_str)
+                            .map(|value| !value.eq_ignore_ascii_case("hide"))
+                            .unwrap_or(true);
+                        let supported = entry
+                            .get("supported_in_api")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true);
+                        if visible && supported {
+                            add_model(
+                                &mut by_slug,
+                                slug,
+                                entry.get("display_name").and_then(Value::as_str),
+                                true,
+                                "codex-cache",
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
+    if let Some(model) = current_model {
+        add_model(&mut by_slug, &model, None, false, "current-config");
+    }
+
+    let mut models = by_slug.into_values().collect::<Vec<_>>();
     models.sort_by(|left, right| {
-        right.official.cmp(&left.official).then_with(|| {
-            left.display_name
-                .to_lowercase()
-                .cmp(&right.display_name.to_lowercase())
-        })
+        model_source_priority(&right.source)
+            .cmp(&model_source_priority(&left.source))
+            .then_with(|| {
+                left.display_name
+                    .to_lowercase()
+                    .cmp(&right.display_name.to_lowercase())
+            })
     });
     models
+}
+
+#[tauri::command]
+async fn get_codex_models() -> Vec<CodexModelOption> {
+    collect_codex_models().await
+}
+
+#[tauri::command]
+async fn get_codex_runtime_defaults() -> CodexRuntimeDefaults {
+    let info = get_codex_info();
+    let provider_data = current_cc_switch_provider_data();
+    let provider = provider_data
+        .as_ref()
+        .map(|(_, _, _, _, _, name)| name.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| info.provider_name.clone())
+        .or_else(|| info.model_provider.clone())
+        .unwrap_or_default();
+    let provider_model = provider_data
+        .as_ref()
+        .and_then(|(_, _, model, _, _, _)| model.clone())
+        .filter(|value| !value.trim().is_empty());
+    let models = collect_codex_models().await;
+    let source = models
+        .iter()
+        .find(|model| model.slug == info.model.as_deref().unwrap_or_default())
+        .map(|model| model.source.clone())
+        .or_else(|| models.first().map(|model| model.source.clone()))
+        .unwrap_or_else(|| "none".to_string());
+    let model = info
+        .model
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| models.first().map(|value| value.slug.clone()))
+        .unwrap_or_default();
+    let error = if models.is_empty() && provider_data.is_some() {
+        Some("当前启用的上游未返回可用模型列表；请检查供应商 /models 权限".to_string())
+    } else {
+        None
+    };
+    CodexRuntimeDefaults {
+        model,
+        permission: info
+            .permission
+            .unwrap_or_else(|| "Workspace write".to_string()),
+        reasoning_effort: normalize_reasoning_effort(
+            info.reasoning_effort.as_deref().unwrap_or("medium"),
+        )
+        .to_string(),
+        provider,
+        provider_model,
+        models,
+        source,
+        fetched_at_ms: now_ms(),
+        error,
+    }
 }
 
 #[tauri::command]
@@ -11601,17 +12167,18 @@ fn update_codex() -> Result<CodexInfo, String> {
     Ok(get_codex_info())
 }
 
-#[tauri::command]
-fn set_codex_defaults(
+fn write_codex_defaults(
     model: String,
     permission: String,
     reasoning_effort: String,
+    state: Option<&AppState>,
 ) -> Result<CodexInfo, String> {
     let model = model.trim();
     if model.is_empty() || model.len() > 160 || model.contains(['\r', '\n']) {
         return Err("model name is invalid".to_string());
     }
-    let (approval_policy, sandbox_mode) = match permission.as_str() {
+    let permission = permission.trim();
+    let (approval_policy, sandbox_mode) = match permission {
         "Read only" => ("on-request", "read-only"),
         "Full access" => ("never", "danger-full-access"),
         _ => ("on-request", "workspace-write"),
@@ -11621,18 +12188,40 @@ fn set_codex_defaults(
     let updated = upsert_root_toml_string(&original, "model", model);
     let updated = upsert_root_toml_string(&updated, "approval_policy", approval_policy);
     let updated = upsert_root_toml_string(&updated, "sandbox_mode", sandbox_mode);
-    let reasoning_effort = match reasoning_effort.trim().to_ascii_lowercase().as_str() {
-        "low" => "low",
-        "high" => "high",
-        "xhigh" => "xhigh",
-        _ => "medium",
-    };
+    let reasoning_effort = normalize_reasoning_effort(&reasoning_effort);
     let updated = upsert_root_toml_string(&updated, "model_reasoning_effort", reasoning_effort);
     if path.exists() {
         let _ = backup_file(&path)?;
     }
     write_text_atomically(&path, &updated)?;
-    Ok(get_codex_info())
+    let info = get_codex_info();
+    if info.model.as_deref() != Some(model)
+        || info.permission.as_deref()
+            != Some(codex_permission_label(Some(approval_policy), Some(sandbox_mode)).as_str())
+        || info.reasoning_effort.as_deref() != Some(reasoning_effort)
+    {
+        return Err("Codex configuration was written but could not be verified".to_string());
+    }
+    let mut info = info;
+    if let Some(state) = state {
+        let report = apply_defaults_to_active_threads(state, model, permission, reasoning_effort);
+        info.active_threads_applied = Some(report.threads_applied);
+        info.active_turns_applied = Some(report.turns_applied);
+        if !report.errors.is_empty() {
+            info.active_apply_error = Some(report.errors.join("; "));
+        }
+    }
+    Ok(info)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_codex_defaults(
+    state: State<'_, AppState>,
+    model: String,
+    permission: String,
+    reasoning_effort: String,
+) -> Result<CodexInfo, String> {
+    write_codex_defaults(model, permission, reasoning_effort, Some(state.inner()))
 }
 
 fn skill_roots() -> [(PathBuf, bool); 2] {
@@ -12226,6 +12815,7 @@ pub fn run() {
             get_cc_switch_provider_balances,
             get_codex_info,
             get_codex_models,
+            get_codex_runtime_defaults,
             get_voice_service_status,
             get_voice_service_progress,
             install_voice_service,
@@ -12960,6 +13550,36 @@ mod runtime_probe_tests {
         assert!(updated.contains("model = \"provider-model\""));
         let updated = upsert_root_toml_string(&updated, "sandbox_mode", "workspace-write");
         assert!(updated.contains("sandbox_mode = \"workspace-write\"\n[model_providers.custom]"));
+    }
+
+    #[test]
+    fn reads_cc_switch_provider_credentials_from_nested_codex_table() {
+        let settings = serde_json::json!({
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.5\"\n\n[model_providers.custom]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1/\"\nmodel = \"relay-model\"\n",
+            "auth": {"OPENAI_API_KEY": "secret"}
+        });
+        let meta = serde_json::json!({});
+        let (base_url, api_key, model, _) = provider_credentials(&settings, &meta);
+        assert_eq!(base_url, "https://relay.example/v1");
+        assert_eq!(api_key, "secret");
+        assert_eq!(model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn reads_quoted_provider_sections_with_dotted_names() {
+        let config = "model_provider = \"relay.eu\"\n[model_providers.\"relay.eu\"]\nname = \"Relay EU\"\nbase_url = \"https://relay.example/v1\"\n";
+        assert_eq!(
+            parse_toml_provider_section_string(config, "relay.eu", "name").as_deref(),
+            Some("Relay EU")
+        );
+        assert_eq!(
+            parse_toml_provider_section_string(config, "relay.eu", "base_url").as_deref(),
+            Some("https://relay.example/v1")
+        );
+        assert_eq!(
+            toml_section_parts("[model_providers.\"relay.eu\"]").as_deref(),
+            Some(["model_providers".to_string(), "relay.eu".to_string()].as_slice())
+        );
     }
 
     #[test]

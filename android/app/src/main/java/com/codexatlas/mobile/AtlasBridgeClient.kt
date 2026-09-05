@@ -328,6 +328,64 @@ class AtlasBridgeClient(
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
+    /** Reads the active provider's model catalog and canonical Codex defaults. */
+    fun runtimeDefaultsAny(fallbackUrl: String = ""): AtlasRuntimeDefaults {
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(candidate + "/v1/runtime/defaults")
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    val body = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) error(bridgeError(response.code, body))
+                    val result = json.decodeFromString<AtlasRuntimeDefaults>(body)
+                    BridgeTransport.succeeded(candidate)
+                    return result
+                }
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
+    fun setRuntimeDefaultsAny(defaults: AtlasRuntimeDefaults, fallbackUrl: String = ""): AtlasRuntimeDefaults {
+        val body = json.encodeToString(
+            mapOf(
+                "model" to defaults.model,
+                "permission" to defaults.permission,
+                "reasoningEffort" to defaults.reasoningEffort,
+            ),
+        )
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(candidate + "/v1/runtime/defaults")
+                    .header("Authorization", "Bearer $token")
+                    .post(body.toRequestBody())
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) error(bridgeError(response.code, responseBody))
+                    val result = json.decodeFromString<AtlasRuntimeDefaults>(responseBody)
+                    BridgeTransport.succeeded(candidate)
+                    return result
+                }
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
     fun messagesAny(
         sessionId: String,
         fallbackUrl: String = "",
@@ -486,8 +544,8 @@ class AtlasBridgeClient(
         throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
     }
 
-    fun createSessionAny(cwd: String, prompt: String, model: String, permission: String, fallbackUrl: String = "") {
-        val body = json.encodeToString(mapOf("cwd" to cwd, "prompt" to prompt, "model" to model, "permission" to permission))
+    fun createSessionAny(cwd: String, prompt: String, model: String, permission: String, reasoningEffort: String = "medium", fallbackUrl: String = "") {
+        val body = json.encodeToString(mapOf("cwd" to cwd, "prompt" to prompt, "model" to model, "permission" to permission, "reasoningEffort" to reasoningEffort))
         postAny("/v1/sessions", body, fallbackUrl)
     }
 

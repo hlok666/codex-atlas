@@ -58,7 +58,7 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, floatingWindowHeartbeat, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, floatingWindowHeartbeat, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getCodexRuntimeDefaults, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
 import type { DesktopUpdateInfo, DesktopUpdateProgress } from './lib/atlasBridge'
 import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { FloatingSessionTargetLock } from './lib/floatingSessionTarget'
@@ -679,6 +679,9 @@ function App() {
   const [skillsLoadState, setSkillsLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [codexVersion, setCodexVersion] = useState('detecting…')
   const [codexProvider, setCodexProvider] = useState('')
+  const [codexModels, setCodexModels] = useState<CodexModelOption[]>([])
+  const [codexModelsLoading, setCodexModelsLoading] = useState(true)
+  const [codexModelsError, setCodexModelsError] = useState('')
   const storedDefaultModelRef = useRef(readStored('defaultModel', ''))
   const [defaultModel, setDefaultModel] = useState(() => storedDefaultModelRef.current || 'model not detected')
   const [defaultPermission, setDefaultPermission] = useState(() => readStored('defaultPermission', 'Workspace write'))
@@ -1066,17 +1069,35 @@ function App() {
 
   useEffect(() => {
     void scanSessions(false)
+    void getCodexRuntimeDefaults().then((defaults) => {
+      if (defaults) {
+        setCodexModels(defaults.models || [])
+        setCodexModelsError(defaults.error || '')
+        setCodexModelsLoading(false)
+        if (defaults.provider) setCodexProvider(defaults.provider)
+        if (defaults.model) setDefaultModel(defaults.model)
+        if (defaults.permission) setDefaultPermission(defaults.permission)
+        if (defaults.reasoningEffort) setDefaultReasoningEffort(defaults.reasoningEffort)
+        writeStored('defaultModel', defaults.model)
+        writeStored('defaultPermission', defaults.permission)
+        writeStored('defaultReasoningEffort', defaults.reasoningEffort)
+      } else {
+        setCodexModelsLoading(false)
+        setCodexModelsError(language === 'zh' ? '无法读取当前供应商模型' : 'Could not read models from the active provider')
+        void getCodexModels().then((models) => { if (models) setCodexModels(models) })
+        void getCodexInfo().then((info) => {
+          if (info?.version) setCodexVersion(info.version)
+          else if (desktopPlatform === 'browser') setCodexVersion('browser preview')
+          setCodexProvider(info?.providerName || info?.modelProvider || '')
+          if (info?.model) setDefaultModel(info.model)
+          if (info?.permission) setDefaultPermission(info.permission)
+          if (info?.reasoningEffort) setDefaultReasoningEffort(info.reasoningEffort)
+        })
+      }
+    })
     void getCodexInfo().then((info) => {
       if (info?.version) setCodexVersion(info.version)
       else if (desktopPlatform === 'browser') setCodexVersion('browser preview')
-      setCodexProvider(info?.providerName || info?.modelProvider || '')
-      // Replace legacy demo defaults with the model Codex actually uses. A
-      // non-empty custom preference remains under user control.
-      const legacyDefaults = new Set(['', 'gpt-5-codex', 'gpt-5', 'gpt-4.1', 'model not detected'])
-      if (info?.model && legacyDefaults.has(storedDefaultModelRef.current)) {
-        setDefaultModel(info.model)
-      }
-      if (info?.reasoningEffort) setDefaultReasoningEffort(info.reasoningEffort)
     })
     void getMobileBridgeConfig().then((config) => setMobileBridge(config))
     void getServerTunnelStatus().then((status) => setServerTunnel(status))
@@ -1398,14 +1419,14 @@ function App() {
           {activeNav === 'integrations' && <IntegrationsView language={language} providerBalances={providerBalances} sessionTotal={sessionItems.length} ccSwitchCheckedAt={ccSwitchCheckedAt} setCcSwitchCheckedAt={setCcSwitchCheckedAt} paseoImportedCount={paseoImportedCount} setPaseoImportedCount={setPaseoImportedCount} showToast={showToast} openExternalTool={openExternalTool} />}
           {activeNav === 'skills' && <SkillsView language={language} skills={installedSkills} setSkills={setInstalledSkills} loadState={skillsLoadState} setLoadState={setSkillsLoadState} showToast={showToast} />}
           {activeNav === 'floating' && <FloatingView language={language} sessions={sessionItems} providerBalances={providerBalances} floatingEnabled={floatingEnabled} onToggleFloating={() => void toggleFloatingWindow()} floatingLaunchOnStart={floatingLaunchOnStart} setFloatingLaunchOnStart={setFloatingLaunchOnStart} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} activateSession={activateSession} inputContinue={inputContinue} showToast={showToast} />}
-          {activeNav === 'runtime' && <RuntimeView language={language} codexVersion={codexVersion} setCodexVersion={setCodexVersion} codexProvider={codexProvider} defaultModel={defaultModel} setDefaultModel={setDefaultModel} setDefaultPermission={setDefaultPermission} defaultPermission={defaultPermission} defaultReasoningEffort={defaultReasoningEffort} setDefaultReasoningEffort={setDefaultReasoningEffort} autoScan={autoScan} setAutoScan={setAutoScan} hookStatus={hookStatus} setHookStatus={setHookStatus} mobileBridge={mobileBridge} setMobileBridge={setMobileBridge} serverTunnel={serverTunnel} setServerTunnel={setServerTunnel} showToast={showToast} />}
+          {activeNav === 'runtime' && <RuntimeView language={language} codexVersion={codexVersion} setCodexVersion={setCodexVersion} codexProvider={codexProvider} codexModels={codexModels} codexModelsLoading={codexModelsLoading} codexModelsError={codexModelsError} onRefreshCodexModels={async () => { setCodexModelsLoading(true); setCodexModelsError(''); const defaults = await getCodexRuntimeDefaults(); if (defaults) { setCodexModels(defaults.models || []); setCodexModelsError(defaults.error || ''); if (defaults.provider) setCodexProvider(defaults.provider) } else { const models = await getCodexModels(); if (models) setCodexModels(models); else setCodexModelsError(language === 'zh' ? '无法读取当前供应商模型' : 'Could not read models from the active provider') }; setCodexModelsLoading(false) }} defaultModel={defaultModel} setDefaultModel={setDefaultModel} setDefaultPermission={setDefaultPermission} defaultPermission={defaultPermission} defaultReasoningEffort={defaultReasoningEffort} setDefaultReasoningEffort={setDefaultReasoningEffort} autoScan={autoScan} setAutoScan={setAutoScan} hookStatus={hookStatus} setHookStatus={setHookStatus} mobileBridge={mobileBridge} setMobileBridge={setMobileBridge} serverTunnel={serverTunnel} setServerTunnel={setServerTunnel} showToast={showToast} />}
           </main>
         </div>
 
         {selected && !['skills', 'runtime', 'monitor', 'integrations', 'floating'].includes(activeNav) && <SessionInspector language={language} session={selected} onClose={() => setSelected(null)} onActivate={() => activateSession(selected)} onInputContinue={() => inputContinue(selected)} onOpenWorkspace={() => openSessionWorkspace(selected)} />}
       </div>
       {toast && <div className="toast"><Check size={15} />{toast}</div>}
-      {newSessionOpen && <NewSessionDialog language={language} defaultModel={defaultModel} defaultPermission={defaultPermission} onClose={() => setNewSessionOpen(false)} onCreate={createSession} />}
+      {newSessionOpen && <NewSessionDialog language={language} defaultModel={defaultModel} defaultPermission={defaultPermission} defaultReasoningEffort={defaultReasoningEffort} models={codexModels} onClose={() => setNewSessionOpen(false)} onCreate={createSession} />}
     </div>
   )
 }
@@ -1440,14 +1461,23 @@ function ContentState({ language, state, emptyLabel, onRetry }: { language: UiLa
   return <div className="content-state empty"><span className="content-state-icon"><Search size={18} /></span><strong>{emptyLabel}</strong></div>
 }
 
-function NewSessionDialog({ language, defaultModel, defaultPermission, onClose, onCreate }: { language: UiLanguage; defaultModel: string; defaultPermission: string; onClose: () => void; onCreate: (request: NewCodexSessionRequest) => Promise<void> }) {
+function NewSessionDialog({ language, defaultModel, defaultPermission, defaultReasoningEffort, models, onClose, onCreate }: { language: UiLanguage; defaultModel: string; defaultPermission: string; defaultReasoningEffort: string; models: CodexModelOption[]; onClose: () => void; onCreate: (request: NewCodexSessionRequest) => Promise<void> }) {
   const [draft, setDraft] = useState<NewCodexSessionRequest>({
     cwd: '',
     prompt: '',
     model: defaultModel === 'model not detected' ? '' : defaultModel,
     permission: defaultPermission,
+    reasoningEffort: defaultReasoningEffort,
   })
   const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    setDraft((current) => ({
+      ...current,
+      model: current.model || (defaultModel === 'model not detected' ? '' : defaultModel),
+      permission: current.permission || defaultPermission,
+      reasoningEffort: current.reasoningEffort || defaultReasoningEffort,
+    }))
+  }, [defaultModel, defaultPermission, defaultReasoningEffort])
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!draft.cwd.trim() || busy) return
@@ -1463,7 +1493,7 @@ function NewSessionDialog({ language, defaultModel, defaultPermission, onClose, 
       <div className="dialog-form">
         <label className="field-label">{tr(language, 'workingDirectory')}<input className="text-input" value={draft.cwd} onChange={(event) => setDraft({ ...draft, cwd: event.target.value })} placeholder={tr(language, 'directoryHint')} autoFocus spellCheck={false} /></label>
         <label className="field-label">{tr(language, 'initialPrompt')}<textarea className="text-input dialog-textarea" value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} placeholder={tr(language, 'promptHint')} rows={4} /></label>
-        <div className="dialog-form-row"><label className="field-label">{tr(language, 'model')}<input className="text-input" value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} placeholder="Codex default" spellCheck={false} /></label><label className="field-label">{tr(language, 'permission')}<select value={draft.permission} onChange={(event) => setDraft({ ...draft, permission: event.target.value })}><option value="Workspace write">{language === 'zh' ? '工作区写入' : 'Workspace write'}</option><option value="Read only">{language === 'zh' ? '只读' : 'Read only'}</option><option value="Full access">{language === 'zh' ? '完全访问' : 'Full access'}</option></select></label></div>
+        <div className="dialog-form-row"><label className="field-label">{tr(language, 'model')}<select className="text-input" value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} disabled={models.length === 0}><option value="">{models.length === 0 ? (language === 'zh' ? '正在读取模型…' : 'Loading models…') : (language === 'zh' ? '使用默认模型' : 'Use default model')}</option>{models.map((model) => <option key={model.slug} value={model.slug}>{model.displayName}{model.source === 'provider-api' ? ` · ${language === 'zh' ? '上游' : 'Provider'}` : ''}</option>)}</select></label><label className="field-label">{tr(language, 'permission')}<select value={draft.permission} onChange={(event) => setDraft({ ...draft, permission: event.target.value })}><option value="Workspace write">{language === 'zh' ? '工作区写入' : 'Workspace write'}</option><option value="Read only">{language === 'zh' ? '只读' : 'Read only'}</option><option value="Full access">{language === 'zh' ? '完全访问' : 'Full access'}</option></select></label><label className="field-label">{language === 'zh' ? '思考程度' : 'Reasoning'}<select value={draft.reasoningEffort || defaultReasoningEffort} onChange={(event) => setDraft({ ...draft, reasoningEffort: event.target.value })}><option value="low">{language === 'zh' ? '低' : 'Low'}</option><option value="medium">{language === 'zh' ? '中' : 'Medium'}</option><option value="high">{language === 'zh' ? '高' : 'High'}</option><option value="xhigh">{language === 'zh' ? '极高' : 'Extra high'}</option></select></label></div>
       </div>
       <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>{language === 'zh' ? '取消' : 'Cancel'}</button><button type="submit" className="primary-button" disabled={busy || !draft.cwd.trim()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} fill="currentColor" />}{busy ? tr(language, 'creatingSession') : tr(language, 'createSession')}</button></div>
     </form>
@@ -1888,7 +1918,7 @@ function FloatingView({ language, sessions: items, providerBalances, floatingEna
   </>
 }
 
-function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, defaultModel, setDefaultModel, defaultPermission, setDefaultPermission, defaultReasoningEffort, setDefaultReasoningEffort, autoScan, setAutoScan, hookStatus, setHookStatus, mobileBridge, setMobileBridge, serverTunnel, setServerTunnel, showToast }: { language: 'zh' | 'en'; codexVersion: string; setCodexVersion: (value: string) => void; codexProvider: string; defaultModel: string; setDefaultModel: (value: string) => void; defaultPermission: string; setDefaultPermission: (value: string) => void; defaultReasoningEffort: string; setDefaultReasoningEffort: (value: string) => void; autoScan: boolean; setAutoScan: (value: boolean) => void; hookStatus: CodexHookStatus | null; setHookStatus: (value: CodexHookStatus | null) => void; mobileBridge: MobileBridgeConfig | null; setMobileBridge: (value: MobileBridgeConfig | null) => void; serverTunnel: ServerTunnelStatus | null; setServerTunnel: (value: ServerTunnelStatus | null) => void; showToast: (message: string) => void }) {
+function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, codexModels, codexModelsLoading, codexModelsError, onRefreshCodexModels, defaultModel, setDefaultModel, defaultPermission, setDefaultPermission, defaultReasoningEffort, setDefaultReasoningEffort, autoScan, setAutoScan, hookStatus, setHookStatus, mobileBridge, setMobileBridge, serverTunnel, setServerTunnel, showToast }: { language: 'zh' | 'en'; codexVersion: string; setCodexVersion: (value: string) => void; codexProvider: string; codexModels: CodexModelOption[]; codexModelsLoading: boolean; codexModelsError: string; onRefreshCodexModels: () => Promise<void>; defaultModel: string; setDefaultModel: (value: string) => void; defaultPermission: string; setDefaultPermission: (value: string) => void; defaultReasoningEffort: string; setDefaultReasoningEffort: (value: string) => void; autoScan: boolean; setAutoScan: (value: boolean) => void; hookStatus: CodexHookStatus | null; setHookStatus: (value: CodexHookStatus | null) => void; mobileBridge: MobileBridgeConfig | null; setMobileBridge: (value: MobileBridgeConfig | null) => void; serverTunnel: ServerTunnelStatus | null; setServerTunnel: (value: ServerTunnelStatus | null) => void; showToast: (message: string) => void }) {
   const [saving, setSaving] = useState(false)
   const [updatingCodex, setUpdatingCodex] = useState(false)
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateInfo | null>(null)
@@ -1907,6 +1937,11 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
   const [voiceStatus, setVoiceStatus] = useState<VoiceServiceStatus | null>(null)
   const [voiceProgress, setVoiceProgress] = useState<VoiceServiceProgress | null>(null)
   const [voiceBusy, setVoiceBusy] = useState(false)
+  const defaultsRequestRef = useRef(0)
+  // Keep config writes ordered. A fast sequence of picker changes must leave
+  // the last selection on disk even when an earlier Rust command finishes
+  // later because it was waiting on an app-server response.
+  const defaultsWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve())
   useEffect(() => {
     let disposed = false
     void checkDesktopUpdate().then((result) => { if (!disposed && result) setDesktopUpdate(result) })
@@ -2022,24 +2057,53 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
     }
   }
   const hookReady = hookStatus?.configured && hookStatus.enabled
-  const saveDefaults = async () => {
-    setSaving(true)
-    const info = await setCodexDefaults(defaultModel, defaultPermission, defaultReasoningEffort)
-    setSaving(false)
-    if (info?.model) {
-      setDefaultModel(info.model)
-      showToast(language === 'zh' ? '已写入 Codex 配置' : 'Saved to Codex configuration')
+  const persistDefaults = (model: string, permission: string, reasoning: string, announce: boolean): Promise<boolean> => {
+    const normalizedModel = model.trim()
+    if (!normalizedModel) {
+      showToast(language === 'zh' ? '请先等待上游模型列表加载完成' : 'Wait for the upstream model list to load')
+      return Promise.resolve(false)
     }
+    const requestId = ++defaultsRequestRef.current
+    setSaving(true)
+    const write = async (): Promise<boolean> => {
+      try {
+        const info = await setCodexDefaults(normalizedModel, permission.trim(), reasoning)
+        if (requestId !== defaultsRequestRef.current) return false
+        if (!info?.model) throw new Error(language === 'zh' ? 'Codex 配置未返回确认结果' : 'Codex did not confirm the updated configuration')
+        setDefaultModel(info.model)
+        setDefaultPermission(info.permission || permission)
+        setDefaultReasoningEffort(info.reasoningEffort || reasoning)
+        writeStored('defaultModel', info.model)
+        writeStored('defaultPermission', info.permission || permission)
+        writeStored('defaultReasoningEffort', info.reasoningEffort || reasoning)
+        if (announce) {
+          const liveCount = (info.activeThreadsApplied || 0) + (info.activeTurnsApplied || 0)
+          const liveNote = info.activeApplyError
+            ? (language === 'zh' ? `；部分运行中会话未更新：${info.activeApplyError}` : `; some running threads were not updated: ${info.activeApplyError}`)
+            : liveCount > 0
+              ? (language === 'zh' ? `；已同步 ${liveCount} 个运行时对象` : `; synced ${liveCount} live runtime item${liveCount === 1 ? '' : 's'}`)
+              : ''
+          showToast((language === 'zh' ? '默认配置已保存' : 'Defaults saved') + liveNote)
+        }
+        return true
+      } catch (error) {
+        if (requestId === defaultsRequestRef.current) {
+          showToast(`${language === 'zh' ? '默认配置未生效' : 'Defaults were not applied'}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        return false
+      } finally {
+        if (requestId === defaultsRequestRef.current) setSaving(false)
+      }
+    }
+    const queued = defaultsWriteQueueRef.current.then(write, write)
+    defaultsWriteQueueRef.current = queued.then(() => undefined, () => undefined)
+    return queued
+  }
+  const saveDefaults = async () => {
+    await persistDefaults(defaultModel, defaultPermission, defaultReasoningEffort, true)
   }
   const applyDefaultsImmediately = (model: string, permission: string, reasoning: string) => {
-    if (!model.trim()) return
-    void setCodexDefaults(model, permission, reasoning).then((info) => {
-      if (info?.model) setDefaultModel(info.model)
-      if (info?.reasoningEffort) setDefaultReasoningEffort(info.reasoningEffort)
-      writeStored('defaultModel', info?.model || model)
-      writeStored('defaultPermission', permission)
-      writeStored('defaultReasoningEffort', info?.reasoningEffort || reasoning)
-    })
+    void persistDefaults(model, permission, reasoning, false)
   }
   const updateInstalledCodex = async () => {
     setUpdatingCodex(true)
@@ -2259,7 +2323,8 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, d
     <div className="runtime-grid">
       <section className="settings-panel">
         <div className="panel-head"><div><h3>{tr(language, 'sessionDefaults')}</h3><span className="panel-subtitle">{tr(language, 'appliedNewResumes')}</span></div><Wrench size={17} className="teal-icon" /></div>
-        <label className="field-label">{tr(language, 'model')}<input className="text-input" value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)} onBlur={() => applyDefaultsImmediately(defaultModel, defaultPermission, defaultReasoningEffort)} spellCheck={false} /><span className="field-hint">{codexProvider ? `${language === 'zh' ? '当前供应商' : 'Provider'} · ${codexProvider}` : (language === 'zh' ? '读取自 Codex 配置' : 'Read from Codex configuration')}</span></label>
+        <label className="field-label">{tr(language, 'model')}<select className="text-input" value={defaultModel} onChange={(event) => { const next = event.target.value; setDefaultModel(next); applyDefaultsImmediately(next, defaultPermission, defaultReasoningEffort) }} disabled={codexModelsLoading || codexModels.length === 0}><option value="">{codexModelsLoading ? (language === 'zh' ? '正在读取上游模型…' : 'Loading upstream models…') : (language === 'zh' ? '暂无可用模型' : 'No models available')}</option>{defaultModel && !codexModels.some((model) => model.slug === defaultModel) && <option value={defaultModel}>{defaultModel} · {language === 'zh' ? '当前配置' : 'Current config'}</option>}{codexModels.map((model) => <option key={model.slug} value={model.slug}>{model.displayName}{model.source === 'provider-api' ? ` · ${language === 'zh' ? '上游' : 'Provider'}` : model.source === 'cc-switch' ? ' · CC Switch' : ''}</option>)}</select><span className="field-hint">{codexProvider ? `${language === 'zh' ? '当前供应商' : 'Provider'} · ${codexProvider}` : (language === 'zh' ? '模型来自当前启用的上游供应商' : 'Models come from the active upstream provider')} {codexModelsError && <span className="field-error">{codexModelsError}</span>}</span></label>
+        <div className="runtime-model-actions"><button type="button" className="secondary-button compact-button" onClick={() => void onRefreshCodexModels()} disabled={codexModelsLoading}>{codexModelsLoading ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}{language === 'zh' ? '刷新模型' : 'Refresh models'}</button><span className="field-hint">{codexModels.length > 0 ? `${codexModels.length} ${language === 'zh' ? '个上游选项' : 'upstream options'}` : ''}</span></div>
         <label className="field-label">{tr(language, 'permissionField')}<select value={defaultPermission} onChange={(event) => { const next = event.target.value; setDefaultPermission(next); applyDefaultsImmediately(defaultModel, next, defaultReasoningEffort) }}><option value="Workspace write">{language === 'zh' ? '工作区写入' : 'Workspace write'}</option><option value="Read only">{language === 'zh' ? '只读' : 'Read only'}</option><option value="Full access">{language === 'zh' ? '完全访问' : 'Full access'}</option></select></label>
         <label className="field-label">{language === 'zh' ? '思考程度' : 'Reasoning effort'}<select value={defaultReasoningEffort} onChange={(event) => { const next = event.target.value; setDefaultReasoningEffort(next); applyDefaultsImmediately(defaultModel, defaultPermission, next) }}><option value="low">{language === 'zh' ? '低' : 'Low'}</option><option value="medium">{language === 'zh' ? '中' : 'Medium'}</option><option value="high">{language === 'zh' ? '高' : 'High'}</option><option value="xhigh">{language === 'zh' ? '极高' : 'Extra high'}</option></select></label>
         <label className="switch-row"><span><strong>{tr(language, 'scanOnLaunch')}</strong><small>{tr(language, 'refreshOnLaunch')}</small></span><button className={`toggle ${autoScan ? 'on' : ''}`} onClick={() => setAutoScan(!autoScan)} aria-label={tr(language, 'scanOnLaunch')}><span /></button></label>
@@ -2673,14 +2738,23 @@ function FloatingMini() {
   }, [])
   useEffect(() => {
     let disposed = false
-    const syncModels = () => void getCodexModels().then((models) => {
-      if (!disposed && models) setCodexModels(models)
+    const syncModels = () => void getCodexRuntimeDefaults().then((defaults) => {
+      if (disposed) return
+      if (defaults) {
+        setCodexModels(defaults.models || [])
+        if (defaults.model) setDefaultModel(defaults.model)
+        if (defaults.permission) setDefaultPermission(defaults.permission)
+        if (defaults.reasoningEffort) setDefaultReasoningEffort(defaults.reasoningEffort)
+      } else {
+        void getCodexModels().then((models) => { if (!disposed && models) setCodexModels(models) })
+      }
     })
     syncModels()
     const modelTimer = window.setInterval(syncModels, 60_000)
     void getCodexInfo().then((info) => {
       if (disposed || !info) return
       if (info.model && !defaultModel.trim()) setDefaultModel(info.model)
+      if (info.permission) setDefaultPermission(info.permission)
       if (info.reasoningEffort) setDefaultReasoningEffort(info.reasoningEffort)
     })
     return () => { disposed = true; window.clearInterval(modelTimer) }
@@ -2999,12 +3073,15 @@ function FloatingMini() {
     void setCodexDefaults(nextModel, nextPermission, nextReasoningEffort).then((info) => {
       if (info?.model) {
         setDefaultModel(info.model)
-        setDefaultPermission(nextPermission)
+        setDefaultPermission(info.permission || nextPermission)
         setDefaultReasoningEffort(info.reasoningEffort || nextReasoningEffort)
         writeStored('defaultModel', info.model)
-        writeStored('defaultPermission', nextPermission)
+        writeStored('defaultPermission', info.permission || nextPermission)
         writeStored('defaultReasoningEffort', info.reasoningEffort || nextReasoningEffort)
-        setMessage(language === 'zh' ? `已切换模型：${info.model}` : `Model switched to ${info.model}`)
+        const liveCount = (info.activeThreadsApplied || 0) + (info.activeTurnsApplied || 0)
+        setMessage(language === 'zh'
+          ? `已切换模型：${info.model}${liveCount > 0 ? ` · 已同步 ${liveCount} 个运行时对象` : ''}`
+          : `Model switched to ${info.model}${liveCount > 0 ? ` · synced ${liveCount} live runtime item${liveCount === 1 ? '' : 's'}` : ''}`)
       } else {
         setMessage(language === 'zh' ? '模型设置失败' : 'Model setting failed')
       }

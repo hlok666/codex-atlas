@@ -80,6 +80,7 @@ export type NewCodexSessionRequest = {
   prompt: string
   model: string
   permission: string
+  reasoningEffort?: string
 }
 
 export type DesktopUpdateInfo = {
@@ -141,6 +142,18 @@ export type CodexModelOption = {
   displayName: string
   official: boolean
   source: 'codex-cache' | 'current-config' | 'cc-switch' | 'provider-api'
+}
+
+export type CodexRuntimeDefaults = {
+  model: string
+  permission: string
+  reasoningEffort: string
+  provider: string
+  providerModel?: string | null
+  models: CodexModelOption[]
+  source: string
+  fetchedAtMs: number
+  error?: string | null
 }
 
 export type FloatingInputMode = 'queue' | 'interrupt'
@@ -543,13 +556,17 @@ export async function importAllPaseoSessions(): Promise<PaseoImportSummary | nul
   return invokeDesktop<PaseoImportSummary>('paseo_import_all_codex_sessions')
 }
 
-export async function getCodexInfo(): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string; reasoningEffort?: string } | null> {
+export async function getCodexInfo(): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string; reasoningEffort?: string; permission?: string; activeThreadsApplied?: number; activeTurnsApplied?: number; activeApplyError?: string } | null> {
   return invokeDesktop('get_codex_info')
 }
 
 /** Returns the model catalog exposed by the installed Codex CLI. */
 export async function getCodexModels(): Promise<CodexModelOption[] | null> {
   return invokeDesktop<CodexModelOption[]>('get_codex_models')
+}
+
+export async function getCodexRuntimeDefaults(): Promise<CodexRuntimeDefaults | null> {
+  return invokeDesktop<CodexRuntimeDefaults>('get_codex_runtime_defaults')
 }
 
 export async function getVoiceServiceStatus(): Promise<VoiceServiceStatus | null> {
@@ -618,7 +635,7 @@ export async function installDesktopUpdate(path: string): Promise<boolean> {
   return (await invokeDesktop<boolean>('install_desktop_update', { path })) ?? false
 }
 
-export async function setCodexDefaults(model: string, permission: string, reasoningEffort = 'medium'): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string; reasoningEffort?: string } | null> {
+export async function setCodexDefaults(model: string, permission: string, reasoningEffort = 'medium'): Promise<{ installed: boolean; version: string; executable: string; model?: string; modelProvider?: string; providerName?: string; reasoningEffort?: string; permission?: string; activeThreadsApplied?: number; activeTurnsApplied?: number; activeApplyError?: string } | null> {
   return invokeDesktop('set_codex_defaults', { model, permission, reasoningEffort })
 }
 

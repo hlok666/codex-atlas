@@ -135,6 +135,27 @@ data class AtlasSyncResponse(
 )
 
 @Serializable
+data class AtlasModelOption(
+    val slug: String = "",
+    val displayName: String = "",
+    val official: Boolean = false,
+    val source: String = "",
+)
+
+@Serializable
+data class AtlasRuntimeDefaults(
+    val model: String = "",
+    val permission: String = "Workspace write",
+    val reasoningEffort: String = "medium",
+    val provider: String = "",
+    val providerModel: String? = null,
+    val models: List<AtlasModelOption> = emptyList(),
+    val source: String = "",
+    val fetchedAtMs: Long = 0,
+    val error: String? = null,
+)
+
+@Serializable
 data class AtlasDictationAck(
     val ok: Boolean = false,
     val ackSeq: Long = 0,

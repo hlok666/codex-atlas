@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 object BridgePreferences {
     private const val PREFS = "atlas_bridge"
     private const val CACHED_SNAPSHOT = "cachedSnapshot"
+    private const val RUNTIME_DEFAULTS = "runtimeDefaults"
     private const val SYNC_CURSOR = "syncCursor"
     private const val SYNC_EPOCH = "syncEpoch"
     private const val SYNC_SEQ = "syncSeq"
@@ -157,6 +158,22 @@ object BridgePreferences {
             ?: prefs.getString(CACHED_SNAPSHOT, null).takeIf { devices(context).size <= 1 }
             .orEmpty()
         return raw.takeIf { it.isNotBlank() }?.let { runCatching { json.decodeFromString<AtlasSnapshot>(it) }.getOrNull() }
+    }
+
+    fun saveRuntimeDefaults(context: Context, defaults: AtlasRuntimeDefaults) {
+        val encoded = json.encodeToString(defaults)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(RUNTIME_DEFAULTS, encoded)
+            .putString(scopedKey(RUNTIME_DEFAULTS, context), encoded)
+            .apply()
+    }
+
+    fun cachedRuntimeDefaults(context: Context): AtlasRuntimeDefaults? {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString(scopedKey(RUNTIME_DEFAULTS, context), null)
+            ?: prefs.getString(RUNTIME_DEFAULTS, null).takeIf { devices(context).size <= 1 }
+        return raw?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { json.decodeFromString<AtlasRuntimeDefaults>(it) }.getOrNull() }
     }
 
     private fun scopedKey(base: String, context: Context): String = "$base:${selectedDeviceId(context)}"

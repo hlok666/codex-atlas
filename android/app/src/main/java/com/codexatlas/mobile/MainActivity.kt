@@ -58,6 +58,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Download
@@ -65,7 +66,6 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Settings
@@ -73,6 +73,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Typography
@@ -684,6 +688,14 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var deviceManagerVisible by remember { mutableStateOf(false) }
     var state by remember { mutableStateOf<ConnectionState>(ConnectionState.Idle) }
     var snapshot by remember { mutableStateOf(BridgePreferences.cachedSnapshot(context)) }
+    var runtimeDefaults by remember {
+        mutableStateOf(
+            BridgePreferences.cachedRuntimeDefaults(context)
+                ?: AtlasRuntimeDefaults(model = BridgePreferences.cachedSnapshot(context)?.model.orEmpty()),
+        )
+    }
+    var runtimeDefaultsBusy by remember { mutableStateOf(false) }
+    var runtimeDefaultsError by remember { mutableStateOf<String?>(null) }
     var sessions by remember { mutableStateOf<List<AtlasSession>>(emptyList()) }
     var selectedSessionId by remember(initialSessionId) { mutableStateOf(initialSessionId) }
     var mobilePage by remember { mutableStateOf(if (initialSessionId.isNotBlank()) MobilePage.Conversation else MobilePage.Home) }
@@ -1078,6 +1090,32 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         }
     }
 
+    fun refreshRuntimeDefaults() {
+        val details = MainActivity.parsePairing(pairing)
+        if (details == null) {
+            runtimeDefaultsError = if (zh) "请先连接一个 Atlas 设备" else "Connect an Atlas device first"
+            return
+        }
+        if (runtimeDefaultsBusy) return
+        runtimeDefaultsBusy = true
+        runtimeDefaultsError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    AtlasBridgeClient(primary, details.token).runtimeDefaultsAny(fallback)
+                }
+            }
+            result.onSuccess { fresh ->
+                runtimeDefaults = fresh
+                BridgePreferences.saveRuntimeDefaults(context, fresh)
+                if (fresh.model.isNotBlank()) snapshot = snapshot?.copy(model = fresh.model) ?: snapshot
+            }.onFailure { error -> runtimeDefaultsError = connectionFailureMessage(error, zh) }
+            runtimeDefaultsBusy = false
+        }
+    }
+
     LaunchedEffect(Unit) { checkForUpdate() }
 
     fun connect(value: String) {
@@ -1109,6 +1147,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             syncEpoch = BridgePreferences.syncEpoch(context)
             syncAfterSeq = BridgePreferences.syncSeq(context)
             snapshot = BridgePreferences.cachedSnapshot(context)
+            runtimeDefaults = BridgePreferences.cachedRuntimeDefaults(context)
+                ?: AtlasRuntimeDefaults(model = snapshot?.model.orEmpty())
+            runtimeDefaultsError = null
             BridgePreferences.saveConnectionRoute(context, connectionRoute.key)
             val result = withContext(Dispatchers.IO) {
                 runCatching {
@@ -1152,6 +1193,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     }
                 }
                 state = ConnectionState.Connected(freshSnapshot.title)
+                refreshRuntimeDefaults()
                 AtlasSyncService.start(context)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -1180,6 +1222,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         syncEpoch = BridgePreferences.syncEpoch(context)
         syncAfterSeq = BridgePreferences.syncSeq(context)
         snapshot = BridgePreferences.cachedSnapshot(context)
+        runtimeDefaults = BridgePreferences.cachedRuntimeDefaults(context)
+            ?: AtlasRuntimeDefaults(model = snapshot?.model.orEmpty())
+        runtimeDefaultsError = null
         sessions = emptyList()
         messagesBySession = emptyMap()
         messageRequestToken += 1
@@ -1457,6 +1502,38 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
             balanceBusy = balanceBusy,
             balanceRefreshError = balanceRefreshError,
             onRefreshBalance = ::refreshBalance,
+            runtimeDefaults = runtimeDefaults,
+            runtimeDefaultsBusy = runtimeDefaultsBusy,
+            runtimeDefaultsError = runtimeDefaultsError,
+            onRefreshRuntimeDefaults = ::refreshRuntimeDefaults,
+            onSaveRuntimeDefaults = { next ->
+                val details = MainActivity.parsePairing(pairing)
+                if (details == null) {
+                    runtimeDefaultsError = if (zh) "请先连接一个 Atlas 设备" else "Connect an Atlas device first"
+                } else if (!runtimeDefaultsBusy) {
+                    runtimeDefaultsBusy = true
+                    runtimeDefaultsError = null
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val primary = primaryBridgeUrl(details, connectionRoute)
+                                val fallback = fallbackBridgeUrl(details, connectionRoute)
+                                AtlasBridgeClient(primary, details.token).setRuntimeDefaultsAny(next, fallback)
+                            }
+                        }
+                        result.onSuccess { fresh ->
+                            runtimeDefaults = fresh
+                            BridgePreferences.saveRuntimeDefaults(context, fresh)
+                            if (fresh.model.isNotBlank()) {
+                                snapshot = snapshot?.copy(model = fresh.model) ?: snapshot
+                                snapshot?.let { BridgePreferences.saveCachedSnapshot(context, it) }
+                            }
+                        }
+                            .onFailure { error -> runtimeDefaultsError = connectionFailureMessage(error, zh) }
+                        runtimeDefaultsBusy = false
+                    }
+                }
+            },
             availableUpdate = availableUpdate,
             updateBusy = updateBusy,
             updateProgress = updateProgress,
@@ -1575,6 +1652,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                                     pairing = MainActivity.storedPairing(context)
                                                     connectionRoute = ConnectionRoute.fromKey(BridgePreferences.connectionRoute(context))
                                                     snapshot = BridgePreferences.cachedSnapshot(context)
+                                                    runtimeDefaults = BridgePreferences.cachedRuntimeDefaults(context)
+                                                        ?: AtlasRuntimeDefaults(model = snapshot?.model.orEmpty())
+                                                    runtimeDefaultsError = null
                                                     sessions = emptyList()
                                                     messagesBySession = emptyMap()
                                                     messageRequestToken += 1
@@ -2069,7 +2149,16 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                 scope.launch {
                                     val result = withContext(Dispatchers.IO) {
                                         val (primary, fallback) = primaryBridgeUrl(details, connectionRoute) to fallbackBridgeUrl(details, connectionRoute)
-                                        runCatching { AtlasBridgeClient(primary, details.token).createSessionAny(createCwd.trim(), createPrompt.trim(), snapshot?.model.orEmpty(), "Workspace write", fallback) }
+                                        runCatching {
+                                            AtlasBridgeClient(primary, details.token).createSessionAny(
+                                                cwd = createCwd.trim(),
+                                                prompt = createPrompt.trim(),
+                                                model = runtimeDefaults.model.ifBlank { snapshot?.model.orEmpty() },
+                                                permission = runtimeDefaults.permission,
+                                                reasoningEffort = runtimeDefaults.reasoningEffort,
+                                                fallbackUrl = fallback,
+                                            )
+                                        }
                                     }
                                     result.onSuccess {
                                         createVisible = false
@@ -2316,7 +2405,7 @@ private fun MobileWorkspacePage(
                     enabled = actionPath == null,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Icon(Icons.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(6.dp))
                     Text(if (chinese) "打开" else "Open")
                 }
@@ -2506,6 +2595,150 @@ private fun MobileWorkspacePage(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RuntimeChoiceField(
+    label: String,
+    value: String,
+    options: List<Pair<String, String>>,
+    enabled: Boolean,
+    onSelected: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember(label, value) { mutableStateOf(false) }
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(label, color = Color(0xFF59665B), style = MaterialTheme.typography.labelMedium)
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { if (enabled) expanded = !expanded },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            OutlinedTextField(
+                value = options.firstOrNull { it.first == value }?.second ?: value,
+                onValueChange = {},
+                readOnly = true,
+                enabled = enabled,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled),
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                options.forEach { (key, title) ->
+                    DropdownMenuItem(
+                        text = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = {
+                            expanded = false
+                            onSelected(key)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RuntimeDefaultsPanel(
+    chinese: Boolean,
+    defaults: AtlasRuntimeDefaults,
+    busy: Boolean,
+    error: String?,
+    onRefresh: () -> Unit,
+    onSave: (AtlasRuntimeDefaults) -> Unit,
+) {
+    var model by remember(defaults.model) { mutableStateOf(defaults.model) }
+    var permission by remember(defaults.permission) { mutableStateOf(defaults.permission) }
+    var reasoning by remember(defaults.reasoningEffort) { mutableStateOf(defaults.reasoningEffort) }
+    val modelOptions = buildList {
+        if (model.isNotBlank() && defaults.models.none { it.slug == model }) add(model to model)
+        defaults.models.forEach { option ->
+            if (option.slug.isNotBlank()) {
+                val suffix = when (option.source) {
+                    "provider-api" -> if (chinese) " · 上游" else " · provider"
+                    "cc-switch" -> " · CC Switch"
+                    else -> ""
+                }
+                add(option.slug to (option.displayName.ifBlank { option.slug } + suffix))
+            }
+        }
+    }.distinctBy { it.first }
+    val permissionOptions = listOf(
+        "Workspace write" to if (chinese) "工作区写入" else "Workspace write",
+        "Read only" to if (chinese) "只读" else "Read only",
+        "Full access" to if (chinese) "完全访问" else "Full access",
+    )
+    val reasoningOptions = listOf(
+        "low" to if (chinese) "低" else "Low",
+        "medium" to if (chinese) "中" else "Medium",
+        "high" to if (chinese) "高" else "High",
+        "xhigh" to if (chinese) "极高" else "Extra high",
+    )
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(if (chinese) "Codex 默认配置" else "Codex defaults", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1F2A22), fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (defaults.provider.isNotBlank()) "${if (chinese) "当前上游" else "Active provider"}: ${defaults.provider}" else if (chinese) "从桌面端同步" else "Synced from desktop",
+                    color = Color(0xFF7A867B),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onRefresh, enabled = !busy) {
+                if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Filled.Refresh, contentDescription = if (chinese) "刷新模型" else "Refresh models")
+            }
+        }
+        RuntimeChoiceField(
+            label = if (chinese) "模型" else "Model",
+            value = model,
+            options = modelOptions.ifEmpty { listOf("" to if (chinese) "暂无上游模型" else "No upstream models") },
+            enabled = !busy && modelOptions.isNotEmpty(),
+            onSelected = { model = it },
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            RuntimeChoiceField(
+                label = if (chinese) "权限" else "Permission",
+                value = permission,
+                options = permissionOptions,
+                enabled = !busy,
+                onSelected = { permission = it },
+                modifier = Modifier.weight(1f),
+            )
+            RuntimeChoiceField(
+                label = if (chinese) "思考程度" else "Reasoning",
+                value = reasoning,
+                options = reasoningOptions,
+                enabled = !busy,
+                onSelected = { reasoning = it },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        val displayedError = error?.takeIf { it.isNotBlank() } ?: defaults.error?.takeIf { it.isNotBlank() }
+        if (displayedError != null) {
+            Text(
+                displayedError,
+                color = Color(0xFFB44A45),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Button(
+            onClick = { onSave(defaults.copy(model = model, permission = permission, reasoningEffort = reasoning)) },
+            enabled = !busy && model.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (busy) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            else Text(if (chinese) "应用默认配置" else "Apply defaults")
+        }
+    }
+}
+
 @Composable
 private fun MobileSettingsPage(
     chinese: Boolean,
@@ -2519,6 +2752,11 @@ private fun MobileSettingsPage(
     balanceBusy: Boolean,
     balanceRefreshError: String?,
     onRefreshBalance: () -> Unit,
+    runtimeDefaults: AtlasRuntimeDefaults,
+    runtimeDefaultsBusy: Boolean,
+    runtimeDefaultsError: String?,
+    onRefreshRuntimeDefaults: () -> Unit,
+    onSaveRuntimeDefaults: (AtlasRuntimeDefaults) -> Unit,
     availableUpdate: AtlasUpdate?,
     updateBusy: Boolean,
     updateProgress: Int,
@@ -2552,6 +2790,15 @@ private fun MobileSettingsPage(
                 refreshError = balanceRefreshError,
                 showDetails = true,
                 onRefresh = onRefreshBalance,
+            )
+            androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+            RuntimeDefaultsPanel(
+                chinese = chinese,
+                defaults = runtimeDefaults,
+                busy = runtimeDefaultsBusy,
+                error = runtimeDefaultsError,
+                onRefresh = onRefreshRuntimeDefaults,
+                onSave = onSaveRuntimeDefaults,
             )
             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
             Text(if (chinese) "通道" else "Route", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1F2A22), fontWeight = FontWeight.SemiBold)
