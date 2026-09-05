@@ -1,3 +1,9 @@
+# Codex Atlas 0.1.39 发布说明
+
+- 修复多实例 Atlas 共用 `atlas-app-server-token` 导致的 app-server websocket 403：每个 Atlas 实例现在使用独立、一次性的认证文件，运行中的 Codex 会话无需重启。
+- 修正项目元数据在缺少构建环境变量时回退到旧版本号的问题，主程序、悬浮窗和更新入口会继续使用当前 package 版本。
+- Android `versionName` 更新至 `0.1.39`，`versionCode` 更新为 `35`。
+
 # Codex Atlas 0.1.38 发布说明
 
 - 模型选择改为读取当前启用的 CC Switch / 上游供应商模型目录，只有未配置上游时才回退到 Codex 本地目录，避免展示无法使用的模型。

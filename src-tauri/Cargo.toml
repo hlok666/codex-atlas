@@ -1,6 +1,6 @@
 [package]
 name = "codex-atlas"
-version = "0.1.38"
+version = "0.1.39"
 description = "Codex Atlas desktop session control plane"
 authors = ["Huang Weicong <35128496+hlok666@users.noreply.github.com>"]
 license-file = "../LICENSE"

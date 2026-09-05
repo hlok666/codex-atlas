@@ -7908,21 +7908,37 @@ fn app_server_read_until<S: Read + Write>(
     }
 }
 
+/// Every Atlas instance owns a private app-server credential file.
+///
+/// Older builds used one fixed `atlas-app-server-token` path. When more than
+/// one Atlas process was open, each process rewrote that file while the other
+/// app-server was still validating requests against the previous value. The
+/// resulting intermittent websocket 403s made runtime settings and queued
+/// messages appear to do nothing. Keep the path stable for this process, but
+/// include a timestamp nonce so a restarted process can never reuse an old
+/// credential file accidentally.
 fn app_server_token_path() -> PathBuf {
-    codex_home().join("atlas-app-server-token")
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        codex_home().join(format!(
+            "atlas-app-server-token-{}-{:x}",
+            std::process::id(),
+            now_ms()
+        ))
+    })
+    .clone()
 }
 
 fn app_server_token() -> Option<String> {
-    let path = app_server_token_path();
-    if let Ok(value) = fs::read_to_string(&path) {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            return Some(value);
-        }
-    }
-    let token = format!("atlas-app-{:x}-{:x}", now_ms(), std::process::id());
-    write_text_atomically(&path, &format!("{token}\n")).ok()?;
-    Some(token)
+    static TOKEN: OnceLock<Option<String>> = OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            let token = format!("atlas-app-{:x}-{:x}", now_ms(), std::process::id());
+            write_text_atomically(&app_server_token_path(), &format!("{token}\n"))
+                .ok()
+                .map(|_| token)
+        })
+        .clone()
 }
 
 fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
@@ -12883,6 +12899,18 @@ mod runtime_probe_tests {
         let sync = String::from_utf8_lossy(&buffer[..size]);
         assert!(sync.contains("event: sync"));
         assert!(sync.contains("\"reason\":\"test\""));
+    }
+
+    #[test]
+    fn app_server_credentials_are_instance_scoped() {
+        let path = app_server_token_path();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("instance-scoped app-server token filename");
+        assert!(name.starts_with("atlas-app-server-token-"));
+        assert!(name.contains(&std::process::id().to_string()));
+        assert_ne!(name, "atlas-app-server-token");
     }
 
     #[test]
