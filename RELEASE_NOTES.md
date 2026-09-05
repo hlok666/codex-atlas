@@ -1,3 +1,11 @@
+# Codex Atlas 0.1.37 发布说明
+
+- 兼容 Codex CLI 0.153.x 的 Windows 粘贴突发检测：终端兜底提交会等待越过 Enter 抑制窗口，不再把回车误识别为输入框换行。
+- 手机端和桌面悬浮窗的排队消息改为优先使用带回执的 `codex queue` / app-server 协议，只有协议不可用时才尝试终端按键注入。
+- 打断模式先确认消息已经进入 Codex 队列，再通过 `turn/interrupt` 或终端 `Esc` 中断当前回合；空闲会话不会误取消刚提交的新消息。
+- 原生图片附件优先走 app-server，规避 Codex 0.153.x 的 `queue --image` 不支持问题。
+- 桌面端与 Android App 统一更新至 `0.1.37`，Android `versionCode` 更新为 `33`。
+
 # Codex Atlas 0.1.36 发布说明
 
 - Android 对话输入区新增“排队 / 打断”发送方式选择，默认使用排队，并记住用户上次选择。

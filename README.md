@@ -2,7 +2,7 @@
 
 Codex Atlas 是一个面向 Codex CLI 的原生会话控制中心：扫描本机已有会话，按状态和工作区整理，在一个窗口内搜索、恢复、监控和切换 Codex。桌面端使用 Tauri 2 + Rust，Android 端通过 Atlas Bridge 与桌面或服务器保持同步。
 
-[English](#english) · [项目主页](https://github.com/hlok666/codex-atlas) · [Releases](https://github.com/hlok666/codex-atlas/releases)
+[English](#english) · [项目主页](https://github.com/hlok666/codex-atlas) · [Releases](https://github.com/hlok666/codex-atlas/releases) · [许可证](#许可证)
 
 ## 能力概览
 
@@ -98,6 +98,18 @@ GET  /v1/sync?since=<cursorMs>&wait=<milliseconds>
 
 请只在可信网络开放 `15730`，并把 Bridge token 当作密码保管。
 
+## 许可证
+
+Codex Atlas 采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。你可以将代码用于个人学习、研究、实验及其他非商业用途，但不得将本软件或其代码用于商业、营利或预期商业应用。由于包含非商业限制，本项目是源码可用软件，不属于 OSI 定义的开源软件。
+
+复制、修改或分发本项目代码时，必须同时保留 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)，并注明以下出处和作者：
+
+> Codex Atlas by Huang Weicong (GitHub: hlok666)
+>
+> Original source: https://github.com/hlok666/codex-atlas
+
+第三方库、字体、图标和工具仍遵循各自的许可证；本许可证仅覆盖作者有权许可的 Codex Atlas 原创代码。
+
 ## 发布
 
 桌面端版本在以下文件中保持一致：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json`。Android 的 `versionName` 和 `versionCode` 也必须同步递增。发布前执行：
@@ -135,5 +147,7 @@ src-tauri/target/release/bundle/nsis/Codex Atlas_<version>_x64-setup.exe
 Codex Atlas is a native session control center for Codex CLI. It indexes existing sessions, searches conversation content, resumes or queues work, monitors live runtime state, and keeps desktop and Android clients synchronized.
 
 The desktop app is built with Tauri 2, Rust, React, TypeScript, and Vite. It prefers the Codex `app-server` WebSocket for session operations and keeps `codex queue`/terminal input as a compatibility fallback for external legacy sessions. Balance-aware recovery uses the currently enabled CC Switch provider, and never auto-continues a confirmed zero-balance incident. Paseo import and launch are supported, while Atlas owns its mobile bridge and voice service.
+
+Codex Atlas is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use is not permitted. Copies, modifications, and distributions must retain [LICENSE](LICENSE) and [NOTICE](NOTICE), credit **Huang Weicong (GitHub: hlok666)**, and link to the [original source](https://github.com/hlok666/codex-atlas). This is source-available software rather than OSI-approved open source. Third-party components retain their own licenses.
 
 Use `npm run tauri:dev` for the native shell and `npm run tauri:build -- --bundles nsis` for the Windows installer. Push a `v*` tag to build a Windows NSIS installer and an Android APK through GitHub Actions.

@@ -32,6 +32,12 @@ use tungstenite::{client::IntoClientRequest, connect, http::HeaderValue, Message
 use url::Url;
 use walkdir::WalkDir;
 
+// Codex 0.153.x treats rapid Windows key events as a paste burst and turns
+// Enter into a newline for 120 ms after the final character. Protocol delivery
+// is preferred, but the terminal compatibility path must clear that window.
+const CODEX_TUI_ENTER_SUPPRESS_MS: u64 = 120;
+const TERMINAL_INPUT_SETTLE_MS: u64 = CODEX_TUI_ENTER_SUPPRESS_MS + 60;
+
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM},
@@ -4975,10 +4981,9 @@ fn send_text_to_terminal(
         text_inputs.push(keyboard_input(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
     }
     send_keyboard_events(&text_inputs)?;
-    // Give the terminal's pseudo-console a scheduling turn before submitting
-    // Enter. Sending both batches in one call can drop the final character on
-    // busy Codex screens.
-    thread::sleep(Duration::from_millis(35));
+    // Wait until Codex has flushed its Windows paste-burst buffer. Pressing
+    // Enter sooner is intentionally interpreted as a newline by recent TUIs.
+    thread::sleep(Duration::from_millis(TERMINAL_INPUT_SETTLE_MS));
     let enter_inputs = [
         keyboard_input(VK_RETURN, 0, 0),
         keyboard_input(VK_RETURN, 0, KEYEVENTF_KEYUP),
@@ -5014,16 +5019,6 @@ fn send_escape_to_terminal(session: &SessionRecord) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn send_text_to_terminal_then_escape(session: &SessionRecord, input: &str) -> Result<(), String> {
-    // Submit the prompt through the interactive CLI first. Escape is sent
-    // only after the terminal has received the prompt so Codex can preserve
-    // its own queued-message semantics while cancelling the active turn.
-    send_text_to_terminal(session, input, true)?;
-    thread::sleep(Duration::from_millis(55));
-    send_escape_to_terminal(session)
-}
-
 #[cfg(not(target_os = "windows"))]
 fn send_text_to_terminal(
     _session: &SessionRecord,
@@ -5034,7 +5029,7 @@ fn send_text_to_terminal(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn send_text_to_terminal_then_escape(_session: &SessionRecord, _input: &str) -> Result<(), String> {
+fn send_escape_to_terminal(_session: &SessionRecord) -> Result<(), String> {
     Err("terminal interrupt fallback is currently available on Windows only".to_string())
 }
 
@@ -8033,30 +8028,8 @@ fn app_server_user_input(input: &str, attachments: &[FloatingAttachment]) -> Vec
     items
 }
 
-fn app_server_send_interrupt(
-    state: &AppState,
-    session: &SessionRecord,
-    input: &str,
-    attachments: &[FloatingAttachment],
-) -> Result<bool, String> {
-    let items = app_server_user_input(input, attachments);
-    if items.is_empty() {
-        return Ok(false);
-    }
-    let client_message_id = format!("atlas-{}", now_ms());
-    // A newly-created app-server does not automatically hydrate threads that
-    // were started by the interactive CLI. Resume the exact thread first so
-    // turn/steer operates on the same durable conversation.
-    let mut resume_params = serde_json::json!({
-        "threadId": session.id,
-        "excludeTurns": true,
-    });
-    if !session.cwd.trim().is_empty() {
-        resume_params["cwd"] = Value::String(session.cwd.clone());
-    }
-    app_server_request(state, "thread/resume", resume_params)?;
-
-    let active_turn = state
+fn app_server_active_turn_id(state: &AppState, session_id: &str) -> Option<String> {
+    state
         .app_server
         .lock()
         .ok()
@@ -8066,24 +8039,23 @@ fn app_server_send_interrupt(
                 .active_turns
                 .lock()
                 .ok()
-                .and_then(|turns| turns.get(&session.id).cloned())
-        });
-    if let Some(turn_id) = active_turn {
-        let steer = app_server_request(
-            state,
-            "turn/steer",
-            serde_json::json!({
-                "threadId": session.id,
-                "expectedTurnId": turn_id,
-                "input": items,
-                "clientUserMessageId": client_message_id,
-            }),
-        );
-        if steer.is_ok() {
-            return Ok(true);
-        }
-    }
-    Err("the Atlas app-server does not own an active turn for this session".to_string())
+                .and_then(|turns| turns.get(session_id).cloned())
+        })
+}
+
+fn app_server_interrupt_active_turn(
+    state: &AppState,
+    session: &SessionRecord,
+) -> Result<bool, String> {
+    let Some(turn_id) = app_server_active_turn_id(state, &session.id) else {
+        return Ok(false);
+    };
+    app_server_request(
+        state,
+        "turn/interrupt",
+        serde_json::json!({"threadId": session.id, "turnId": turn_id}),
+    )?;
+    Ok(true)
 }
 
 /// Queue through Atlas's app-server as a compatibility fallback. Codex owns
@@ -8130,10 +8102,32 @@ fn queue_session_message_with_attachments(
     queue_session_message_with_attachments_focus(state, session, input, attachments, false)
 }
 
-/// Deliver queue-mode input to the real Codex CLI first. An interactive TUI
-/// already has the correct queue lifecycle, so typing into it lets Codex hold
-/// the message until the active turn ends. The CLI queue and app-server queue
-/// are durable fallbacks for a background or exited session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueDeliveryRoute {
+    CodexCli,
+    AppServer,
+    Terminal,
+}
+
+fn queue_delivery_routes(prefer_app_server: bool) -> [QueueDeliveryRoute; 3] {
+    if prefer_app_server {
+        [
+            QueueDeliveryRoute::AppServer,
+            QueueDeliveryRoute::CodexCli,
+            QueueDeliveryRoute::Terminal,
+        ]
+    } else {
+        [
+            QueueDeliveryRoute::CodexCli,
+            QueueDeliveryRoute::AppServer,
+            QueueDeliveryRoute::Terminal,
+        ]
+    }
+}
+
+/// Queue through a receipt-bearing Codex protocol before considering terminal
+/// input. SendInput only proves that Windows accepted keystrokes; it cannot
+/// prove that the TUI submitted a user turn.
 fn queue_session_message_with_attachments_focus(
     state: &AppState,
     session: &SessionRecord,
@@ -8142,27 +8136,33 @@ fn queue_session_message_with_attachments_focus(
     focus_terminal: bool,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
-    match send_text_to_terminal(session, input, focus_terminal) {
-        Ok(()) => return Ok(()),
-        Err(error) => errors.push(format!("Codex terminal queue: {error}")),
-    }
-    match queue_codex_message_with_attachments_detailed(session, input, attachments) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            errors.push(format!("codex queue: {error}"));
-            match app_server_queue_message(state, session, input, attachments) {
-                Ok(true) => Ok(()),
-                Ok(false) => {
-                    errors.push("app-server queue did not accept the message".to_string());
-                    Err(errors.join("; "))
-                }
-                Err(error) => {
-                    errors.push(format!("app-server queue: {error}"));
-                    Err(errors.join("; "))
+    let has_attachments = attachments
+        .iter()
+        .any(|attachment| !attachment.path.trim().is_empty());
+    let prefer_app_server =
+        has_attachments || app_server_active_turn_id(state, &session.id).is_some();
+    for route in queue_delivery_routes(prefer_app_server) {
+        let result = match route {
+            QueueDeliveryRoute::CodexCli => {
+                queue_codex_message_with_attachments_detailed(session, input)
+                    .map_err(|error| format!("codex queue: {error}"))
+            }
+            QueueDeliveryRoute::AppServer => {
+                match app_server_queue_message(state, session, input, attachments) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err("app-server queue did not accept the message".to_string()),
+                    Err(error) => Err(format!("app-server queue: {error}")),
                 }
             }
+            QueueDeliveryRoute::Terminal => send_text_to_terminal(session, input, focus_terminal)
+                .map_err(|error| format!("Codex terminal queue: {error}")),
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(error),
         }
     }
+    Err(errors.join("; "))
 }
 
 fn validate_app_server_queue_receipt(
@@ -8210,27 +8210,17 @@ fn validate_app_server_queue_receipt(
 fn queue_codex_message_with_attachments_detailed(
     session: &SessionRecord,
     input: &str,
-    attachments: &[FloatingAttachment],
 ) -> Result<(), String> {
-    let mut args = vec![
+    let args = vec![
         "queue".to_string(),
         "--thread".to_string(),
         session.id.clone(),
         "--message".to_string(),
         input.to_string(),
     ];
-    // Codex queue accepts image files through its native --image option. Text
-    // documents and arbitrary paths are represented in the prompt below so
-    // the model can inspect them from the workspace without uploading data.
-    for attachment in attachments {
-        if attachment.kind.eq_ignore_ascii_case("image")
-            && !attachment.path.trim().is_empty()
-            && Path::new(&attachment.path).is_file()
-        {
-            args.push("--image".to_string());
-            args.push(attachment.path.trim().to_string());
-        }
-    }
+    // Codex 0.153.x exposes --image through shared CLI options but rejects it
+    // in the queue command. Native attachments therefore use app-server first;
+    // this text-only route remains the durable compatibility fallback.
     let mut command = match command_for(&codex_executable(), &args) {
         Ok(command) => command,
         Err(error) => return Err(error),
@@ -8705,21 +8695,28 @@ fn interrupt_session_message(
     input: &str,
     attachments: &[FloatingAttachment],
 ) -> Result<(), String> {
+    queue_session_message_with_attachments(state, session, input, attachments)?;
+
+    // When Atlas owns the active turn, interrupt it through the same protocol
+    // that acknowledged the queued message. This works without foregrounding
+    // PowerShell and gives us a real app-server response.
     let mut delivery_errors = Vec::new();
-    match send_text_to_terminal_then_escape(session, input) {
-        Ok(()) => return Ok(()),
-        Err(error) => delivery_errors.push(format!("Codex terminal interrupt: {error}")),
+    match app_server_interrupt_active_turn(state, session) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => delivery_errors.push(format!("app-server interrupt: {error}")),
     }
-    // Keep app-server steering only as a compatibility fallback for sessions
-    // whose terminal cannot be addressed directly.
-    match app_server_send_interrupt(state, session, input, attachments) {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            delivery_errors.push("app-server did not accept the message".to_string());
-            Err(delivery_errors.join("; "))
-        }
+
+    // An idle TUI may start the queued turn immediately. Do not send Escape in
+    // that state or we would cancel the message the user just submitted.
+    if !session.live_state.eq_ignore_ascii_case("working") {
+        return Ok(());
+    }
+
+    match send_escape_to_terminal(session) {
+        Ok(()) => Ok(()),
         Err(error) => {
-            delivery_errors.push(format!("app-server: {error}"));
+            delivery_errors.push(format!("Codex terminal interrupt: {error}"));
             Err(delivery_errors.join("; "))
         }
     }
@@ -12457,6 +12454,32 @@ mod runtime_probe_tests {
             None
         );
         assert_eq!(codex_queue_receipt("queued", thread_id), None);
+    }
+
+    #[test]
+    fn queue_delivery_never_uses_terminal_before_a_receipt_route() {
+        assert_eq!(
+            queue_delivery_routes(false),
+            [
+                QueueDeliveryRoute::CodexCli,
+                QueueDeliveryRoute::AppServer,
+                QueueDeliveryRoute::Terminal,
+            ]
+        );
+        assert_eq!(
+            queue_delivery_routes(true),
+            [
+                QueueDeliveryRoute::AppServer,
+                QueueDeliveryRoute::CodexCli,
+                QueueDeliveryRoute::Terminal,
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_fallback_waits_past_codex_paste_suppression() {
+        assert!(TERMINAL_INPUT_SETTLE_MS > CODEX_TUI_ENTER_SUPPRESS_MS);
+        assert!(TERMINAL_INPUT_SETTLE_MS >= 150);
     }
 
     #[test]
