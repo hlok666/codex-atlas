@@ -1,3 +1,24 @@
+# Codex Atlas 0.1.42 发布说明
+
+- 桌面连接页移除 Paseo 外部集成入口，改为聚焦 Atlas 自有的 CC Switch、Bridge、服务器通道和语音服务。
+- README 重写为中英文项目说明，补充实际功能、安装、连接、安全和开发文档。
+- 明确 PolyForm Noncommercial 许可证、非商业限制、作者署名和原始仓库要求。
+- 桌面端与 Android App 统一更新至 `0.1.42`，Android `versionCode` 更新为 `38`。
+
+# Codex Atlas 0.1.41 发布说明
+
+- 手机端修改默认模型、权限和思考程度时只更新 Codex 配置，不再恢复会话或创建终端窗口。
+- 手机首页会话列表默认仅显示正在运行的会话，并可通过紧凑的“全部 / 收起”操作查看历史会话。
+- 桌面端和手机端新增“退出会话”：向精确匹配的 Codex 终端提交 `/exit`，确认目标进程退出后只关闭对应终端标签或窗口；歧义匹配会拒绝执行。
+- 桌面端与 Android App 统一更新至 `0.1.41`，Android `versionCode` 更新为 `37`。
+
+# Codex Atlas 0.1.40 发布说明
+
+- 模型目录严格读取 CC Switch 当前启用 Codex 供应商的真实上游地址与认证信息，不再被余额脚本地址或根级旧配置覆盖。
+- 模型端点探测对齐 CC Switch：支持版本化 Base URL、完整 Responses URL、兼容子路径、显式模型 URL、自定义 User-Agent 与请求头。
+- `/model` 等候选只有返回有效 JSON 模型目录时才会采用，供应商的 HTML 管理页面不会再被误识别。
+- 桌面端与 Android App 统一更新至 `0.1.40`，Android `versionCode` 更新为 `36`。
+
 # Codex Atlas 0.1.39 发布说明
 
 - 修复多实例 Atlas 共用 `atlas-app-server-token` 导致的 app-server websocket 403：每个 Atlas 实例现在使用独立、一次性的认证文件，运行中的 Codex 会话无需重启。

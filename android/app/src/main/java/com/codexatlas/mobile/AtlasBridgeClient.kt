@@ -559,6 +559,9 @@ class AtlasBridgeClient(
     fun activateAny(sessionId: String, fallbackUrl: String = "") =
         postAny("/v1/sessions/$sessionId/activate", "{}", fallbackUrl)
 
+    fun exitSessionAny(sessionId: String, fallbackUrl: String = "") =
+        postAny(sessionIdPath(sessionId, "/exit"), "{}", fallbackUrl)
+
     fun inputContinueAny(sessionId: String, fallbackUrl: String = "") =
         postAny("/v1/sessions/$sessionId/input", "{\"text\":\"继续\"}", fallbackUrl)
 

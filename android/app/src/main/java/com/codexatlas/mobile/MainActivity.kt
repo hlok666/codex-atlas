@@ -60,8 +60,11 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
@@ -717,8 +720,10 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var queueControl by remember { mutableStateOf(AtlasMessageQueue.control(context)) }
     var queueVisible by remember { mutableStateOf(false) }
     var sessionQuery by remember { mutableStateOf("") }
+    var showAllSessions by remember { mutableStateOf(false) }
     var messageBusy by remember { mutableStateOf(false) }
     var messageError by remember { mutableStateOf<String?>(null) }
+    var exitingSessionId by remember { mutableStateOf<String?>(null) }
     var createVisible by remember { mutableStateOf(false) }
     var conversationMenuExpanded by remember { mutableStateOf(false) }
     var createCwd by remember { mutableStateOf("") }
@@ -1113,6 +1118,49 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 if (fresh.model.isNotBlank()) snapshot = snapshot?.copy(model = fresh.model) ?: snapshot
             }.onFailure { error -> runtimeDefaultsError = connectionFailureMessage(error, zh) }
             runtimeDefaultsBusy = false
+        }
+    }
+
+    fun exitSession(sessionId: String) {
+        val target = sessions.firstOrNull { it.id == sessionId }
+        val details = MainActivity.parsePairing(pairing)
+        if (target == null || !target.running || details == null || exitingSessionId != null) return
+        exitingSessionId = sessionId
+        messageError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    AtlasBridgeClient(primary, details.token).exitSessionAny(sessionId, fallback)
+                }
+            }
+            result.onSuccess {
+                sessions = sessions.map { session ->
+                    if (session.id == sessionId) {
+                        session.copy(running = false, liveState = "idle", foreground = false)
+                    } else session
+                }
+                if (snapshot?.sessionId == sessionId) {
+                    snapshot = snapshot?.copy(state = "idle", foreground = false)
+                    snapshot?.let { BridgePreferences.saveCachedSnapshot(context, it) }
+                }
+                AtlasWidgetReceiver.requestRefresh(context)
+                Toast.makeText(
+                    context,
+                    if (zh) "会话已退出，终端已关闭" else "Session exited and terminal closed",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }.onFailure { error ->
+                val detail = connectionFailureMessage(error, zh)
+                messageError = detail
+                Toast.makeText(
+                    context,
+                    if (zh) "退出会话失败：$detail" else "Could not exit session: $detail",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            exitingSessionId = null
         }
     }
 
@@ -1760,10 +1808,20 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     if (messages.isNotEmpty()) messageScrollState.animateScrollToItem(messages.lastIndex)
                 }
                 if (mobilePage != MobilePage.Conversation && sessions.isNotEmpty()) {
-                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            val runningCount = sessions.count { it.running }
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text(if (zh) "会话" else "Sessions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = Color(0xFF1F2A22))
-                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (showAllSessions) {
+                                        if (zh) "全部会话" else "All sessions"
+                                    } else {
+                                        if (zh) "正在运行" else "Running"
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF1F2A22),
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                     if (queuedMessageCount > 0) {
                                         Text(
                                             if (zh) "队列 $queuedMessageCount" else "Queue $queuedMessageCount",
@@ -1771,7 +1829,26 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                             style = MaterialTheme.typography.labelMedium,
                                         )
                                     }
-                                    Text("${sessions.size}", color = Color(0xFF667466), style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        if (showAllSessions) "${sessions.size}" else "$runningCount",
+                                        color = Color(0xFF667466),
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    TextButton(onClick = { showAllSessions = !showAllSessions }) {
+                                        Icon(
+                                            if (showAllSessions) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Spacer(Modifier.size(4.dp))
+                                        Text(
+                                            if (showAllSessions) {
+                                                if (zh) "收起" else "Collapse"
+                                            } else {
+                                                if (zh) "全部" else "All"
+                                            },
+                                        )
+                                    }
                                     TextButton(onClick = {
                                         selectedSessionId = ""
                                         mobilePage = MobilePage.Conversation
@@ -1786,11 +1863,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                 singleLine = true,
                                 label = { Text(if (zh) "搜索会话" else "Search sessions") },
                             )
-                            val visibleSessions = sessions.filter { item ->
-                                val query = sessionQuery.trim()
-                                query.isBlank() || listOf(item.title, item.preview, item.cwd, item.model, item.liveState).any { it.contains(query, ignoreCase = true) }
-                            }
-                            visibleSessions.take(20).forEach { item ->
+                            val visibleSessions = visibleSessionsForHome(sessions, showAllSessions, sessionQuery)
+                                .take(20)
+                            visibleSessions.forEach { item ->
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     TextButton(onClick = {
                                         selectedSessionId = item.id
@@ -1816,12 +1891,22 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                             )
                                         }
                                     }
-                                    if (item.id != visibleSessions.take(20).lastOrNull()?.id) {
+                                    if (item.id != visibleSessions.lastOrNull()?.id) {
                                         androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
                                     }
                                 }
                             }
-                            if (visibleSessions.isEmpty()) Text(if (zh) "没有匹配的会话" else "No matching sessions", color = Color(0xFF7A867B), style = MaterialTheme.typography.bodySmall)
+                            if (visibleSessions.isEmpty()) {
+                                Text(
+                                    when {
+                                        sessionQuery.isNotBlank() -> if (zh) "没有匹配的会话" else "No matching sessions"
+                                        !showAllSessions -> if (zh) "暂无运行中的会话" else "No running sessions"
+                                        else -> if (zh) "暂无会话" else "No sessions"
+                                    },
+                                    color = Color(0xFF7A867B),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                     }
                 }
                 if (mobilePage == MobilePage.Conversation) {
@@ -1889,6 +1974,34 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                             conversationMenuExpanded = false
                                             openWorkspace(conversationId)
                                         },
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                if (exitingSessionId == conversationId) {
+                                                    if (zh) "正在退出…" else "Exiting…"
+                                                } else {
+                                                    if (zh) "退出会话" else "Exit session"
+                                                },
+                                                color = if (selectedSession?.running == true) Color(0xFFB44A45) else Color(0xFF9AA39B),
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            if (exitingSessionId == conversationId) {
+                                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                            } else {
+                                                Icon(
+                                                    Icons.AutoMirrored.Filled.ExitToApp,
+                                                    contentDescription = null,
+                                                    tint = if (selectedSession?.running == true) Color(0xFFB44A45) else Color(0xFF9AA39B),
+                                                )
+                                            }
+                                        },
+                                        onClick = {
+                                            conversationMenuExpanded = false
+                                            exitSession(conversationId)
+                                        },
+                                        enabled = selectedSession?.running == true && exitingSessionId == null,
                                     )
                                     if (queuedMessageCount > 0) {
                                         DropdownMenuItem(

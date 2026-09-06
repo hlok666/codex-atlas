@@ -116,6 +116,25 @@ data class AtlasSession(
     val approval: AtlasApproval? = null,
 )
 
+internal fun visibleSessionsForHome(
+    sessions: List<AtlasSession>,
+    showAll: Boolean,
+    query: String,
+): List<AtlasSession> {
+    val normalized = query.trim()
+    return sessions.filter { session ->
+        val inCurrentScope = showAll || session.running
+        val matchesQuery = normalized.isBlank() || listOf(
+            session.title,
+            session.preview,
+            session.cwd,
+            session.model,
+            session.liveState,
+        ).any { value -> value.contains(normalized, ignoreCase = true) }
+        inCurrentScope && matchesQuery
+    }
+}
+
 @Serializable
 data class AtlasSyncEventBatch(
     val sessionId: String = "",

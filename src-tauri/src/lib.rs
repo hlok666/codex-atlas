@@ -406,6 +406,86 @@ struct ProcessCandidate {
     start_time_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalTargetCandidate {
+    handle: usize,
+    process_id: u32,
+    title: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalTargetMatch {
+    Process,
+    SessionIdTitle,
+    WorkspaceTitle,
+}
+
+fn select_terminal_target(
+    session_id: &str,
+    cwd: &str,
+    process_ids: &[u32],
+    running_sessions_in_workspace: usize,
+    candidates: &[TerminalTargetCandidate],
+) -> Result<(usize, TerminalTargetMatch), String> {
+    fn unique_match(
+        candidates: &[&TerminalTargetCandidate],
+        match_kind: TerminalTargetMatch,
+    ) -> Result<Option<(usize, TerminalTargetMatch)>, String> {
+        match candidates {
+            [] => Ok(None),
+            [candidate] => Ok(Some((candidate.handle, match_kind))),
+            _ => Err(
+                "multiple terminal windows match this Codex session; refusing to close any window"
+                    .to_string(),
+            ),
+        }
+    }
+
+    let process_matches = candidates
+        .iter()
+        .filter(|candidate| process_ids.contains(&candidate.process_id))
+        .collect::<Vec<_>>();
+    if let Some(target) = unique_match(&process_matches, TerminalTargetMatch::Process)? {
+        return Ok(target);
+    }
+
+    let normalized_session_id = session_id.trim().to_ascii_lowercase();
+    if !normalized_session_id.is_empty() {
+        let id_matches = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .title
+                    .to_ascii_lowercase()
+                    .contains(&normalized_session_id)
+            })
+            .collect::<Vec<_>>();
+        if let Some(target) = unique_match(&id_matches, TerminalTargetMatch::SessionIdTitle)? {
+            return Ok(target);
+        }
+    }
+
+    let workspace = Path::new(cwd)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| value.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "the session workspace cannot identify a terminal window".to_string())?;
+    if running_sessions_in_workspace > 1 {
+        return Err(
+            "multiple running Codex sessions share this workspace; select its terminal before exiting"
+                .to_string(),
+        );
+    }
+    let workspace_matches = candidates
+        .iter()
+        .filter(|candidate| candidate.title.to_ascii_lowercase().contains(&workspace))
+        .collect::<Vec<_>>();
+    unique_match(&workspace_matches, TerminalTargetMatch::WorkspaceTitle)?
+        .ok_or_else(|| "no terminal window was found for the running session".to_string())
+}
+
 #[derive(Debug, Clone, Default)]
 struct RolloutObservation {
     state: String,
@@ -3775,12 +3855,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
                 return;
             }
         };
-        let result = write_codex_defaults(
-            input.model,
-            input.permission,
-            input.reasoning_effort,
-            Some(&app_state),
-        );
+        let result = write_codex_defaults(input.model, input.permission, input.reasoning_effort);
         let response = match result {
             Ok(_) => {
                 let defaults = tauri::async_runtime::block_on(get_codex_runtime_defaults());
@@ -3815,12 +3890,13 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         let _ = request.respond(response);
         return;
     }
-    let Some(session_id) = url.strip_prefix("/v1/sessions/").and_then(|value| {
+    let Some(session_id) = path.strip_prefix("/v1/sessions/").and_then(|value| {
         value
             .strip_suffix("/activate")
             .or_else(|| value.strip_suffix("/input"))
             .or_else(|| value.strip_suffix("/message"))
             .or_else(|| value.strip_suffix("/dictation"))
+            .or_else(|| value.strip_suffix("/exit"))
     }) else {
         let _ = request.respond(bridge_json_response(
             &serde_json::json!({"error": "not found"}),
@@ -3835,6 +3911,20 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         ));
         return;
     };
+    if path.ends_with("/exit") {
+        let response = match exit_codex_session_sync(session_id) {
+            Ok(true) => bridge_json_response(&serde_json::json!({"ok": true}), 200),
+            Ok(false) => bridge_json_response(
+                &serde_json::json!({"ok": false, "error": "session exit was not completed"}),
+                409,
+            ),
+            Err(error) => {
+                bridge_json_response(&serde_json::json!({"ok": false, "error": error}), 409)
+            }
+        };
+        let _ = request.respond(response);
+        return;
+    }
     if url.ends_with("/dictation") {
         let chunk = match serde_json::from_str::<MobileDictationChunkRequest>(&body) {
             Ok(chunk) if chunk.seq > 0 && chunk.text.chars().count() <= 16_000 => chunk,
@@ -4818,6 +4908,12 @@ struct WindowTitleSearch {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Default)]
+struct TerminalWindowCollection {
+    handles: Vec<usize>,
+}
+
+#[cfg(target_os = "windows")]
 fn window_class_name(window: HWND) -> String {
     let mut buffer = [0u16; 128];
     let length = unsafe { GetClassNameW(window, buffer.as_mut_ptr(), buffer.len() as i32) };
@@ -4887,6 +4983,71 @@ unsafe extern "system" fn find_title_window(window: HWND, parameter: LPARAM) -> 
         return 0;
     }
     1
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn collect_terminal_windows(window: HWND, parameter: LPARAM) -> i32 {
+    let collection = unsafe { &mut *(parameter as *mut TerminalWindowCollection) };
+    if is_terminal_window(window) {
+        collection.handles.push(window as usize);
+    }
+    1
+}
+
+#[cfg(target_os = "windows")]
+fn terminal_target_candidates() -> Vec<TerminalTargetCandidate> {
+    let mut collection = TerminalWindowCollection::default();
+    unsafe {
+        EnumWindows(
+            Some(collect_terminal_windows),
+            (&mut collection as *mut TerminalWindowCollection) as LPARAM,
+        )
+    };
+    collection
+        .handles
+        .into_iter()
+        .filter_map(|handle| {
+            let window = handle as HWND;
+            let mut process_id = 0u32;
+            unsafe { GetWindowThreadProcessId(window, &mut process_id) };
+            (process_id > 0).then(|| TerminalTargetCandidate {
+                handle,
+                process_id,
+                title: window_title(window),
+            })
+        })
+        .collect()
+}
+
+fn running_sessions_in_workspace(session: &SessionRecord) -> usize {
+    let target = normalize_path(session.cwd.clone()).to_ascii_lowercase();
+    if target.trim().is_empty() {
+        return 0;
+    }
+    list_sessions_sync()
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.running
+                        && normalize_path(candidate.cwd.clone()).to_ascii_lowercase() == target
+                })
+                .count()
+        })
+        .unwrap_or(1)
+}
+
+#[cfg(target_os = "windows")]
+fn exact_terminal_window_for_session(session: &SessionRecord) -> Result<HWND, String> {
+    let candidates = terminal_target_candidates();
+    let (handle, _) = select_terminal_target(
+        &session.id,
+        &session.cwd,
+        &session.process_ids,
+        running_sessions_in_workspace(session),
+        &candidates,
+    )?;
+    Ok(handle as HWND)
 }
 
 #[cfg(target_os = "windows")]
@@ -5035,19 +5196,11 @@ fn send_keyboard_events(events: &[INPUT]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn send_text_to_terminal(
-    session: &SessionRecord,
+fn send_text_to_terminal_window(
+    window: HWND,
     input: &str,
     focus_terminal: bool,
 ) -> Result<(), String> {
-    let window = terminal_window_for_session(session)
-        .or_else(|| {
-            if !session.foreground {
-                return None;
-            }
-            foreground_terminal_window()
-        })
-        .ok_or_else(|| "no terminal window was found for the running session".to_string())?;
     let foreground = unsafe { GetForegroundWindow() };
     if foreground != window {
         if !focus_terminal {
@@ -5077,6 +5230,23 @@ fn send_text_to_terminal(
 }
 
 #[cfg(target_os = "windows")]
+fn send_text_to_terminal(
+    session: &SessionRecord,
+    input: &str,
+    focus_terminal: bool,
+) -> Result<(), String> {
+    let window = terminal_window_for_session(session)
+        .or_else(|| {
+            if !session.foreground {
+                return None;
+            }
+            foreground_terminal_window()
+        })
+        .ok_or_else(|| "no terminal window was found for the running session".to_string())?;
+    send_text_to_terminal_window(window, input, focus_terminal)
+}
+
+#[cfg(target_os = "windows")]
 fn send_escape_to_terminal(session: &SessionRecord) -> Result<(), String> {
     let window = terminal_window_for_session(session)
         .or_else(|| {
@@ -5098,6 +5268,107 @@ fn send_escape_to_terminal(session: &SessionRecord) -> Result<(), String> {
         return Err("Codex terminal lost focus before Escape was submitted".to_string());
     }
     Ok(())
+}
+
+fn live_codex_process_ids(session: &SessionRecord) -> Vec<u32> {
+    collect_process_snapshots()
+        .into_iter()
+        .filter(|process| {
+            session.process_ids.contains(&process.pid)
+                && looks_like_codex_native_process(
+                    &process.name,
+                    &process.command_line,
+                    process.exe.as_deref(),
+                )
+        })
+        .map(|process| process.pid)
+        .collect()
+}
+
+fn wait_for_processes_to_exit(process_ids: &[u32], timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let running = collect_process_snapshots()
+            .into_iter()
+            .any(|process| process_ids.contains(&process.pid));
+        if !running {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+}
+
+fn mark_session_exited(session_id: &str) {
+    if let Some(cache) = PROCESS_SNAPSHOT_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.snapshots.clear();
+            cache.refreshed_at_ms = 0;
+        }
+    }
+    if let Some(cache) = MOBILE_SESSION_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            if let Some(session) = cache
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+            {
+                session.running = false;
+                session.live_state = "idle".to_string();
+                session.process_ids.clear();
+                session.foreground = false;
+            }
+            cache.refreshed_at_ms = 0;
+        }
+    }
+    publish_mobile_push("session-exited");
+}
+
+#[cfg(target_os = "windows")]
+fn exit_codex_session_sync(session_id: &str) -> Result<bool, String> {
+    let session = find_session_for_command(session_id)?;
+    if !session.running {
+        return Err("the Codex session is not currently running".to_string());
+    }
+    let process_ids = live_codex_process_ids(&session);
+    if process_ids.is_empty() {
+        return Err("the running Codex process could not be verified".to_string());
+    }
+    let window = exact_terminal_window_for_session(&session)?;
+    let target_title = window_title(window);
+    send_text_to_terminal_window(window, "/exit", true)?;
+    if !wait_for_processes_to_exit(&process_ids, Duration::from_secs(8)) {
+        return Err(
+            "Codex did not exit after /exit; the terminal was left open to protect other sessions"
+                .to_string(),
+        );
+    }
+
+    // `/exit` returns to the owning shell. Submit the shell's own exit command
+    // while the same tab is still selected; this closes one terminal tab/window
+    // without sending WM_CLOSE to a shared Windows Terminal host.
+    let current_title = window_title(window);
+    if !window_is_foreground(window)
+        || (current_title != target_title
+            && !window_title_matches_session(&current_title, &session))
+    {
+        mark_session_exited(&session.id);
+        return Err(
+            "Codex exited, but the terminal selection changed before its window could be closed"
+                .to_string(),
+        );
+    }
+    let close_result = send_text_to_terminal_window(window, "exit", false);
+    mark_session_exited(&session.id);
+    close_result?;
+    Ok(true)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn exit_codex_session_sync(_session_id: &str) -> Result<bool, String> {
+    Err("targeted terminal exit is currently available on Windows only".to_string())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -8975,6 +9246,13 @@ fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Resul
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn exit_codex_session(session_id: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || exit_codex_session_sync(&session_id))
+        .await
+        .map_err(|error| format!("exit Codex session task failed: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn send_session_input(
     state: State<'_, AppState>,
     session_id: String,
@@ -10703,38 +10981,93 @@ fn usage_path_from_meta(meta: &Value) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-fn provider_credentials(
-    settings: &Value,
-    meta: &Value,
-) -> (String, String, Option<String>, Option<String>) {
+#[derive(Debug, Clone)]
+struct ProviderModelDiscovery {
+    base_url: String,
+    api_key: String,
+    model: Option<String>,
+    models_url: Option<String>,
+    is_full_url: bool,
+    custom_user_agent: Option<String>,
+    api_format: Option<String>,
+    request_headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveCcSwitchProvider {
+    discovery: ProviderModelDiscovery,
+    settings: Value,
+    meta: Value,
+    name: String,
+}
+
+fn non_empty_json_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|candidate| !candidate.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn json_string_headers(value: Option<&Value>) -> HashMap<String, String> {
+    value
+        .and_then(Value::as_object)
+        .map(|headers| {
+            headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !name.trim().is_empty() && !value.is_empty())
+                        .map(|value| (name.trim().to_string(), value.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve the credentials used by the selected Codex provider itself.
+/// CC Switch stores the live upstream in `[model_providers.<selected>]` and
+/// may separately store a balance-script endpoint in metadata. These two
+/// credential sets must never be mixed.
+fn provider_api_credentials(settings: &Value) -> (String, String, Option<String>) {
     let mut base_url = String::new();
     let mut api_key = String::new();
     let mut model = None;
-    let usage_path = usage_path_from_meta(meta);
     if let Some(config) = settings.get("config").and_then(Value::as_str) {
-        base_url = parse_toml_string(config, "base_url").unwrap_or_default();
         model = parse_toml_string(config, "model");
-        // CC Switch stores Codex relay settings in the selected provider
-        // table (for example `[model_providers.custom]`), not at the TOML
-        // root. Read that table explicitly so `/models` and `/v1/models`
-        // are queried from the active upstream rather than from a stale
-        // local cache.
         if let Some(provider) = parse_toml_string(config, "model_provider") {
-            if base_url.trim().is_empty() {
-                base_url = parse_toml_provider_section_string(config, &provider, "base_url")
+            // Match CC Switch's own Codex parser: the selected provider table
+            // is authoritative and a root-level legacy value is only fallback.
+            base_url = parse_toml_provider_section_string(config, &provider, "base_url")
+                .or_else(|| parse_toml_string(config, "base_url"))
+                .unwrap_or_default();
+            api_key =
+                parse_toml_provider_section_string(config, &provider, "experimental_bearer_token")
                     .unwrap_or_default();
-            }
             if model.is_none() {
                 model = parse_toml_provider_section_string(config, &provider, "model");
             }
+        } else {
+            base_url = parse_toml_string(config, "base_url").unwrap_or_default();
+        }
+        if api_key.is_empty() {
+            api_key = parse_toml_string(config, "experimental_bearer_token").unwrap_or_default();
         }
     }
     if let Some(auth) = settings.get("auth").and_then(Value::as_object) {
-        api_key = auth
+        if let Some(value) = auth
             .get("OPENAI_API_KEY")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            api_key = value.to_string();
+        }
     }
     if let Some(env) = settings.get("env").and_then(Value::as_object) {
         if base_url.is_empty() {
@@ -10765,6 +11098,19 @@ fn provider_credentials(
                 .map(ToString::to_string);
         }
     }
+    (
+        base_url.trim().trim_end_matches('/').to_string(),
+        api_key,
+        model,
+    )
+}
+
+fn provider_balance_credentials(
+    settings: &Value,
+    meta: &Value,
+) -> (String, String, Option<String>, Option<String>) {
+    let (mut base_url, mut api_key, model) = provider_api_credentials(settings);
+    let usage_path = usage_path_from_meta(meta);
     if let Some(script) = meta.get("usage_script").and_then(Value::as_object) {
         if let Some(value) = script.get("baseUrl").and_then(Value::as_str) {
             if !value.trim().is_empty() {
@@ -10785,8 +11131,55 @@ fn provider_credentials(
     )
 }
 
-fn current_cc_switch_provider_data(
-) -> Option<(String, String, Option<String>, Value, Value, String)> {
+fn provider_model_discovery(settings: &Value, meta: &Value) -> ProviderModelDiscovery {
+    let (base_url, api_key, model) = provider_api_credentials(settings);
+    let models_url = non_empty_json_string(meta, &["modelsUrl", "models_url"])
+        .or_else(|| non_empty_json_string(settings, &["modelsUrl", "models_url"]))
+        .or_else(|| {
+            meta.get("modelFetch")
+                .or_else(|| meta.get("model_fetch"))
+                .and_then(|value| non_empty_json_string(value, &["modelsUrl", "models_url", "url"]))
+        });
+    let is_full_url = meta
+        .get("isFullUrl")
+        .or_else(|| meta.get("is_full_url"))
+        .or_else(|| settings.get("isFullUrl"))
+        .or_else(|| settings.get("is_full_url"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let custom_user_agent = non_empty_json_string(
+        meta,
+        &[
+            "customUserAgent",
+            "custom_user_agent",
+            "userAgent",
+            "user_agent",
+        ],
+    );
+    let api_format = non_empty_json_string(meta, &["apiFormat", "api_format"]);
+    let mut request_headers = json_string_headers(
+        meta.get("requestHeaders")
+            .or_else(|| meta.get("request_headers")),
+    );
+    if let Some(overrides) = meta
+        .get("localProxyRequestOverrides")
+        .or_else(|| meta.get("local_proxy_request_overrides"))
+    {
+        request_headers.extend(json_string_headers(overrides.get("headers")));
+    }
+    ProviderModelDiscovery {
+        base_url,
+        api_key,
+        model,
+        models_url,
+        is_full_url,
+        custom_user_agent,
+        api_format,
+        request_headers,
+    }
+}
+
+fn current_cc_switch_provider_data() -> Option<ActiveCcSwitchProvider> {
     let db_path = home_dir().join(".cc-switch").join("cc-switch.db");
     if !db_path.exists() {
         return None;
@@ -10831,8 +11224,13 @@ fn current_cc_switch_provider_data(
         .or_else(|| provider_rows.iter().find(|row| row.4).cloned())?;
     let settings = serde_json::from_str::<Value>(&selected.2).unwrap_or(Value::Null);
     let meta = serde_json::from_str::<Value>(&selected.3).unwrap_or(Value::Null);
-    let (base_url, api_key, model, _) = provider_credentials(&settings, &meta);
-    Some((base_url, api_key, model, settings, meta, selected.1))
+    let discovery = provider_model_discovery(&settings, &meta);
+    Some(ActiveCcSwitchProvider {
+        discovery,
+        settings,
+        meta,
+        name: selected.1,
+    })
 }
 
 #[tauri::command]
@@ -10895,7 +11293,7 @@ async fn get_cc_switch_provider_balances() -> Result<Vec<CcSwitchProviderBalance
     if let Some((id, name, app_type, settings_text, meta_text, _)) = selected_row {
         let settings: Value = serde_json::from_str(&settings_text).unwrap_or(Value::Null);
         let meta: Value = serde_json::from_str(&meta_text).unwrap_or(Value::Null);
-        let (base_url, api_key, model, usage_path) = provider_credentials(&settings, &meta);
+        let (base_url, api_key, model, usage_path) = provider_balance_credentials(&settings, &meta);
         let result = if base_url.is_empty() || api_key.is_empty() {
             BalanceResponse {
                 success: false,
@@ -11782,14 +12180,241 @@ fn model_source_priority(source: &str) -> u8 {
     }
 }
 
+const MODEL_COMPAT_SUFFIXES: &[&str] = &[
+    "/api/claudecode",
+    "/api/anthropic",
+    "/apps/anthropic",
+    "/api/coding",
+    "/claudecode",
+    "/anthropic",
+    "/step_plan",
+    "/coding",
+    "/claude",
+];
+
+fn push_unique_url(urls: &mut Vec<String>, candidate: String) {
+    if !urls.iter().any(|url| url == &candidate) {
+        urls.push(candidate);
+    }
+}
+
+fn clean_http_url(raw: &str) -> Result<String, String> {
+    let mut url =
+        Url::parse(raw.trim()).map_err(|error| format!("invalid provider URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("provider URL must use http or https".to_string());
+    }
+    url.set_fragment(None);
+    url.set_query(None);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn ends_with_version_segment(url: &str) -> bool {
+    url.rsplit('/').next().is_some_and(|segment| {
+        segment.strip_prefix('v').is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|value| value.is_ascii_digit())
+        })
+    })
+}
+
+fn strip_model_compat_suffix(url: &str) -> Option<&str> {
+    MODEL_COMPAT_SUFFIXES.iter().find_map(|suffix| {
+        url.ends_with(suffix)
+            .then(|| &url[..url.len() - suffix.len()])
+    })
+}
+
+/// Mirrors CC Switch's model endpoint derivation while keeping `/models` and
+/// the less common singular `/model` as validated JSON-only fallbacks.
+fn build_provider_model_urls(
+    base_url: &str,
+    is_full_url: bool,
+    models_url_override: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if let Some(override_url) = models_url_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let url = Url::parse(override_url)
+            .map_err(|error| format!("invalid provider model URL: {error}"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err("provider model URL must use http or https".to_string());
+        }
+        // An explicit catalog URL can legitimately carry a query token.
+        return Ok(vec![override_url.to_string()]);
+    }
+
+    let normalized = clean_http_url(base_url)?;
+    let mut candidates = Vec::new();
+    if is_full_url {
+        if let Some(index) = normalized.find("/v1/") {
+            let root = &normalized[..index];
+            push_unique_url(&mut candidates, format!("{root}/v1/models"));
+            push_unique_url(&mut candidates, format!("{root}/models"));
+            push_unique_url(&mut candidates, format!("{root}/model"));
+        } else if let Some(index) = normalized.rfind('/') {
+            let root = &normalized[..index];
+            if root.contains("://") {
+                push_unique_url(&mut candidates, format!("{root}/v1/models"));
+                push_unique_url(&mut candidates, format!("{root}/models"));
+                push_unique_url(&mut candidates, format!("{root}/model"));
+            }
+        }
+        return (!candidates.is_empty())
+            .then_some(candidates)
+            .ok_or_else(|| "cannot derive model endpoint from full provider URL".to_string());
+    }
+
+    if normalized.ends_with("/models") || normalized.ends_with("/model") {
+        push_unique_url(&mut candidates, normalized.clone());
+    } else if ends_with_version_segment(&normalized) {
+        push_unique_url(&mut candidates, format!("{normalized}/models"));
+        if !normalized.ends_with("/v1") {
+            push_unique_url(&mut candidates, format!("{normalized}/v1/models"));
+        } else if let Some(root) = normalized.strip_suffix("/v1") {
+            push_unique_url(&mut candidates, format!("{root}/models"));
+        }
+    } else {
+        push_unique_url(&mut candidates, format!("{normalized}/v1/models"));
+        push_unique_url(&mut candidates, format!("{normalized}/models"));
+    }
+
+    if let Some(stripped) = strip_model_compat_suffix(&normalized) {
+        let root = stripped.trim_end_matches('/');
+        if !root.is_empty() && root.contains("://") {
+            push_unique_url(&mut candidates, format!("{root}/v1/models"));
+            push_unique_url(&mut candidates, format!("{root}/models"));
+        }
+    }
+    if !normalized.ends_with("/models") && !normalized.ends_with("/model") {
+        push_unique_url(&mut candidates, format!("{normalized}/model"));
+        if let Some(stripped) = strip_model_compat_suffix(&normalized) {
+            let root = stripped.trim_end_matches('/');
+            if !root.is_empty() && root.contains("://") {
+                push_unique_url(&mut candidates, format!("{root}/model"));
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn provider_model_headers(
+    discovery: &ProviderModelDiscovery,
+) -> Result<reqwest::header::HeaderMap, String> {
+    use reqwest::header::{
+        HeaderMap, HeaderName, HeaderValue as ReqwestHeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT,
+    };
+
+    if discovery.request_headers.len() > 64 {
+        return Err("too many provider model request headers".to_string());
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, ReqwestHeaderValue::from_static("application/json"));
+    if !discovery.api_key.trim().is_empty() {
+        let api_key = discovery.api_key.trim();
+        let format = discovery
+            .api_format
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let (name, value) = if matches!(format.as_str(), "anthropic" | "anthropic-messages") {
+            (
+                HeaderName::from_static("x-api-key"),
+                ReqwestHeaderValue::from_str(api_key),
+            )
+        } else if matches!(
+            format.as_str(),
+            "google" | "gemini_native" | "google-generative-ai"
+        ) {
+            (
+                HeaderName::from_static("x-goog-api-key"),
+                ReqwestHeaderValue::from_str(api_key),
+            )
+        } else {
+            (
+                AUTHORIZATION,
+                ReqwestHeaderValue::from_str(&format!("Bearer {api_key}")),
+            )
+        };
+        headers.insert(
+            name,
+            value.map_err(|error| format!("invalid provider API key: {error}"))?,
+        );
+    }
+    let default_user_agent = format!("Codex-Atlas/{}", env!("CARGO_PKG_VERSION"));
+    let user_agent = discovery
+        .custom_user_agent
+        .as_deref()
+        .and_then(|value| ReqwestHeaderValue::from_str(value.trim()).ok())
+        .unwrap_or_else(|| {
+            ReqwestHeaderValue::from_str(&default_user_agent)
+                .expect("package version produces a valid User-Agent")
+        });
+    headers.insert(USER_AGENT, user_agent);
+
+    for (raw_name, raw_value) in &discovery.request_headers {
+        if raw_name.len() > 256 || raw_value.len() > 16 * 1024 {
+            return Err("provider model request header is too large".to_string());
+        }
+        let name = HeaderName::from_bytes(raw_name.trim().as_bytes())
+            .map_err(|error| format!("invalid provider model header name: {error}"))?;
+        let value = ReqwestHeaderValue::from_str(raw_value)
+            .map_err(|error| format!("invalid provider model header value: {error}"))?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+fn parse_provider_model_catalog(body: &str) -> Option<Vec<(String, Option<String>)>> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    let entries = value
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("models").and_then(Value::as_array))
+        .or_else(|| value.pointer("/data/models").and_then(Value::as_array))
+        .or_else(|| value.as_array())?;
+    let models = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Value::String(value) => {
+                let slug = value.trim();
+                (!slug.is_empty()).then(|| (slug.to_string(), None))
+            }
+            Value::Object(_) => {
+                let slug = entry
+                    .get("id")
+                    .or_else(|| entry.get("slug"))
+                    .or_else(|| entry.get("model"))
+                    .or_else(|| entry.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                let display = entry
+                    .get("display_name")
+                    .or_else(|| entry.get("displayName"))
+                    .or_else(|| entry.get("title"))
+                    .or_else(|| entry.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string);
+                Some((slug.to_string(), display))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    Some(models)
+}
+
 /// Reads the active provider first. Codex's local cache is deliberately a
 /// fallback: it describes the official client, not necessarily the models
 /// exposed by a CC Switch relay currently handling `/v1/responses`.
-async fn collect_codex_models() -> Vec<CodexModelOption> {
+async fn collect_codex_models_for_provider(
+    provider_data: Option<&ActiveCcSwitchProvider>,
+) -> Vec<CodexModelOption> {
     let config = fs::read_to_string(codex_config_path()).unwrap_or_default();
     let current_model =
         parse_toml_string(&config, "model").filter(|model| !model.trim().is_empty());
-    let provider_data = current_cc_switch_provider_data();
     let mut by_slug: HashMap<String, CodexModelOption> = HashMap::new();
     let mut provider_models: HashMap<String, CodexModelOption> = HashMap::new();
 
@@ -11821,64 +12446,43 @@ async fn collect_codex_models() -> Vec<CodexModelOption> {
         }
     };
 
-    // 1. Ask the selected CC Switch provider. A provider may expose either
-    // `/models` or the OpenAI-compatible `/v1/models` route.
-    if let Some((base_url, api_key, provider_model, settings, meta, _provider_name)) =
-        provider_data.as_ref()
-    {
-        let normalized = base_url.trim().trim_end_matches('/');
-        if !normalized.is_empty() {
-            let mut endpoints = vec![format!("{normalized}/models")];
-            if !normalized.ends_with("/v1") {
-                endpoints.push(format!("{normalized}/v1/models"));
-            } else if let Some(root) = normalized.strip_suffix("/v1") {
-                endpoints.push(format!("{root}/models"));
-            }
+    // 1. Ask the selected CC Switch provider using its upstream credentials,
+    // never the separate usage-script/balance endpoint.
+    if let Some(provider) = provider_data {
+        let discovery = &provider.discovery;
+        if let (Ok(endpoints), Ok(headers)) = (
+            build_provider_model_urls(
+                &discovery.base_url,
+                discovery.is_full_url,
+                discovery.models_url.as_deref(),
+            ),
+            provider_model_headers(discovery),
+        ) {
             let client = Client::builder()
                 .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(6))
+                .timeout(Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| Client::new());
             for endpoint in endpoints {
-                let mut request = client.get(&endpoint);
-                if !api_key.trim().is_empty() {
-                    request = request
-                        .bearer_auth(api_key.trim())
-                        .header("X-API-Key", api_key.trim());
-                }
-                let response = request.send().await;
+                let response = client.get(&endpoint).headers(headers.clone()).send().await;
                 let Ok(response) = response else { continue };
                 if !response.status().is_success() {
                     continue;
                 }
-                let Ok(value) = response.json::<Value>().await else {
+                let Ok(body) = response.text().await else {
                     continue;
                 };
-                let entries = value
-                    .get("data")
-                    .or_else(|| value.get("models"))
-                    .and_then(Value::as_array)
-                    .or_else(|| value.as_array());
-                let Some(entries) = entries else { continue };
-                for entry in entries {
-                    let (slug, display) = match entry {
-                        Value::String(value) => (value.as_str(), None),
-                        Value::Object(_) => (
-                            entry
-                                .get("id")
-                                .or_else(|| entry.get("slug"))
-                                .or_else(|| entry.get("name"))
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
-                            entry
-                                .get("display_name")
-                                .or_else(|| entry.get("displayName"))
-                                .or_else(|| entry.get("name"))
-                                .and_then(Value::as_str),
-                        ),
-                        _ => ("", None),
-                    };
-                    add_model(&mut provider_models, slug, display, false, "provider-api");
+                let Some(entries) = parse_provider_model_catalog(&body) else {
+                    continue;
+                };
+                for (slug, display) in entries {
+                    add_model(
+                        &mut provider_models,
+                        &slug,
+                        display.as_deref(),
+                        false,
+                        "provider-api",
+                    );
                 }
                 if !provider_models.is_empty() {
                     break;
@@ -11902,10 +12506,10 @@ async fn collect_codex_models() -> Vec<CodexModelOption> {
 
         // 2. CC Switch metadata remains useful when a relay does not expose
         // a model endpoint (and still identifies the selected model).
-        if let Some(model) = provider_model.as_deref() {
+        if let Some(model) = discovery.model.as_deref() {
             add_model(&mut by_slug, model, None, false, "cc-switch");
         }
-        for source in [settings, meta] {
+        for source in [&provider.settings, &provider.meta] {
             for key in [
                 "models",
                 "model_list",
@@ -11996,6 +12600,11 @@ async fn collect_codex_models() -> Vec<CodexModelOption> {
     models
 }
 
+async fn collect_codex_models() -> Vec<CodexModelOption> {
+    let provider_data = current_cc_switch_provider_data();
+    collect_codex_models_for_provider(provider_data.as_ref()).await
+}
+
 #[tauri::command]
 async fn get_codex_models() -> Vec<CodexModelOption> {
     collect_codex_models().await
@@ -12007,16 +12616,16 @@ async fn get_codex_runtime_defaults() -> CodexRuntimeDefaults {
     let provider_data = current_cc_switch_provider_data();
     let provider = provider_data
         .as_ref()
-        .map(|(_, _, _, _, _, name)| name.trim().to_string())
+        .map(|provider| provider.name.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| info.provider_name.clone())
         .or_else(|| info.model_provider.clone())
         .unwrap_or_default();
     let provider_model = provider_data
         .as_ref()
-        .and_then(|(_, _, model, _, _, _)| model.clone())
+        .and_then(|provider| provider.discovery.model.clone())
         .filter(|value| !value.trim().is_empty());
-    let models = collect_codex_models().await;
+    let models = collect_codex_models_for_provider(provider_data.as_ref()).await;
     let source = models
         .iter()
         .find(|model| model.slug == info.model.as_deref().unwrap_or_default())
@@ -12187,7 +12796,6 @@ fn write_codex_defaults(
     model: String,
     permission: String,
     reasoning_effort: String,
-    state: Option<&AppState>,
 ) -> Result<CodexInfo, String> {
     let model = model.trim();
     if model.is_empty() || model.len() > 160 || model.contains(['\r', '\n']) {
@@ -12218,15 +12826,6 @@ fn write_codex_defaults(
     {
         return Err("Codex configuration was written but could not be verified".to_string());
     }
-    let mut info = info;
-    if let Some(state) = state {
-        let report = apply_defaults_to_active_threads(state, model, permission, reasoning_effort);
-        info.active_threads_applied = Some(report.threads_applied);
-        info.active_turns_applied = Some(report.turns_applied);
-        if !report.errors.is_empty() {
-            info.active_apply_error = Some(report.errors.join("; "));
-        }
-    }
     Ok(info)
 }
 
@@ -12237,7 +12836,22 @@ fn set_codex_defaults(
     permission: String,
     reasoning_effort: String,
 ) -> Result<CodexInfo, String> {
-    write_codex_defaults(model, permission, reasoning_effort, Some(state.inner()))
+    let model_for_active_threads = model.clone();
+    let permission_for_active_threads = permission.clone();
+    let reasoning_for_active_threads = reasoning_effort.clone();
+    let mut info = write_codex_defaults(model, permission, reasoning_effort)?;
+    let report = apply_defaults_to_active_threads(
+        state.inner(),
+        &model_for_active_threads,
+        &permission_for_active_threads,
+        &reasoning_for_active_threads,
+    );
+    info.active_threads_applied = Some(report.threads_applied);
+    info.active_turns_applied = Some(report.turns_applied);
+    if !report.errors.is_empty() {
+        info.active_apply_error = Some(report.errors.join("; "));
+    }
+    Ok(info)
 }
 
 fn skill_roots() -> [(PathBuf, bool); 2] {
@@ -12817,6 +13431,7 @@ pub fn run() {
             search_sessions,
             create_codex_session,
             resume_codex_session,
+            exit_codex_session,
             send_session_input,
             send_floating_message,
             send_terminal_input,
@@ -13448,6 +14063,59 @@ mod runtime_probe_tests {
         );
     }
 
+    #[test]
+    fn exit_terminal_selection_prefers_the_exact_process_window() {
+        let candidates = vec![
+            TerminalTargetCandidate {
+                handle: 11,
+                process_id: 1200,
+                title: "PowerShell".to_string(),
+            },
+            TerminalTargetCandidate {
+                handle: 22,
+                process_id: 2200,
+                title: "project - PowerShell".to_string(),
+            },
+        ];
+        assert_eq!(
+            select_terminal_target("thread-1", "C:\\work\\project", &[2200], 2, &candidates),
+            Ok((22, TerminalTargetMatch::Process))
+        );
+    }
+
+    #[test]
+    fn exit_terminal_selection_refuses_a_shared_workspace_fallback() {
+        let candidates = vec![TerminalTargetCandidate {
+            handle: 11,
+            process_id: 1200,
+            title: "project - PowerShell".to_string(),
+        }];
+        let error =
+            select_terminal_target("thread-1", "C:\\work\\project", &[2200], 2, &candidates)
+                .expect_err("shared workspaces must not select a terminal by title");
+        assert!(error.contains("multiple running Codex sessions share this workspace"));
+    }
+
+    #[test]
+    fn exit_terminal_selection_refuses_multiple_matching_windows() {
+        let candidates = vec![
+            TerminalTargetCandidate {
+                handle: 11,
+                process_id: 1200,
+                title: "thread-1 - PowerShell".to_string(),
+            },
+            TerminalTargetCandidate {
+                handle: 22,
+                process_id: 2200,
+                title: "thread-1 - Windows Terminal".to_string(),
+            },
+        ];
+        let error =
+            select_terminal_target("thread-1", "C:\\work\\project", &[3300], 1, &candidates)
+                .expect_err("ambiguous title matches must be rejected");
+        assert!(error.contains("multiple terminal windows match"));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn powershell_resume_uses_the_session_directory_and_id() {
@@ -13586,11 +14254,127 @@ mod runtime_probe_tests {
             "config": "model_provider = \"custom\"\nmodel = \"gpt-5.5\"\n\n[model_providers.custom]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1/\"\nmodel = \"relay-model\"\n",
             "auth": {"OPENAI_API_KEY": "secret"}
         });
-        let meta = serde_json::json!({});
-        let (base_url, api_key, model, _) = provider_credentials(&settings, &meta);
+        let (base_url, api_key, model) = provider_api_credentials(&settings);
         assert_eq!(base_url, "https://relay.example/v1");
         assert_eq!(api_key, "secret");
         assert_eq!(model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn provider_table_and_api_key_are_isolated_from_balance_script_credentials() {
+        let settings = serde_json::json!({
+            "config": "model_provider = \"custom\"\nbase_url = \"http://127.0.0.1:15721/v1\"\n\n[model_providers.custom]\nbase_url = \"https://upstream.example/v1\"\nexperimental_bearer_token = \"toml-key\"\n",
+            "auth": {"OPENAI_API_KEY": "upstream-key"}
+        });
+        let meta = serde_json::json!({
+            "usage_script": {
+                "baseUrl": "https://balance.example",
+                "apiKey": "balance-key",
+                "code": "fetch('{{baseUrl}}/api/usage')"
+            }
+        });
+        let discovery = provider_model_discovery(&settings, &meta);
+        assert_eq!(discovery.base_url, "https://upstream.example/v1");
+        assert_eq!(discovery.api_key, "upstream-key");
+
+        let (balance_url, balance_key, _, usage_path) =
+            provider_balance_credentials(&settings, &meta);
+        assert_eq!(balance_url, "https://balance.example");
+        assert_eq!(balance_key, "balance-key");
+        assert_eq!(usage_path.as_deref(), Some("/api/usage"));
+    }
+
+    #[test]
+    fn builds_cc_switch_compatible_provider_model_urls() {
+        assert_eq!(
+            build_provider_model_urls("https://relay.example", false, None).unwrap(),
+            vec![
+                "https://relay.example/v1/models",
+                "https://relay.example/models",
+                "https://relay.example/model",
+            ]
+        );
+        assert_eq!(
+            build_provider_model_urls("https://relay.example/v1", false, None).unwrap(),
+            vec![
+                "https://relay.example/v1/models",
+                "https://relay.example/models",
+                "https://relay.example/v1/model",
+            ]
+        );
+        assert_eq!(
+            build_provider_model_urls("https://relay.example/v1/responses", true, None,).unwrap(),
+            vec![
+                "https://relay.example/v1/models",
+                "https://relay.example/models",
+                "https://relay.example/model",
+            ]
+        );
+        assert_eq!(
+            build_provider_model_urls(
+                "https://relay.example/anthropic",
+                false,
+                Some("https://catalog.example/model"),
+            )
+            .unwrap(),
+            vec!["https://catalog.example/model"]
+        );
+        assert_eq!(
+            build_provider_model_urls(
+                "https://relay.example",
+                false,
+                Some("https://catalog.example/models?token=query-value"),
+            )
+            .unwrap(),
+            vec!["https://catalog.example/models?token=query-value"]
+        );
+    }
+
+    #[test]
+    fn parses_provider_model_catalog_shapes_and_rejects_html() {
+        let openai = parse_provider_model_catalog(
+            r#"{"data":[{"id":"gpt-upstream","display_name":"Upstream GPT"}]}"#,
+        )
+        .expect("OpenAI model catalog");
+        assert_eq!(
+            openai,
+            vec![("gpt-upstream".to_string(), Some("Upstream GPT".to_string()))]
+        );
+        let alternate = parse_provider_model_catalog(
+            r#"{"models":["relay-fast",{"slug":"relay-deep","name":"Relay Deep"}]}"#,
+        )
+        .expect("alternate model catalog");
+        assert_eq!(alternate.len(), 2);
+        assert!(parse_provider_model_catalog("<!doctype html><title>Models</title>").is_none());
+    }
+
+    #[test]
+    fn provider_model_headers_follow_cc_switch_api_format() {
+        let mut discovery = ProviderModelDiscovery {
+            base_url: "https://relay.example".to_string(),
+            api_key: "provider-key".to_string(),
+            model: None,
+            models_url: None,
+            is_full_url: false,
+            custom_user_agent: None,
+            api_format: Some("openai_responses".to_string()),
+            request_headers: HashMap::new(),
+        };
+        let headers = provider_model_headers(&discovery).expect("OpenAI headers");
+        assert_eq!(
+            headers[reqwest::header::AUTHORIZATION],
+            "Bearer provider-key"
+        );
+        assert!(!headers.contains_key("x-api-key"));
+
+        discovery.api_format = Some("anthropic".to_string());
+        discovery
+            .request_headers
+            .insert("X-Tenant".to_string(), "atlas".to_string());
+        let headers = provider_model_headers(&discovery).expect("Anthropic headers");
+        assert_eq!(headers["x-api-key"], "provider-key");
+        assert_eq!(headers["x-tenant"], "atlas");
+        assert!(!headers.contains_key(reqwest::header::AUTHORIZATION));
     }
 
     #[test]

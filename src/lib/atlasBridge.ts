@@ -714,3 +714,9 @@ export async function resumeCodexSession(sessionId: string): Promise<boolean> {
   const result = await invokeDesktop<boolean>('resume_codex_session', { sessionId })
   return result ?? false
 }
+
+/** Submits `/exit` to the exact live Codex terminal, then closes only that terminal tab/window. */
+export async function exitCodexSession(sessionId: string): Promise<boolean> {
+  const result = await invokeDesktop<boolean>('exit_codex_session', { sessionId }, false)
+  return result ?? false
+}

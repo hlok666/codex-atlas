@@ -28,6 +28,7 @@ import {
   ListFilter,
   ListTree,
   LoaderCircle,
+  LogOut,
   Maximize2,
   Minus,
   Minimize2,
@@ -58,9 +59,9 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, floatingWindowHeartbeat, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getCodexRuntimeDefaults, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, importAllPaseoSessions, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, launchPaseo, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, exitCodexSession, floatingWindowHeartbeat, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getCodexRuntimeDefaults, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
 import type { DesktopUpdateInfo, DesktopUpdateProgress } from './lib/atlasBridge'
-import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, PaseoImportSummary, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
+import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { FloatingSessionTargetLock } from './lib/floatingSessionTarget'
 import { appendFloatingReply, splitFloatingReply } from './lib/floatingReply'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
@@ -88,7 +89,6 @@ type Session = {
   recovery: RecoveryState
   retryCount: number
   lastError?: string
-  paseoImported: boolean
   searchText?: string
   rolloutPath?: string
   liveState?: string
@@ -131,7 +131,6 @@ const sessions: Session[] = [
     provider: 'Codex2API',
     recovery: 'healthy',
     retryCount: 0,
-    paseoImported: true,
   },
   {
     id: 's-2413',
@@ -149,7 +148,6 @@ const sessions: Session[] = [
     provider: 'Codex2API',
     recovery: 'watching',
     retryCount: 1,
-    paseoImported: false,
   },
   {
     id: 's-2409',
@@ -167,7 +165,6 @@ const sessions: Session[] = [
     provider: 'OpenRouter',
     recovery: 'healthy',
     retryCount: 0,
-    paseoImported: true,
   },
   {
     id: 's-2401',
@@ -185,7 +182,6 @@ const sessions: Session[] = [
     provider: 'Codex2API',
     recovery: 'healthy',
     retryCount: 0,
-    paseoImported: true,
   },
   {
     id: 's-2392',
@@ -204,7 +200,6 @@ const sessions: Session[] = [
     recovery: 'paused-balance',
     retryCount: 0,
     lastError: '403 Forbidden · insufficient balance',
-    paseoImported: false,
   },
   {
     id: 's-2388',
@@ -223,7 +218,6 @@ const sessions: Session[] = [
     recovery: 'stopped',
     retryCount: 3,
     lastError: 'continue failed 3/3',
-    paseoImported: true,
   },
 ]
 
@@ -273,7 +267,7 @@ const uiText = {
     localSessionIndex: '本地会话索引', recentSessions: '最近会话', everySessionReady: '所有 Codex 会话都已索引，可直接继续。',
     scanSessions: '扫描会话', sessionStream: '会话流', readyToResume: '可继续的会话', shown: '个', searchSessions: '搜索会话、分支或内容…',
     all: '全部', active: '运行中', done: '已完成', session: '会话', workspaceBranch: '工作区 / 分支', model: '模型', updated: '更新时间',
-    noSearchResults: '没有匹配的会话。', viewAllSessions: '查看全部会话', resume: '继续', resumeSession: '继续会话', activateSession: '激活会话', inputContinue: '输入继续', newSession: '新建会话', createSession: '创建会话', creatingSession: '正在创建…', sessionCreated: 'Codex 新会话已打开', sessionCreateFailed: '无法创建 Codex 会话', workingDirectory: '工作目录', initialPrompt: '初始提示词', directoryHint: '例如 E:\\projects\\my-app', promptHint: '可选；留空进入交互式 Codex',
+    noSearchResults: '没有匹配的会话。', viewAllSessions: '查看全部会话', resume: '继续', resumeSession: '继续会话', activateSession: '激活会话', inputContinue: '输入继续', exitSession: '退出会话', exitingSession: '正在退出…', sessionExited: '会话已退出，终端已关闭', exitSessionFailed: '无法退出对应会话', newSession: '新建会话', createSession: '创建会话', creatingSession: '正在创建…', sessionCreated: 'Codex 新会话已打开', sessionCreateFailed: '无法创建 Codex 会话', workingDirectory: '工作目录', initialPrompt: '初始提示词', directoryHint: '例如 E:\\projects\\my-app', promptHint: '可选；留空进入交互式 Codex',
     moreSessionActions: '更多会话操作', closeDetail: '关闭详情', workspace: '工作区', folder: '文件夹', branch: '分支', permission: '权限',
     sessionArchive: '会话归档', allSessions: '全部会话', archiveDescription: '搜索标题、提示词、分支和已索引内容。', exportIndex: '导出索引',
     searchArchive: '搜索全部会话…', matchingRecords: '条匹配记录', extensions: '扩展', installedSkills: '已安装技能',
@@ -286,10 +280,9 @@ const uiText = {
     threeFailuresDetail: '停止自动化并发送桌面提醒。', stop: '停止', retry: '重试', desktopNotifications: '桌面通知',
     notifyOnStop: '余额暂停或 3/3 失败时提醒', autoResumeBalance: '余额恢复后自动继续', autoResumeBalanceDescription: '供应商余额重新大于 0 时向已暂停会话发送继续并回车', liveIncidents: '实时事件', sessionsNeedAttention: '个会话需要处理', watchingRecoverable: '正在等待可恢复错误', balance: '余额', failed: '失败',
     inspectIncident: '查看事件', continueAction: '继续', recheck: '重新检查', lastEvent: '最近事件', watcherHealthy: '监控正常',
-    connections: '连接', localTools: '本地工具', integrationsDescription: '供应商余额与 Paseo 会话同步。', refresh: '刷新', providerBalanceMonitor: '供应商余额监控',
-    sessionCompanion: '会话助手', providersConnected: '个供应商已连接', readyToCheck: '等待检查', balanceRegistry: '余额来自本地供应商注册表', lastChecked: '上次检查', check: '检查',
-    refreshProviderBalance: '刷新供应商余额', insufficientBalance: '余额不足时会暂停自动恢复。', launch: '启动', importAll: '全部导入', sessionBridge: '会话桥接',
-    readySync: '可同步 Codex 会话', recentRepair: '最近会话修复', synced: '已同步', allSynced: '全部会话已同步', repair: '修复',
+    connections: '连接', localTools: '本地服务', integrationsDescription: '供应商余额、Bridge 与本地服务状态。', refresh: '刷新', providerBalanceMonitor: '供应商余额监控',
+    providersConnected: '个供应商已连接', readyToCheck: '等待检查', balanceRegistry: '余额来自本地供应商注册表', lastChecked: '上次检查', check: '检查',
+    refreshProviderBalance: '刷新供应商余额', insufficientBalance: '余额不足时会暂停自动恢复。',
     settings: '设置', runtimeTitle: '运行设置', runtimeDescription: '设置新 Codex 会话的启动方式。', save: '保存', sessionDefaults: '会话默认值',
     appliedNewResumes: '应用于新 resume', permissionField: '权限', scanOnLaunch: '启动时扫描', refreshOnLaunch: 'Atlas 启动时刷新本地索引',
     recoveryGuardrails: '恢复保护', pauseBalance: '暂停余额不足并在 3 次重试后停止', on: '开启', off: '关闭', desktopStatusObject: '桌面状态组件', keepObject: '保持小组件置顶显示',
@@ -301,7 +294,7 @@ const uiText = {
     desktopNotificationsOn: '桌面通知已开启', desktopNotificationsOff: '桌面通知已关闭', browserPreviewSessions: '浏览器预览使用演示会话', noReadableSessions: '未找到可读的 Codex 会话',
     scanComplete: '已扫描', sessionUnit: '个 Codex 会话', providerBalanceLow: '检测到供应商余额不足，已停止自动继续', retriesStopped: '连续 {count} 次失败，自动继续已停止',
     continueSent: '已自动发送 continue · {attempt}/{max}', waitingManual: 'Codex 任务异常，等待人工处理', resumePrepared: '已准备 resume · {title}', resumeOpened: '已打开 codex resume · {title}',
-    paseoStarted: 'Paseo 已启动', paseoUnavailable: 'Paseo 暂不可用', connectingCc: '正在连接 CC Switch…',
+    connectingCc: '正在连接 CC Switch…',
     floatingOpen: '打开 Codex Atlas', floatingResume: '激活当前会话', floatingInputContinue: '输入继续', floatingHide: '隐藏桌面悬浮电视', floatingIdle: '无运行会话',
     desktopShellUnavailable: '桌面壳不可用', codexResumed: 'Codex 已继续', resumeUnavailable: '暂时无法继续会话', commandFailed: '操作失败', statusPrefix: 'Codex Atlas 状态',
     clickToOpen: '点击打开 Codex Atlas；拖动底部控制栏',
@@ -322,7 +315,7 @@ const uiText = {
     localSessionIndex: 'LOCAL SESSION INDEX', recentSessions: 'Recent sessions', everySessionReady: 'Every Codex session is indexed and ready to resume.',
     scanSessions: 'Scan sessions', sessionStream: 'SESSION STREAM', readyToResume: 'Ready to resume', shown: 'shown', searchSessions: 'Search sessions, branches, content…',
     all: 'All', active: 'Active', done: 'Done', session: 'SESSION', workspaceBranch: 'WORKSPACE / BRANCH', model: 'MODEL', updated: 'UPDATED',
-    noSearchResults: 'No sessions match that search.', viewAllSessions: 'View all sessions', resume: 'Resume', resumeSession: 'Resume session', activateSession: 'Activate session', inputContinue: 'Type continue', newSession: 'New session', createSession: 'Create session', creatingSession: 'Creating…', sessionCreated: 'New Codex session opened', sessionCreateFailed: 'Could not create Codex session', workingDirectory: 'Working directory', initialPrompt: 'Initial prompt', directoryHint: 'For example C:\\projects\\my-app', promptHint: 'Optional; leave blank for interactive Codex',
+    noSearchResults: 'No sessions match that search.', viewAllSessions: 'View all sessions', resume: 'Resume', resumeSession: 'Resume session', activateSession: 'Activate session', inputContinue: 'Type continue', exitSession: 'Exit session', exitingSession: 'Exiting…', sessionExited: 'Session exited and terminal closed', exitSessionFailed: 'Could not exit the matching session', newSession: 'New session', createSession: 'Create session', creatingSession: 'Creating…', sessionCreated: 'New Codex session opened', sessionCreateFailed: 'Could not create Codex session', workingDirectory: 'Working directory', initialPrompt: 'Initial prompt', directoryHint: 'For example C:\\projects\\my-app', promptHint: 'Optional; leave blank for interactive Codex',
     moreSessionActions: 'More session actions', closeDetail: 'Close detail', workspace: 'WORKSPACE', folder: 'Folder', branch: 'Branch', permission: 'Permission',
     sessionArchive: 'SESSION ARCHIVE', allSessions: 'All sessions', archiveDescription: 'Search across titles, prompts, branches, and indexed content.', exportIndex: 'Export index',
     searchArchive: 'Search the full session archive…', matchingRecords: 'matching records', extensions: 'EXTENSIONS', installedSkills: 'Installed skills',
@@ -335,10 +328,9 @@ const uiText = {
     threeFailuresDetail: 'Stop automation and surface a desktop alert.', stop: 'STOP', retry: 'RETRY', desktopNotifications: 'Desktop notifications',
     notifyOnStop: 'Notify on balance pause and 3/3 failure stop', autoResumeBalance: 'Auto-continue after balance recovery', autoResumeBalanceDescription: 'Type continue and press Enter when the current provider balance is above zero again', liveIncidents: 'LIVE INCIDENTS', sessionsNeedAttention: 'sessions need attention', watchingRecoverable: 'Watching for recoverable errors', balance: 'BALANCE', failed: 'FAILED',
     inspectIncident: 'Inspect incident', continueAction: 'Continue', recheck: 'Recheck', lastEvent: 'Last event', watcherHealthy: 'watcher healthy',
-    connections: 'CONNECTIONS', localTools: 'Local tools', integrationsDescription: 'Provider balances and Paseo session sync.', refresh: 'Refresh', providerBalanceMonitor: 'Provider balance monitor',
-    sessionCompanion: 'Session companion', providersConnected: 'providers connected', readyToCheck: 'Ready to check', balanceRegistry: 'Balance is checked from the local provider registry', lastChecked: 'Last checked', check: 'Check',
-    refreshProviderBalance: 'Refresh provider balance', insufficientBalance: 'Insufficient balance pauses automatic recovery.', launch: 'Launch', importAll: 'Import all', sessionBridge: 'Session bridge',
-    readySync: 'Ready to sync Codex sessions', recentRepair: 'Recent session repair', synced: 'synced', allSynced: 'All sessions synced', repair: 'Repair',
+    connections: 'CONNECTIONS', localTools: 'Local services', integrationsDescription: 'Provider balance, Bridge, and local service status.', refresh: 'Refresh', providerBalanceMonitor: 'Provider balance monitor',
+    providersConnected: 'providers connected', readyToCheck: 'Ready to check', balanceRegistry: 'Balance is checked from the local provider registry', lastChecked: 'Last checked', check: 'Check',
+    refreshProviderBalance: 'Refresh provider balance', insufficientBalance: 'Insufficient balance pauses automatic recovery.',
     settings: 'SETTINGS', runtimeTitle: 'Runtime', runtimeDescription: 'Choose how new Codex sessions start.', save: 'Save', sessionDefaults: 'Session defaults',
     appliedNewResumes: 'Applied to new resumes', permissionField: 'PERMISSION', scanOnLaunch: 'Scan on launch', refreshOnLaunch: 'Refresh the local index when Atlas opens',
     recoveryGuardrails: 'Recovery guardrails', pauseBalance: 'Pause balance failures and stop after 3 retries', on: 'On', off: 'Off', desktopStatusObject: 'Desktop status object', keepObject: 'Keep the small status object above other apps',
@@ -350,7 +342,7 @@ const uiText = {
     desktopNotificationsOn: 'Desktop notifications on', desktopNotificationsOff: 'Desktop notifications off', browserPreviewSessions: 'Browser preview uses demo sessions', noReadableSessions: 'No readable Codex sessions found',
     scanComplete: 'Scanned', sessionUnit: 'Codex sessions', providerBalanceLow: 'Insufficient provider balance detected; automatic continue stopped', retriesStopped: 'Automatic continue stopped after {count} failures',
     continueSent: 'Automatically sent continue · {attempt}/{max}', waitingManual: 'Codex task needs attention', resumePrepared: 'Resume prepared · {title}', resumeOpened: 'Opened codex resume · {title}',
-    paseoStarted: 'Paseo started', paseoUnavailable: 'Paseo unavailable', connectingCc: 'Connecting to CC Switch…',
+    connectingCc: 'Connecting to CC Switch…',
     floatingOpen: 'Open Codex Atlas', floatingResume: 'Activate current session', floatingInputContinue: 'Type continue', floatingHide: 'Hide desktop CRT widget', floatingIdle: 'No running sessions',
     desktopShellUnavailable: 'Desktop shell unavailable', codexResumed: 'Codex resumed', resumeUnavailable: 'Resume unavailable', commandFailed: 'Command failed', statusPrefix: 'Codex Atlas status',
     clickToOpen: 'Click to open Codex Atlas; drag from the bottom bar',
@@ -617,7 +609,6 @@ function mapDesktopSession(record: DesktopSessionRecord, index: number): Session
     provider: record.modelProvider || 'custom',
     recovery: record.requiresAttention || record.lastError ? 'watching' : 'healthy',
     retryCount: 0,
-    paseoImported: false,
     searchText: record.searchText,
     rolloutPath: record.rolloutPath,
     lastError: record.lastError,
@@ -703,12 +694,12 @@ function App() {
   const currentProviderBalanceRef = useRef<CcSwitchProviderBalance | null>(null)
   const previousBalanceRef = useRef<number | undefined>(undefined)
   const sessionItemsRef = useRef<Session[]>([])
-  const [paseoImportedCount, setPaseoImportedCount] = useState(0)
   const [desktopPlatform] = useState(() => detectDesktopPlatform())
   const [hookStatus, setHookStatus] = useState<CodexHookStatus | null>(null)
   const [mobileBridge, setMobileBridge] = useState<MobileBridgeConfig | null>(null)
   const [serverTunnel, setServerTunnel] = useState<ServerTunnelStatus | null>(null)
   const [newSessionOpen, setNewSessionOpen] = useState(false)
+  const [exitingSessionId, setExitingSessionId] = useState<string | null>(null)
   const t = (key: string) => tr(language, key)
   const commandErrorSeenRef = useRef<Map<string, number>>(new Map())
   const runtimeSyncRef = useRef<((records: RunningCodexSession[]) => void) | null>(null)
@@ -752,12 +743,11 @@ function App() {
   useEffect(() => {
     const interactiveCommands = new Set([
       'resume_codex_session',
+      'exit_codex_session',
       'create_codex_session',
       'send_session_input',
       'send_floating_message',
       'send_terminal_input',
-      'launch_paseo',
-      'paseo_import_all_codex_sessions',
       'get_balance',
       'install_codex_hook',
       'install_voice_service',
@@ -1328,6 +1318,23 @@ function App() {
     })
   }
 
+  const exitSession = async (session: Session) => {
+    if (exitingSessionId || (session.processIds?.length || 0) === 0) return
+    setExitingSessionId(session.id)
+    const exited = await exitCodexSession(session.id)
+    if (exited) {
+      setSessionItems((current) => current.map((item) => item.id === session.id
+        ? { ...item, processIds: [], liveState: 'idle', status: 'idle', foreground: false }
+        : item))
+      setSelected((current) => current?.id === session.id
+        ? { ...current, processIds: [], liveState: 'idle', status: 'idle', foreground: false }
+        : current)
+      showToast(t('sessionExited'))
+      window.setTimeout(() => { void scanSessions(false) }, 500)
+    }
+    setExitingSessionId(null)
+  }
+
   const openSessionWorkspace = (session: Session) => {
     if (!session.cwd) {
       showToast(language === 'zh' ? '该会话没有可用的工作目录' : 'This session has no readable workspace path')
@@ -1347,14 +1354,6 @@ function App() {
     } else {
       showToast(t('sessionCreateFailed'))
     }
-  }
-
-  const openExternalTool = (tool: 'paseo' | 'ccswitch') => {
-    if (tool === 'paseo') {
-      void launchPaseo('paseo').then((launched) => showToast(launched ? t('paseoStarted') : t('paseoUnavailable')))
-      return
-    }
-    showToast(t('connectingCc'))
   }
 
   return (
@@ -1416,14 +1415,14 @@ function App() {
           />}
           {activeNav === 'sessions' && <SessionsView language={language} sessions={filteredSessions} query={query} setQuery={setQuery} selected={selected} setSelected={setSelected} activateSession={activateSession} inputContinue={inputContinue} openWorkspace={openSessionWorkspace} loadState={sessionLoadState} />}
           {activeNav === 'monitor' && <MonitorView language={language} sessions={sessionItems} autoContinue={autoContinue} setAutoContinue={updateAutoContinue} autoResumeOnBalance={autoResumeOnBalance} setAutoResumeOnBalance={setAutoResumeOnBalance} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} showToast={showToast} activateSession={activateSession} inputContinue={inputContinue} />}
-          {activeNav === 'integrations' && <IntegrationsView language={language} providerBalances={providerBalances} sessionTotal={sessionItems.length} ccSwitchCheckedAt={ccSwitchCheckedAt} setCcSwitchCheckedAt={setCcSwitchCheckedAt} paseoImportedCount={paseoImportedCount} setPaseoImportedCount={setPaseoImportedCount} showToast={showToast} openExternalTool={openExternalTool} />}
+          {activeNav === 'integrations' && <IntegrationsView language={language} providerBalances={providerBalances} ccSwitchCheckedAt={ccSwitchCheckedAt} setCcSwitchCheckedAt={setCcSwitchCheckedAt} showToast={showToast} />}
           {activeNav === 'skills' && <SkillsView language={language} skills={installedSkills} setSkills={setInstalledSkills} loadState={skillsLoadState} setLoadState={setSkillsLoadState} showToast={showToast} />}
           {activeNav === 'floating' && <FloatingView language={language} sessions={sessionItems} providerBalances={providerBalances} floatingEnabled={floatingEnabled} onToggleFloating={() => void toggleFloatingWindow()} floatingLaunchOnStart={floatingLaunchOnStart} setFloatingLaunchOnStart={setFloatingLaunchOnStart} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} activateSession={activateSession} inputContinue={inputContinue} showToast={showToast} />}
           {activeNav === 'runtime' && <RuntimeView language={language} codexVersion={codexVersion} setCodexVersion={setCodexVersion} codexProvider={codexProvider} codexModels={codexModels} codexModelsLoading={codexModelsLoading} codexModelsError={codexModelsError} onRefreshCodexModels={async () => { setCodexModelsLoading(true); setCodexModelsError(''); const defaults = await getCodexRuntimeDefaults(); if (defaults) { setCodexModels(defaults.models || []); setCodexModelsError(defaults.error || ''); if (defaults.provider) setCodexProvider(defaults.provider) } else { const models = await getCodexModels(); if (models) setCodexModels(models); else setCodexModelsError(language === 'zh' ? '无法读取当前供应商模型' : 'Could not read models from the active provider') }; setCodexModelsLoading(false) }} defaultModel={defaultModel} setDefaultModel={setDefaultModel} setDefaultPermission={setDefaultPermission} defaultPermission={defaultPermission} defaultReasoningEffort={defaultReasoningEffort} setDefaultReasoningEffort={setDefaultReasoningEffort} autoScan={autoScan} setAutoScan={setAutoScan} hookStatus={hookStatus} setHookStatus={setHookStatus} mobileBridge={mobileBridge} setMobileBridge={setMobileBridge} serverTunnel={serverTunnel} setServerTunnel={setServerTunnel} showToast={showToast} />}
           </main>
         </div>
 
-        {selected && !['skills', 'runtime', 'monitor', 'integrations', 'floating'].includes(activeNav) && <SessionInspector language={language} session={selected} onClose={() => setSelected(null)} onActivate={() => activateSession(selected)} onInputContinue={() => inputContinue(selected)} onOpenWorkspace={() => openSessionWorkspace(selected)} />}
+        {selected && !['skills', 'runtime', 'monitor', 'integrations', 'floating'].includes(activeNav) && <SessionInspector language={language} session={selected} onClose={() => setSelected(null)} onActivate={() => activateSession(selected)} onInputContinue={() => inputContinue(selected)} onExit={() => void exitSession(selected)} exiting={exitingSessionId === selected.id} onOpenWorkspace={() => openSessionWorkspace(selected)} />}
       </div>
       {toast && <div className="toast"><Check size={15} />{toast}</div>}
       {newSessionOpen && <NewSessionDialog language={language} defaultModel={defaultModel} defaultPermission={defaultPermission} defaultReasoningEffort={defaultReasoningEffort} models={codexModels} onClose={() => setNewSessionOpen(false)} onCreate={createSession} />}
@@ -1549,12 +1548,12 @@ function SessionRow({ language, session, index, selected, onSelect, onActivate, 
   </div>
 }
 
-function SessionInspector({ language, session, onClose, onActivate, onInputContinue, onOpenWorkspace }: { language: UiLanguage; session: Session; onClose: () => void; onActivate: () => void; onInputContinue: () => void; onOpenWorkspace?: () => void }) {
+function SessionInspector({ language, session, onClose, onActivate, onInputContinue, onExit, exiting, onOpenWorkspace }: { language: UiLanguage; session: Session; onClose: () => void; onActivate: () => void; onInputContinue: () => void; onExit: () => void; exiting: boolean; onOpenWorkspace?: () => void }) {
   return <aside className="inspector">
     <div className="inspector-head"><span className="eyebrow">{tr(language, 'session')}</span><button className="icon-button small" aria-label={tr(language, 'closeDetail')} title={tr(language, 'closeDetail')} onClick={onClose}><X size={16} /></button></div>
     <div className="inspector-title"><span className={`status-dot ${session.status}`} /><h2>{localizeSessionValue(session.title, language)}</h2></div>
     <p className="inspector-preview">{localizeSessionValue(session.preview, language)}</p>
-    <div className="inspector-actions"><button className="inspector-resume" onClick={onActivate}><Play size={15} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="inspector-resume input-continue-button" onClick={onInputContinue}><TerminalSquare size={15} /> {tr(language, 'inputContinue')}</button>{onOpenWorkspace && <button className="inspector-resume workspace-open-action" onClick={onOpenWorkspace} disabled={!session.cwd}><FolderOpen size={15} /> {language === 'zh' ? '打开工作区' : 'Open workspace'}</button>}</div>
+    <div className="inspector-actions"><button className="inspector-resume" onClick={onActivate} disabled={exiting}><Play size={15} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="inspector-resume input-continue-button" onClick={onInputContinue} disabled={exiting}><TerminalSquare size={15} /> {tr(language, 'inputContinue')}</button>{onOpenWorkspace && <button className="inspector-resume workspace-open-action" onClick={onOpenWorkspace} disabled={!session.cwd || exiting}><FolderOpen size={15} /> {language === 'zh' ? '打开工作区' : 'Open workspace'}</button>}{(session.processIds?.length || 0) > 0 && <button className="inspector-resume session-exit-action" onClick={onExit} disabled={exiting}>{exiting ? <LoaderCircle className="spin" size={15} /> : <LogOut size={15} />}{exiting ? tr(language, 'exitingSession') : tr(language, 'exitSession')}</button>}</div>
     <div className="detail-block"><div className="eyebrow">{tr(language, 'workspace')}</div><div className="detail-row"><FolderOpen size={14} /><span>{tr(language, 'folder')}</span><strong>{session.folder}</strong></div><div className="detail-row workspace-path-row" title={session.cwd || undefined}><FolderOpen size={14} /><span>{language === 'zh' ? '完整路径' : 'Full path'}</span><strong>{session.cwd || (language === 'zh' ? '未读取' : 'Unavailable')}</strong></div><div className="detail-row"><GitBranch size={14} /><span>{tr(language, 'branch')}</span><strong>{session.branch}</strong></div></div>
     <div className="detail-block"><div className="eyebrow">{tr(language, 'runtime')}</div><div className="detail-row"><Cpu size={14} /><span>{tr(language, 'model')}</span><strong>{localizeSessionValue(session.model, language)}</strong></div><div className="detail-row"><ShieldCheck size={14} /><span>{tr(language, 'permission')}</span><strong>{formatPermission(session.permission, language)}</strong></div><div className="detail-row"><Clock3 size={14} /><span>{tr(language, 'updated')}</span><strong>{formatSessionUpdated(session, language)}</strong></div></div>
   </aside>
@@ -1750,7 +1749,7 @@ function MonitorView({ language, sessions: items, autoContinue, setAutoContinue,
   </>
 }
 
-function IntegrationsView({ language, providerBalances, sessionTotal, ccSwitchCheckedAt, setCcSwitchCheckedAt, paseoImportedCount, setPaseoImportedCount, showToast, openExternalTool }: { language: UiLanguage; providerBalances: Provider[]; sessionTotal: number; ccSwitchCheckedAt: string; setCcSwitchCheckedAt: (value: string) => void; paseoImportedCount: number; setPaseoImportedCount: (value: number) => void; showToast: (message: string) => void; openExternalTool: (tool: 'paseo' | 'ccswitch') => void }) {
+function IntegrationsView({ language, providerBalances, ccSwitchCheckedAt, setCcSwitchCheckedAt, showToast }: { language: UiLanguage; providerBalances: Provider[]; ccSwitchCheckedAt: string; setCcSwitchCheckedAt: (value: string) => void; showToast: (message: string) => void }) {
   const checkCcSwitchBalance = async () => {
     const providerResults = await getCcSwitchProviderBalances()
     if (providerResults && providerResults.length > 0) {
@@ -1779,15 +1778,6 @@ function IntegrationsView({ language, providerBalances, sessionTotal, ccSwitchCh
         ? (language === 'zh' ? `余额偏低但仍可用 · ${amount} ${result.unit || 'USD'}` : `Balance is low but available · ${amount} ${result.unit || 'USD'}`)
         : (language === 'zh' ? `余额正常 · ${amount} ${result.unit || 'USD'}` : `Balance healthy · ${amount} ${result.unit || 'USD'}`))
   }
-  const importAllToPaseo = async () => {
-    const imported = await importAllPaseoSessions()
-    if (!imported) {
-      showToast(language === 'zh' ? '预览模式：桌面壳接入后将执行 Paseo 批量导入' : 'Preview mode: Paseo bulk import is available after the desktop shell connects')
-      return
-    }
-    setPaseoImportedCount(imported.imported)
-    showToast(imported.failed === 0 ? (language === 'zh' ? `已导入 Paseo · ${imported.imported}/${imported.total}` : `Imported to Paseo · ${imported.imported}/${imported.total}`) : (language === 'zh' ? `Paseo 导入完成 · ${imported.imported}/${imported.total}，${imported.failed} 个失败` : `Paseo import finished · ${imported.imported}/${imported.total}; ${imported.failed} failed`))
-  }
   const checkedLabel = ccSwitchCheckedAt === 'not checked'
     ? tr(language, 'balanceRegistry')
     : `${tr(language, 'lastChecked')} ${language === 'zh' && ccSwitchCheckedAt === 'just now' ? '刚刚' : ccSwitchCheckedAt}`
@@ -1802,11 +1792,6 @@ function IntegrationsView({ language, providerBalances, sessionTotal, ccSwitchCh
         <div className="connection-summary"><span className="health-light green" /><div><strong>{connectedLabel}</strong><small>{checkedLabel}</small></div><button className="secondary-button" onClick={() => void checkCcSwitchBalance()}><WalletCards size={14} /> {tr(language, 'check')}</button></div>
         <div className="provider-list">{providerBalances.map((provider) => <div className="provider-row" key={provider.name}><span className={`provider-status ${provider.status}`} /><div><strong>{provider.name}</strong><small>{provider.model} · {provider.latency}</small></div><div className="provider-balance"><strong>{provider.balance}</strong><small>{language === 'zh' && provider.updated === 'just now' ? '刚刚' : provider.updated}</small></div><button className="icon-button tiny" aria-label={tr(language, 'refreshProviderBalance')} title={tr(language, 'refreshProviderBalance')} onClick={() => void checkCcSwitchBalance()}><RefreshCw size={13} /></button></div>)}{providerBalances.length === 0 && <div className="provider-empty"><span className="provider-status warning" /><strong>{language === 'zh' ? '等待余额检查' : 'Waiting for balance check'}</strong><small>{tr(language, 'providerBalanceMonitor')}</small></div>}</div>
         {providerBalances.some((provider) => provider.status === 'warning' && provider.balanceValue <= 0) && <div className="balance-warning"><ShieldCheck size={15} /><span>{tr(language, 'insufficientBalance')}</span></div>}
-      </section>
-      <section className="settings-panel integration-card paseo-card">
-        <div className="integration-head"><div className="integration-logo paseo">P</div><div><h3>Paseo</h3><span className="integration-status"><span className="pulse-dot" /> {tr(language, 'sessionCompanion')}</span></div></div>
-        <div className="paseo-actions"><button className="primary-button" onClick={() => openExternalTool('paseo')}><Play size={15} fill="currentColor" /> {tr(language, 'launch')}</button><button className="secondary-button" onClick={() => void importAllToPaseo()}><Upload size={15} /> {tr(language, 'importAll')}</button></div>
-        <div className="paseo-health"><div className="health-line"><span className="health-light green" /><span><strong>{tr(language, 'sessionBridge')}</strong><small>{tr(language, 'readySync')}</small></span><Check size={15} /></div><div className="health-line"><span className="health-light yellow" /><span><strong>{tr(language, 'recentRepair')}</strong><small>{paseoImportedCount < sessionTotal ? `${paseoImportedCount} / ${sessionTotal} ${tr(language, 'synced')}` : tr(language, 'allSynced')}</small></span><button className="text-button small-text" onClick={() => { setPaseoImportedCount(sessionTotal); showToast(language === 'zh' ? '最近会话索引已修复' : 'Recent session index repaired') }}><RotateCcw size={13} /> {tr(language, 'repair')}</button></div></div>
       </section>
     </div>
   </>
@@ -2437,7 +2422,7 @@ const galleryText: Record<GalleryLanguage, GalleryCopy> = {
     mistName: '专注分屏',
     mistDesc: '极窄工具栏配宽会话列表，选中会话后在右侧展开完整详情。',
     paperName: '状态底座',
-    paperDesc: '顶部导航配全宽会话流，恢复、余额和 Paseo 状态收在底部。',
+    paperDesc: '顶部导航配全宽会话流，恢复、余额和 Bridge 状态收在底部。',
     signalName: '信号紧凑',
     signalDesc: '冷白高密度布局，状态和快捷操作一眼可见。',
     cleanTag: '导航 + 会话流 + 状态轨',
@@ -2579,12 +2564,12 @@ function PrototypeCanvas({ id, language }: { id: PrototypeId; language: GalleryL
       <aside className="atlas-context">
         <div className="atlas-context-head"><div><span>{id === 'mist' ? (language === 'zh' ? '会话详情' : 'Session detail') : (language === 'zh' ? '实时状态' : 'Live status')}</span><h3>{id === 'mist' ? rows[0].title : (language === 'zh' ? '运行正常' : 'Running normally')}</h3></div></div>
         <div className="atlas-detail-copy"><span className="atlas-detail-state"><i />{t('active')}</span><p>{rows[0].preview}</p></div>
-        <div className="atlas-context-section"><span>{language === 'zh' ? '恢复保护' : 'Recovery guard'}</span><div className="atlas-status-line"><i className="green" /><span><strong>{language === 'zh' ? '自动继续已开启' : 'Auto-continue enabled'}</strong><small>{language === 'zh' ? '最多连续尝试 3 次' : 'Up to 3 consecutive attempts'}</small></span><b>{id === 'mist' ? '0/3' : 'ON'}</b></div><div className="atlas-status-line"><i className="yellow" /><span><strong>CC Switch</strong><small>Codex2API · gpt-5.6-sol</small></span><b>$18.42</b></div><div className="atlas-status-line"><i className="green" /><span><strong>Paseo</strong><small>{language === 'zh' ? '128 个会话已同步' : '128 sessions synced'}</small></span><Check size={14} /></div></div>
+        <div className="atlas-context-section"><span>{language === 'zh' ? '恢复保护' : 'Recovery guard'}</span><div className="atlas-status-line"><i className="green" /><span><strong>{language === 'zh' ? '自动继续已开启' : 'Auto-continue enabled'}</strong><small>{language === 'zh' ? '最多连续尝试 3 次' : 'Up to 3 consecutive attempts'}</small></span><b>{id === 'mist' ? '0/3' : 'ON'}</b></div><div className="atlas-status-line"><i className="yellow" /><span><strong>CC Switch</strong><small>Codex2API · gpt-5.6-sol</small></span><b>$18.42</b></div><div className="atlas-status-line"><i className="green" /><span><strong>Atlas Bridge</strong><small>{language === 'zh' ? '实时同步已开启' : 'Realtime sync enabled'}</small></span><Check size={14} /></div></div>
         <div className="atlas-context-section atlas-error"><span>{language === 'zh' ? '最近事件' : 'Latest event'}</span><strong>403 Forbidden</strong><p>{language === 'zh' ? '检测到余额不足时不会自动输入继续。' : 'Continue is never injected when balance is insufficient.'}</p></div>
         <button className="atlas-context-action"><Play size={13} fill="currentColor" />{t('resume')}</button>
       </aside>
     </div>
-    <footer className="atlas-status-dock"><div><i className="green" /><span><strong>{language === 'zh' ? '3 个会话运行中' : '3 sessions active'}</strong><small>{language === 'zh' ? '恢复监控正常' : 'Recovery watcher healthy'}</small></span></div><div><i className="yellow" /><span><strong>Codex2API · $18.42</strong><small>{language === 'zh' ? '余额正常' : 'Balance healthy'}</small></span></div><div><i className="green" /><span><strong>Paseo · 128</strong><small>{language === 'zh' ? '全部会话已同步' : 'All sessions synced'}</small></span></div><button><Play size={13} fill="currentColor" />{t('resume')}</button></footer>
+    <footer className="atlas-status-dock"><div><i className="green" /><span><strong>{language === 'zh' ? '3 个会话运行中' : '3 sessions active'}</strong><small>{language === 'zh' ? '恢复监控正常' : 'Recovery watcher healthy'}</small></span></div><div><i className="yellow" /><span><strong>Codex2API · $18.42</strong><small>{language === 'zh' ? '余额正常' : 'Balance healthy'}</small></span></div><div><i className="green" /><span><strong>Atlas Bridge</strong><small>{language === 'zh' ? '实时同步正常' : 'Realtime sync healthy'}</small></span></div><button><Play size={13} fill="currentColor" />{t('resume')}</button></footer>
   </div>
 }
 
