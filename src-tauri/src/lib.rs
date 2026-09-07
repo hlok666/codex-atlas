@@ -59,6 +59,7 @@ use windows_sys::Win32::{
 pub struct AppState {
     failure_counts: Arc<Mutex<HashMap<String, u8>>>,
     auto_continue: Arc<Mutex<bool>>,
+    recovery_max_attempts: Arc<Mutex<Option<u8>>>,
     runtime_cache: Arc<Mutex<RuntimeSessionCache>>,
     app_server: Arc<Mutex<Option<AppServerHandle>>>,
 }
@@ -68,6 +69,7 @@ impl Default for AppState {
         Self {
             failure_counts: Arc::new(Mutex::new(HashMap::new())),
             auto_continue: Arc::new(Mutex::new(true)),
+            recovery_max_attempts: Arc::new(Mutex::new(Some(3))),
             runtime_cache: Arc::new(Mutex::new(RuntimeSessionCache::default())),
             app_server: Arc::new(Mutex::new(None)),
         }
@@ -169,6 +171,17 @@ struct MobileBalanceCache {
 }
 
 static MOBILE_BALANCE_CACHE: OnceLock<Mutex<MobileBalanceCache>> = OnceLock::new();
+
+#[derive(Clone, Default)]
+struct ComputerUseVerificationCache {
+    helper_path: String,
+    codex_path: String,
+    checked_at_ms: i64,
+    success: bool,
+    error: Option<String>,
+}
+
+static COMPUTER_USE_VERIFICATION: OnceLock<Mutex<ComputerUseVerificationCache>> = OnceLock::new();
 
 #[derive(Default)]
 struct MobileMessageReceiptState {
@@ -519,6 +532,32 @@ pub struct CodexHookStatus {
     pub connected: bool,
     pub last_event_at_ms: i64,
     pub session_count: usize,
+    pub error: Option<String>,
+}
+
+/// Local Computer Use diagnostics. The model request may use a relay, but
+/// Sky's trusted RPC and native helper always stay on this machine.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerUseStatus {
+    pub supported: bool,
+    pub config_path: String,
+    pub runtime_root: Option<String>,
+    pub sky_package_path: Option<String>,
+    pub helper_path: Option<String>,
+    pub node_repl_command: Option<String>,
+    pub node_repl_configured: bool,
+    pub trusted_services_configured: bool,
+    pub trusted_sky_configured: bool,
+    pub native_pipe_enabled: bool,
+    pub native_pipe_directory_configured: bool,
+    pub native_pipe_available: bool,
+    pub stale_pipe_directory: bool,
+    pub helper_protocol_verified: bool,
+    pub transport: String,
+    pub verified: bool,
+    pub checked_at_ms: i64,
+    pub diagnostic: String,
     pub error: Option<String>,
 }
 
@@ -6478,6 +6517,422 @@ fn codex_config_path() -> PathBuf {
     codex_home().join("config.toml")
 }
 
+#[cfg(target_os = "windows")]
+fn find_sky_runtime() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+    let roots = [
+        local_app_data.join("OpenAI/Codex/runtimes/cua_node"),
+        local_app_data.join("OpenAI/Codex/runtimes"),
+    ];
+    let mut candidates = Vec::<(PathBuf, PathBuf, PathBuf, SystemTime)>::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .max_depth(8)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_dir() || entry.file_name() != "sky" {
+                continue;
+            }
+            let sky = entry.path().to_path_buf();
+            let Some(bin) = sky
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+            else {
+                continue;
+            };
+            let helper = sky.join("bin/windows/codex-computer-use.exe");
+            let node_repl = bin.join("node_repl.exe");
+            if !helper.is_file() || !node_repl.is_file() {
+                continue;
+            }
+            let modified = fs::metadata(&helper)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            candidates.push((sky, helper, bin, modified));
+        }
+    }
+    candidates.sort_by(|left, right| right.3.cmp(&left.3));
+    candidates
+        .into_iter()
+        .next()
+        .map(|(sky, helper, bin, _)| (sky, helper, bin))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_sky_runtime() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    None
+}
+
+fn trusted_services_json(config: &str) -> Option<Value> {
+    parse_toml_section_string(
+        config,
+        "mcp_servers.node_repl.env",
+        "NODE_REPL_TRUSTED_SERVICES",
+    )
+    .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_named_pipe_exists(value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let name = value.rsplit(['\\', '/']).next().unwrap_or(value).trim();
+    if name.is_empty() {
+        return false;
+    }
+    fs::read_dir(r"\\.\pipe\")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(name)
+        })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_named_pipe_exists(_value: Option<&str>) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn verify_computer_use_helper(helper: &Path, codex: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = Command::new(helper);
+    command
+        .args(["--parent-pid", &std::process::id().to_string()])
+        .env("CODEX_CLI_PATH", codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(0x08000000);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("start Computer Use helper: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Computer Use helper stdin is unavailable".to_string())?;
+    stdin
+        .write_all(b"{\"id\":1,\"method\":\"close\",\"params\":{},\"meta\":{\"x-oai-cua-request-budget-ms\":3000}}\n")
+        .map_err(|error| format!("send Computer Use helper probe: {error}"))?;
+    stdin
+        .flush()
+        .map_err(|error| format!("flush Computer Use helper probe: {error}"))?;
+    drop(stdin);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Computer Use helper stdout is unavailable".to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let result = reader
+            .read_line(&mut line)
+            .map(|_| line)
+            .map_err(|error| format!("read Computer Use helper probe: {error}"));
+        let _ = tx.send(result);
+    });
+    let response = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "Computer Use helper probe timed out".to_string())??;
+    let value = serde_json::from_str::<Value>(response.trim())
+        .map_err(|error| format!("Computer Use helper returned invalid JSON: {error}"))?;
+    let ok = value.get("id").and_then(Value::as_u64) == Some(1)
+        && value.get("ok").and_then(Value::as_bool) == Some(true);
+    if !ok {
+        return Err(value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Computer Use helper rejected the probe")
+            .to_string());
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn verify_computer_use_helper(_helper: &Path, _codex: &Path) -> Result<(), String> {
+    Err("Computer Use native helper verification is only available on Windows".to_string())
+}
+
+fn cached_computer_use_helper_verification(
+    helper: Option<&Path>,
+    codex: &Path,
+) -> (bool, Option<String>, i64) {
+    let Some(helper) = helper else {
+        return (
+            false,
+            Some("Computer Use helper executable is missing".to_string()),
+            0,
+        );
+    };
+    let helper_text = helper.to_string_lossy().to_string();
+    let codex_text = codex.to_string_lossy().to_string();
+    let now = now_ms();
+    let cache = COMPUTER_USE_VERIFICATION
+        .get_or_init(|| Mutex::new(ComputerUseVerificationCache::default()));
+    if let Ok(value) = cache.lock() {
+        if value.helper_path == helper_text
+            && value.codex_path == codex_text
+            && value.checked_at_ms > 0
+            && now.saturating_sub(value.checked_at_ms) < 5 * 60 * 1000
+        {
+            return (value.success, value.error.clone(), value.checked_at_ms);
+        }
+    }
+    let result = verify_computer_use_helper(helper, codex);
+    let (success, error) = match result {
+        Ok(()) => (true, None),
+        Err(error) => (false, Some(error)),
+    };
+    if let Ok(mut value) = cache.lock() {
+        *value = ComputerUseVerificationCache {
+            helper_path: helper_text,
+            codex_path: codex_text,
+            checked_at_ms: now,
+            success,
+            error: error.clone(),
+        };
+    }
+    (success, error, now)
+}
+
+fn computer_use_status_from_config() -> ComputerUseStatus {
+    let config_path = codex_config_path();
+    let config = fs::read_to_string(&config_path).unwrap_or_default();
+    let runtime = find_sky_runtime();
+    let sky_package_path = runtime.as_ref().map(|(sky, _, _)| sky.clone());
+    let helper_path = runtime.as_ref().map(|(_, helper, _)| helper.clone());
+    let runtime_root = runtime.as_ref().map(|(_, _, bin)| bin.clone());
+    let node_repl_command = parse_toml_section_string(&config, "mcp_servers.node_repl", "command");
+    let node_repl_configured = node_repl_command
+        .as_deref()
+        .map(|value| Path::new(value).is_file())
+        .unwrap_or(false);
+    let trusted_services = trusted_services_json(&config);
+    let trusted_services_configured = trusted_services.is_some();
+    let trusted_sky_configured = trusted_services
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|services| services.get("sky"))
+        .and_then(Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let native_pipe_enabled =
+        parse_toml_section_string(&config, "mcp_servers.node_repl.env", "SKY_CUA_NATIVE_PIPE")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let pipe_directory = parse_toml_section_string(
+        &config,
+        "mcp_servers.node_repl.env",
+        "SKY_CUA_NATIVE_PIPE_DIRECTORY",
+    );
+    let native_pipe_directory_configured = pipe_directory.is_some();
+    let native_pipe_available = windows_named_pipe_exists(pipe_directory.as_deref());
+    // A pipe name contains a per-session UUID. It is only stale when the
+    // corresponding named pipe no longer exists on this machine.
+    let stale_pipe_directory = native_pipe_directory_configured && !native_pipe_available;
+    let supported = cfg!(target_os = "windows");
+    let helper_present = helper_path
+        .as_deref()
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    let codex_path = PathBuf::from(codex_executable());
+    let (helper_protocol_verified, helper_error, helper_checked_at_ms) =
+        cached_computer_use_helper_verification(helper_path.as_deref(), &codex_path);
+    let transport = if native_pipe_enabled && native_pipe_available {
+        "native-pipe"
+    } else if !native_pipe_enabled {
+        "helper"
+    } else {
+        "unavailable"
+    };
+    let verified = supported
+        && helper_present
+        && helper_protocol_verified
+        && node_repl_configured
+        && trusted_sky_configured
+        && ((!native_pipe_enabled) || native_pipe_available);
+    let diagnostic = if !supported {
+        "Computer Use native helper is currently implemented for Windows".to_string()
+    } else if runtime.is_none() {
+        "Codex CUA runtime with the Sky native helper was not found".to_string()
+    } else if !node_repl_configured {
+        "node_repl is missing or points to a non-existent executable".to_string()
+    } else if !trusted_sky_configured {
+        "NODE_REPL_TRUSTED_SERVICES does not include sky".to_string()
+    } else if !helper_protocol_verified {
+        helper_error
+            .clone()
+            .unwrap_or_else(|| "Computer Use helper protocol probe failed".to_string())
+    } else if native_pipe_enabled && !native_pipe_available {
+        "The configured Computer Use named pipe is not active; repair will switch to the helper transport".to_string()
+    } else if stale_pipe_directory {
+        "Trusted RPC is configured; the stale session pipe will be refreshed by the next Codex session".to_string()
+    } else {
+        "Local Sky Trusted RPC is configured; model traffic may continue through the active relay"
+            .to_string()
+    };
+    ComputerUseStatus {
+        supported,
+        config_path: config_path.to_string_lossy().to_string(),
+        runtime_root: runtime_root.map(|path| path.to_string_lossy().to_string()),
+        sky_package_path: sky_package_path.map(|path| path.to_string_lossy().to_string()),
+        helper_path: helper_path.map(|path| path.to_string_lossy().to_string()),
+        node_repl_command,
+        node_repl_configured,
+        trusted_services_configured,
+        trusted_sky_configured,
+        native_pipe_enabled,
+        native_pipe_directory_configured,
+        native_pipe_available,
+        stale_pipe_directory,
+        helper_protocol_verified,
+        transport: transport.to_string(),
+        verified,
+        checked_at_ms: helper_checked_at_ms.max(now_ms()),
+        diagnostic,
+        error: helper_error,
+    }
+}
+
+fn repair_computer_use_now() -> Result<ComputerUseStatus, String> {
+    if !cfg!(target_os = "windows") {
+        let mut status = computer_use_status_from_config();
+        status.error = Some("Computer Use native repair is only available on Windows".to_string());
+        return Ok(status);
+    }
+    let Some((sky, helper, bin)) = find_sky_runtime() else {
+        return Err(
+            "Codex CUA runtime was not found. Reinstall or update Codex for Windows first"
+                .to_string(),
+        );
+    };
+    let node_repl = bin.join("node_repl.exe");
+    let node = bin.join("node.exe");
+    let config_path = codex_config_path();
+    let original = fs::read_to_string(&config_path).unwrap_or_default();
+    let mut updated = original.clone();
+    updated = upsert_toml_section_string(
+        &updated,
+        "mcp_servers.node_repl",
+        "command",
+        &node_repl.to_string_lossy(),
+    );
+    let trusted = trusted_services_json(&original)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let mut trusted = trusted;
+    trusted.insert(
+        "sky".to_string(),
+        Value::String("@oai/sky/service".to_string()),
+    );
+    let trusted_json = serde_json::to_string(&Value::Object(trusted))
+        .map_err(|error| format!("serialize Trusted RPC services: {error}"))?;
+    updated = upsert_toml_section_string(
+        &updated,
+        "mcp_servers.node_repl.env",
+        "NODE_REPL_TRUSTED_SERVICES",
+        &trusted_json,
+    );
+    updated = upsert_toml_section_string(
+        &updated,
+        "mcp_servers.node_repl.env",
+        "NODE_REPL_NODE_MODULE_DIRS",
+        &bin.join("node_modules").to_string_lossy(),
+    );
+    if node.is_file() {
+        updated = upsert_toml_section_string(
+            &updated,
+            "mcp_servers.node_repl.env",
+            "NODE_REPL_NODE_PATH",
+            &node.to_string_lossy(),
+        );
+    }
+    updated = upsert_toml_section_string(
+        &updated,
+        "mcp_servers.node_repl.env",
+        "CODEX_CLI_PATH",
+        &codex_executable(),
+    );
+    let existing_pipe = parse_toml_section_string(
+        &original,
+        "mcp_servers.node_repl.env",
+        "SKY_CUA_NATIVE_PIPE_DIRECTORY",
+    );
+    let native_pipe_active = windows_named_pipe_exists(existing_pipe.as_deref());
+    if native_pipe_active {
+        updated = upsert_toml_section_string(
+            &updated,
+            "mcp_servers.node_repl.env",
+            "SKY_CUA_NATIVE_PIPE",
+            "1",
+        );
+    } else {
+        // Never persist the UUID of a previous helper process. With no active
+        // session pipe Sky falls back to its official local helper transport.
+        let (without_pipe, _) = remove_toml_section_key(
+            &updated,
+            "mcp_servers.node_repl.env",
+            "SKY_CUA_NATIVE_PIPE_DIRECTORY",
+        );
+        let (without_toggle, _) = remove_toml_section_key(
+            &without_pipe,
+            "mcp_servers.node_repl.env",
+            "SKY_CUA_NATIVE_PIPE",
+        );
+        updated = without_toggle;
+    }
+    if updated != original {
+        if config_path.exists() {
+            let _ = backup_file(&config_path)?;
+        }
+        write_text_atomically(&config_path, &updated)?;
+    }
+    let mut status = computer_use_status_from_config();
+    if !status.verified {
+        status.error = Some(status.diagnostic.clone());
+    }
+    // Keep these paths in the response even if the config was not readable by
+    // the post-write probe, so the user can diagnose a permissions issue.
+    status.sky_package_path = Some(sky.to_string_lossy().to_string());
+    status.helper_path = Some(helper.to_string_lossy().to_string());
+    Ok(status)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_computer_use_status() -> ComputerUseStatus {
+    computer_use_status_from_config()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn repair_computer_use() -> Result<ComputerUseStatus, String> {
+    repair_computer_use_now()
+}
+
 fn start_mobile_tunnel_with_retry(settings: MobileBridgeSettings) {
     let mut last_error = None;
     for attempt in 0..3 {
@@ -7912,6 +8367,40 @@ fn executable_candidate(name: &str) -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
+        // The native Codex for Windows binary is the authoritative CLI. npm
+        // shims are retained as a fallback for older installations, but using
+        // the real binary avoids a PowerShell/npm process chain hiding the
+        // session from the runtime monitor.
+        if name.eq_ignore_ascii_case("codex") {
+            if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+                let root = local_app_data.join("OpenAI/Codex/bin");
+                let mut candidates = Vec::<(PathBuf, SystemTime)>::new();
+                if root.exists() {
+                    for entry in WalkDir::new(root)
+                        .follow_links(false)
+                        .max_depth(3)
+                        .into_iter()
+                        .filter_map(Result::ok)
+                    {
+                        if entry.file_type().is_file()
+                            && entry
+                                .file_name()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case("codex.exe")
+                        {
+                            let modified = fs::metadata(entry.path())
+                                .and_then(|metadata| metadata.modified())
+                                .unwrap_or(UNIX_EPOCH);
+                            candidates.push((entry.path().to_path_buf(), modified));
+                        }
+                    }
+                }
+                candidates.sort_by(|left, right| right.1.cmp(&left.1));
+                if let Some((path, _)) = candidates.into_iter().next() {
+                    return Some(path);
+                }
+            }
+        }
         let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
         if let Some(app_data) = app_data {
             for suffix in [".exe", ".cmd", ".ps1"] {
@@ -9385,6 +9874,28 @@ fn set_auto_continue(state: State<'_, AppState>, enabled: bool) -> Result<bool, 
             .clear();
     }
     Ok(enabled)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_recovery_max_attempts(
+    state: State<'_, AppState>,
+    max_attempts: Option<u64>,
+) -> Result<Option<u8>, String> {
+    let normalized = max_attempts.map(|value| value.clamp(1, 1000) as u8);
+    let mut limit = state
+        .recovery_max_attempts
+        .lock()
+        .map_err(|_| "recovery state unavailable".to_string())?;
+    *limit = normalized;
+    // A changed policy starts a fresh consecutive-failure window. Existing
+    // session output remains visible, but the next recoverable error gets the
+    // newly selected budget.
+    state
+        .failure_counts
+        .lock()
+        .map_err(|_| "recovery state unavailable".to_string())?
+        .clear();
+    Ok(normalized)
 }
 
 #[tauri::command]
@@ -10963,6 +11474,82 @@ fn upsert_root_toml_string(config: &str, key: &str, value: &str) -> String {
         updated.push('\n');
     }
     updated
+}
+
+fn upsert_toml_section_string(config: &str, section: &str, key: &str, value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let replacement = format!("{key} = \"{escaped}\"");
+    let expected = toml_section_parts(section).unwrap_or_default();
+    let mut lines = config.lines().map(ToString::to_string).collect::<Vec<_>>();
+    let section_start = lines.iter().position(|line| {
+        toml_section_parts(toml_line_without_comment(line).trim())
+            .map(|parts| parts == expected)
+            .unwrap_or(false)
+    });
+    if let Some(start) = section_start {
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| toml_line_without_comment(line).trim().starts_with('['))
+            .map(|(index, _)| index)
+            .unwrap_or(lines.len());
+        if let Some(index) = (start + 1..end).find(|index| {
+            lines[*index]
+                .split_once('=')
+                .map(|(candidate, _)| candidate.trim() == key)
+                .unwrap_or(false)
+        }) {
+            lines[index] = replacement;
+        } else {
+            lines.insert(end, replacement);
+        }
+    } else {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("[{section}]"));
+        lines.push(replacement);
+    }
+    let mut updated = lines.join("\n");
+    if config.ends_with('\n') || !updated.is_empty() {
+        updated.push('\n');
+    }
+    updated
+}
+
+fn remove_toml_section_key(config: &str, section: &str, key: &str) -> (String, bool) {
+    let expected = toml_section_parts(section).unwrap_or_default();
+    let mut lines = config.lines().map(ToString::to_string).collect::<Vec<_>>();
+    let mut active = false;
+    let mut removed = false;
+    lines.retain(|line| {
+        let trimmed = toml_line_without_comment(line).trim();
+        if trimmed.starts_with('[') {
+            active = toml_section_parts(trimmed)
+                .map(|parts| parts == expected)
+                .unwrap_or(false);
+            return true;
+        }
+        if active
+            && trimmed
+                .split_once('=')
+                .map(|(candidate, _)| candidate.trim() == key)
+                .unwrap_or(false)
+        {
+            removed = true;
+            return false;
+        }
+        true
+    });
+    if !removed {
+        return (config.to_string(), false);
+    }
+    let mut updated = lines.join("\n");
+    if config.ends_with('\n') || !updated.is_empty() {
+        updated.push('\n');
+    }
+    (updated, true)
 }
 
 fn usage_path_from_meta(meta: &Value) -> Option<String> {
@@ -13436,6 +14023,7 @@ pub fn run() {
             send_floating_message,
             send_terminal_input,
             set_auto_continue,
+            set_recovery_max_attempts,
             launch_external_app,
             open_url,
             open_workspace,
@@ -13471,7 +14059,9 @@ pub fn run() {
             update_skills,
             delete_skills,
             get_codex_hook_status,
-            install_codex_hook
+            install_codex_hook,
+            get_computer_use_status,
+            repair_computer_use
         ])
         .run(tauri::generate_context!())
         .expect("error while running Codex Atlas");
@@ -14009,6 +14599,33 @@ mod runtime_probe_tests {
         );
         assert_eq!(changed.status, "error");
         assert_eq!(changed.remaining, None);
+    }
+
+    #[test]
+    fn computer_use_repair_updates_only_local_node_repl_settings() {
+        let config = "model_provider = \"custom\"\nbase_url = \"http://127.0.0.1:15721/v1\"\n\n[model_providers.custom]\nbase_url = \"https://relay.example/v1\"\n\n[mcp_servers.node_repl]\ncommand = \"old-node-repl.exe\"\n\n[mcp_servers.node_repl.env]\nNODE_REPL_TRUSTED_SERVICES = \"{\\\"browser\\\":\\\"browser-service\\\"}\"\nSKY_CUA_NATIVE_PIPE_DIRECTORY = \"\\\\.\\\\pipe\\\\codex-computer-use-old\"\n";
+        let updated = upsert_toml_section_string(
+            config,
+            "mcp_servers.node_repl.env",
+            "SKY_CUA_NATIVE_PIPE",
+            "1",
+        );
+        let updated = upsert_toml_section_string(
+            &updated,
+            "mcp_servers.node_repl.env",
+            "NODE_REPL_TRUSTED_SERVICES",
+            r#"{"browser":"browser-service","sky":"@oai/sky/service"}"#,
+        );
+        let (updated, removed) = remove_toml_section_key(
+            &updated,
+            "mcp_servers.node_repl.env",
+            "SKY_CUA_NATIVE_PIPE_DIRECTORY",
+        );
+        assert!(removed);
+        assert!(updated.contains("base_url = \"https://relay.example/v1\""));
+        assert!(updated.contains("SKY_CUA_NATIVE_PIPE = \"1\""));
+        assert!(updated.contains("@oai/sky/service"));
+        assert!(!updated.contains("SKY_CUA_NATIVE_PIPE_DIRECTORY"));
     }
 
     #[test]

@@ -4,10 +4,10 @@ import { listen as tauriListen } from '@tauri-apps/api/event'
 export type CodexFailureKind = 'insufficient-balance' | 'retryable' | 'fatal'
 
 export type RecoveryDecision =
-  | { action: 'pause-balance'; kind: 'insufficient-balance'; reason: string; attempt: number; maxAttempts: number }
-  | { action: 'continue'; kind: 'retryable'; reason: string; attempt: number; maxAttempts: number }
-  | { action: 'stop'; kind: CodexFailureKind; reason: string; attempt: number; maxAttempts: number }
-  | { action: 'watch'; kind: CodexFailureKind; reason: string; attempt: number; maxAttempts: number }
+  | { action: 'pause-balance'; kind: 'insufficient-balance'; reason: string; attempt: number; maxAttempts: number | null }
+  | { action: 'continue'; kind: 'retryable'; reason: string; attempt: number; maxAttempts: number | null }
+  | { action: 'stop'; kind: CodexFailureKind; reason: string; attempt: number; maxAttempts: number | null }
+  | { action: 'watch'; kind: CodexFailureKind; reason: string; attempt: number; maxAttempts: number | null }
 
 export type CcSwitchBalanceRequest = {
   baseUrl: string
@@ -135,6 +135,28 @@ export type CodexHookStatus = {
   lastEventAtMs: number
   sessionCount: number
   error?: string
+}
+
+export type ComputerUseStatus = {
+  supported: boolean
+  configPath: string
+  runtimeRoot?: string | null
+  skyPackagePath?: string | null
+  helperPath?: string | null
+  nodeReplCommand?: string | null
+  nodeReplConfigured: boolean
+  trustedServicesConfigured: boolean
+  trustedSkyConfigured: boolean
+  nativePipeEnabled: boolean
+  nativePipeDirectoryConfigured: boolean
+  nativePipeAvailable: boolean
+  stalePipeDirectory: boolean
+  helperProtocolVerified: boolean
+  transport: string
+  verified: boolean
+  checkedAtMs: number
+  diagnostic: string
+  error?: string | null
 }
 
 export type CodexModelOption = {
@@ -323,27 +345,36 @@ export function classifyCodexFailure(errorText: string): CodexFailureKind {
   // Gateways often return a prose-only limit error without an HTTP status.
   // Treat those responses like 429s so the existing bounded auto-continue
   // guard can retry the live session instead of leaving it waiting forever.
-  if (/(408|409|425|429|500|502|503|504|rate\s*limit|concurrency\s+limit|limit\s+exceeded|too\s+many\s+requests|please\s+retry\s+later|retry\s+after|timeout|timed out|temporar)/i.test(text)) {
+  if (/(408|409|425|429|500|502|503|504|rate\s*limit|concurrency\s+limit|limit\s+exceeded|too\s+many\s+requests|please\s+retry\s+later|retry\s+after|timeout|timed out|temporar|stream\s+disconnected|stream\s+disconnect|servers?\s+are\s+currently\s+overloaded|server(?:s)?\s+overloaded|service\s+overloaded|system\s+overloaded|try\s+again\s+later)/i.test(text)) {
     return 'retryable'
   }
   return 'fatal'
 }
 
-export function decideRecovery(errorText: string, consecutiveFailures: number, autoContinue: boolean, maxAttempts = 3): RecoveryDecision {
+/** Normalize the user-facing retry setting. `null` means unlimited retries. */
+export function normalizeRecoveryAttempts(value: unknown, fallback: number | null = 3): number | null {
+  if (value === null || value === '' || value === undefined) return null
+  const numeric = typeof value === 'number' ? value : Number(String(value).trim())
+  if (!Number.isFinite(numeric)) return fallback
+  return Math.max(1, Math.min(1000, Math.floor(numeric)))
+}
+
+export function decideRecovery(errorText: string, consecutiveFailures: number, autoContinue: boolean, maxAttempts: number | null = 3): RecoveryDecision {
   const kind = classifyCodexFailure(errorText)
+  const limit = normalizeRecoveryAttempts(maxAttempts, 3)
   if (kind === 'insufficient-balance') {
-    return { action: 'pause-balance', kind, reason: errorText, attempt: consecutiveFailures, maxAttempts }
+    return { action: 'pause-balance', kind, reason: errorText, attempt: consecutiveFailures, maxAttempts: limit }
   }
   const attempt = consecutiveFailures + 1
-  // `consecutiveFailures` counts continue attempts already sent. Allow the
-  // configured third continue, then stop when the next failure arrives.
-  if (kind === 'retryable' && autoContinue && consecutiveFailures < maxAttempts) {
-    return { action: 'continue', kind, reason: errorText, attempt, maxAttempts }
+  // `consecutiveFailures` counts continue attempts already sent. Unlimited
+  // mode keeps sending continue until the user disables auto-continue.
+  if (kind === 'retryable' && autoContinue && (limit === null || consecutiveFailures < limit)) {
+    return { action: 'continue', kind, reason: errorText, attempt, maxAttempts: limit }
   }
-  if (consecutiveFailures >= maxAttempts) {
-    return { action: 'stop', kind, reason: errorText, attempt: maxAttempts, maxAttempts }
+  if (limit !== null && consecutiveFailures >= limit) {
+    return { action: 'stop', kind, reason: errorText, attempt: limit, maxAttempts: limit }
   }
-  return { action: 'watch', kind, reason: errorText, attempt, maxAttempts }
+  return { action: 'watch', kind, reason: errorText, attempt, maxAttempts: limit }
 }
 
 type TauriBridge = {
@@ -443,6 +474,14 @@ export async function getCodexHookStatus(): Promise<CodexHookStatus | null> {
 
 export async function installCodexHook(): Promise<CodexHookStatus | null> {
   return invokeDesktop<CodexHookStatus>('install_codex_hook')
+}
+
+export async function getComputerUseStatus(): Promise<ComputerUseStatus | null> {
+  return invokeDesktop<ComputerUseStatus>('get_computer_use_status')
+}
+
+export async function repairComputerUse(): Promise<ComputerUseStatus | null> {
+  return invokeDesktop<ComputerUseStatus>('repair_computer_use')
 }
 
 /** Searches indexed metadata and, when needed, the raw JSONL conversation body. */
@@ -703,6 +742,11 @@ export async function sendTerminalInput(sessionId: string, input: string): Promi
 
 export async function setDesktopAutoContinue(enabled: boolean): Promise<boolean | null> {
   return invokeDesktop<boolean>('set_auto_continue', { enabled })
+}
+
+/** Synchronizes the retry guard with the native monitor. `null` is unlimited. */
+export async function setDesktopRecoveryAttempts(maxAttempts: number | null): Promise<number | null> {
+  return invokeDesktop<number | null>('set_recovery_max_attempts', { maxAttempts })
 }
 
 export async function setFloatingAlwaysOnTop(enabled: boolean): Promise<boolean | null> {

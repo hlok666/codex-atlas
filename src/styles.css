@@ -1244,6 +1244,22 @@ html.floating-window body { color: #171a17; }
 .app-shell .hook-status-line strong { overflow: hidden; color: var(--app-ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .app-shell .hook-status-line small { overflow: hidden; color: var(--app-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .app-shell .health-light.red { background: #d76868; box-shadow: 0 0 0 4px rgba(215,104,104,.1); }
+.app-shell .computer-use-panel { grid-column: 1 / -1; min-height: 0; }
+.app-shell .computer-use-panel.has-warning { border-color: #eadcb8; }
+.app-shell .computer-use-status-line { min-height: 58px; display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--app-line); border-bottom: 1px solid var(--app-line); }
+.app-shell .computer-use-status-line > div { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
+.app-shell .computer-use-status-line strong { color: var(--app-ink); font-size: 13px; }
+.app-shell .computer-use-status-line small { overflow: hidden; color: var(--app-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .computer-use-checks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+.app-shell .computer-use-checks span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 8px; border: 1px solid var(--app-line); border-radius: 8px; color: var(--app-muted); font-size: 10px; }
+.app-shell .computer-use-checks i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #c7cfca; }
+.app-shell .computer-use-checks span.ok { color: #4d8750; border-color: #cfe8c9; background: #f4fbf2; }
+.app-shell .computer-use-checks span.ok i { background: #62b967; }
+.app-shell .computer-use-path { display: block; overflow: hidden; margin-bottom: 10px; color: var(--app-secondary); font: 11px/1.4 'Geist Mono', 'Cascadia Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .warning-text { color: #96722a; }
+@media (max-width: 760px) {
+  .app-shell .computer-use-checks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 /* Prototype pages use the same persistent navigation behavior. */
 .immersive-picker {

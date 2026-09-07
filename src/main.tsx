@@ -30,6 +30,7 @@ import {
   LoaderCircle,
   LogOut,
   Maximize2,
+  Monitor,
   Minus,
   Minimize2,
   MoreHorizontal,
@@ -59,9 +60,9 @@ import {
   X,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, exitCodexSession, floatingWindowHeartbeat, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getCodexRuntimeDefaults, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, openExternalUrl, openWorkspace as openWorkspacePath, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
+import { checkDesktopUpdate, checkSkillUpdates, classifyCodexFailure, closeDesktopWindow, configureMobileBridge, createCodexSession, decideRecovery, deleteSkills, detectDesktopPlatform, downloadDesktopUpdate, exitCodexSession, floatingWindowHeartbeat, getCcSwitchBalance, getCcSwitchProviderBalances, getCodexHookStatus, getCodexInfo, getCodexModels, getCodexRuntimeDefaults, getComputerUseStatus, getMobileBridgeConfig, getServerTunnelProgress, getServerTunnelStatus, getSkillDetail, getVoiceServiceProgress, getVoiceServiceStatus, inputCodexContinue, installCodexHook, installDesktopUpdate, installServerTunnel, installVoiceService, invokeDesktop, listCodexSessions, listInstalledSkills, listRunningCodexSessions, listenDesktopEvent, minimizeDesktopWindow, normalizeRecoveryAttempts, openExternalUrl, openWorkspace as openWorkspacePath, repairComputerUse, resumeCodexSession, searchCodexSessions, sendCodexContinue, sendFloatingMessage, sendTerminalInput, setCodexDefaults, setDesktopAutoContinue, setDesktopRecoveryAttempts, setFloatingAlwaysOnTop, setFloatingWindowShape, setFloatingWindowSize, setFloatingWindowVisible, setSkillsEnabled, showMainDesktopWindow, startDesktopWindowDrag, startMobileBridgeTunnel, startServerTunnel, stopMobileBridgeTunnel, stopServerTunnel, toggleMaximizeDesktopWindow, updateCodex, updateSkills } from './lib/atlasBridge'
 import type { DesktopUpdateInfo, DesktopUpdateProgress } from './lib/atlasBridge'
-import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
+import type { CcSwitchProviderBalance, CodexHookStatus, CodexModelOption, ComputerUseStatus, DesktopCommandError, DesktopSessionRecord, FloatingAttachment, FloatingInputMode, MobileBridgeConfig, MobileBridgeSettings, NewCodexSessionRequest, RunningCodexSession, ServerTunnelInstallRequest, ServerTunnelProgress, ServerTunnelStatus, SkillDetail, SkillRecord, VoiceServiceProgress, VoiceServiceStatus } from './lib/atlasBridge'
 import { FloatingSessionTargetLock } from './lib/floatingSessionTarget'
 import { appendFloatingReply, splitFloatingReply } from './lib/floatingReply'
 import { ATLAS_GITHUB_REPOSITORY, ATLAS_GITHUB_URL, ATLAS_RELEASES_URL } from './lib/projectMeta'
@@ -274,18 +275,18 @@ const uiText = {
     skillsDescription: '管理每个新 Codex 会话可使用的能力。', syncRegistry: '同步技能库', installed: '已安装技能', enabled: '已启用', localSkills: '本地技能',
     skillOptions: '技能选项', enable: '启用', disable: '停用',
     errorRecovery: '异常恢复', recoveryMonitor: '恢复监控', monitorDescription: '监控 Codex 输出，分类错误，并只在保护规则允许时继续。',
-    liveWatcher: '实时监控', guardrailsActive: '恢复保护已开启', balanceBlocked: '余额不足错误会被阻止；其他临时错误最多自动继续 3 次。',
+    liveWatcher: '实时监控', guardrailsActive: '恢复保护已开启', balanceBlocked: '余额不足错误会被阻止；其他临时错误按重试上限自动继续。',
     decisionRules: '决策规则', automaticContinuePolicy: '自动继续策略', balanceRule: '403 + 余额不足', balanceRuleDetail: '匹配供应商响应，暂停会话，不注入 continue。',
-    transientRule: '临时 5xx / 超时', transientRuleDetail: '向活跃 Codex 标准输入发送 continue。', threeFailuresRule: '连续三次失败',
-    threeFailuresDetail: '停止自动化并发送桌面提醒。', stop: '停止', retry: '重试', desktopNotifications: '桌面通知',
-    notifyOnStop: '余额暂停或 3/3 失败时提醒', autoResumeBalance: '余额恢复后自动继续', autoResumeBalanceDescription: '供应商余额重新大于 0 时向已暂停会话发送继续并回车', liveIncidents: '实时事件', sessionsNeedAttention: '个会话需要处理', watchingRecoverable: '正在等待可恢复错误', balance: '余额', failed: '失败',
+    transientRule: '临时错误 / 断流', transientRuleDetail: '向活跃 Codex 标准输入发送 continue。', threeFailuresRule: '连续失败上限',
+    threeFailuresDetail: '达到上限后停止自动化并发送桌面提醒。', stop: '停止', retry: '重试', desktopNotifications: '桌面通知',
+    notifyOnStop: '余额暂停或达到失败上限时提醒', autoResumeBalance: '余额恢复后自动继续', autoResumeBalanceDescription: '供应商余额重新大于 0 时向已暂停会话发送继续并回车', liveIncidents: '实时事件', sessionsNeedAttention: '个会话需要处理', watchingRecoverable: '正在等待可恢复错误', balance: '余额', failed: '失败',
     inspectIncident: '查看事件', continueAction: '继续', recheck: '重新检查', lastEvent: '最近事件', watcherHealthy: '监控正常',
     connections: '连接', localTools: '本地服务', integrationsDescription: '供应商余额、Bridge 与本地服务状态。', refresh: '刷新', providerBalanceMonitor: '供应商余额监控',
     providersConnected: '个供应商已连接', readyToCheck: '等待检查', balanceRegistry: '余额来自本地供应商注册表', lastChecked: '上次检查', check: '检查',
     refreshProviderBalance: '刷新供应商余额', insufficientBalance: '余额不足时会暂停自动恢复。',
     settings: '设置', runtimeTitle: '运行设置', runtimeDescription: '设置新 Codex 会话的启动方式。', save: '保存', sessionDefaults: '会话默认值',
     appliedNewResumes: '应用于新 resume', permissionField: '权限', scanOnLaunch: '启动时扫描', refreshOnLaunch: 'Atlas 启动时刷新本地索引',
-    recoveryGuardrails: '恢复保护', pauseBalance: '暂停余额不足并在 3 次重试后停止', on: '开启', off: '关闭', desktopStatusObject: '桌面状态组件', keepObject: '保持小组件置顶显示',
+    recoveryGuardrails: '恢复保护', pauseBalance: '暂停余额不足；临时错误按重试上限处理', retryLimit: '自动重试上限', retryLimitDescription: '输入次数后停止；留空表示无限重试', retryLimitPlaceholder: '留空 = 无限', unlimited: '无限', on: '开启', off: '关闭', desktopStatusObject: '桌面状态组件', keepObject: '保持小组件置顶显示',
     codexVersion: 'Codex 版本', detectedCli: '从已安装的 CLI 检测', installedBadge: '已安装', detecting: '检测中…', readyResume: '可执行 resume 命令', checkUpdates: '用 npm 更新', atlasProject: 'Codex Atlas', atlasProjectDescription: '项目主页与 GitHub Release', openProject: '打开项目', openRelease: '打开 Release',
     packageManager: 'npm install -g @openai/codex@latest', codexStatusHook: 'Codex 状态 Hook', officialEvents: '优先读取官方事件，再用进程与 rollout 兜底',
     voiceService: 'Atlas 语音服务', voiceServiceDescription: 'Atlas 本地 STT / TTS', voiceServiceReady: '语音服务已就绪', voiceServiceMissing: '尚未安装本地语音', voiceServiceDaemonStopped: 'Atlas 语音服务未运行', voiceServiceInstalling: '正在安装…', installVoiceService: '安装', repairVoiceService: '修复', voiceServiceDaemon: 'Atlas voice daemon', voiceServiceModels: '语音模型', voiceServiceProvider: '本地模型 · Parakeet + Kokoro', voiceServiceChecking: '检测中…', voiceServiceInstallFailed: '语音服务安装失败',
@@ -322,18 +323,18 @@ const uiText = {
     skillsDescription: 'Control the capabilities available to every new Codex session.', syncRegistry: 'Sync registry', installed: 'installed skills', enabled: 'enabled', localSkills: 'local skills',
     skillOptions: 'Skill options', enable: 'enable', disable: 'disable',
     errorRecovery: 'ERROR RECOVERY', recoveryMonitor: 'Recovery monitor', monitorDescription: 'Watch Codex output, classify failures, and continue only when the guardrails allow it.',
-    liveWatcher: 'Live watcher', guardrailsActive: 'Recovery guardrails are active', balanceBlocked: '403 balance failures are blocked. Other transient errors can continue up to 3 times.',
+    liveWatcher: 'Live watcher', guardrailsActive: 'Recovery guardrails are active', balanceBlocked: '403 balance failures are blocked. Other transient errors follow the retry limit.',
     decisionRules: 'DECISION RULES', automaticContinuePolicy: 'Automatic continue policy', balanceRule: '403 + insufficient balance', balanceRuleDetail: 'Match provider response, pause session, never inject continue.',
-    transientRule: 'Transient 5xx / timeout', transientRuleDetail: 'Send continue to the active Codex stdin.', threeFailuresRule: 'Three consecutive failures',
-    threeFailuresDetail: 'Stop automation and surface a desktop alert.', stop: 'STOP', retry: 'RETRY', desktopNotifications: 'Desktop notifications',
-    notifyOnStop: 'Notify on balance pause and 3/3 failure stop', autoResumeBalance: 'Auto-continue after balance recovery', autoResumeBalanceDescription: 'Type continue and press Enter when the current provider balance is above zero again', liveIncidents: 'LIVE INCIDENTS', sessionsNeedAttention: 'sessions need attention', watchingRecoverable: 'Watching for recoverable errors', balance: 'BALANCE', failed: 'FAILED',
+    transientRule: 'Transient errors / disconnects', transientRuleDetail: 'Send continue to the active Codex stdin.', threeFailuresRule: 'Consecutive failure limit',
+    threeFailuresDetail: 'Stop automation and surface a desktop alert at the configured limit.', stop: 'STOP', retry: 'RETRY', desktopNotifications: 'Desktop notifications',
+    notifyOnStop: 'Notify on balance pause or retry-limit stop', autoResumeBalance: 'Auto-continue after balance recovery', autoResumeBalanceDescription: 'Type continue and press Enter when the current provider balance is above zero again', liveIncidents: 'LIVE INCIDENTS', sessionsNeedAttention: 'sessions need attention', watchingRecoverable: 'Watching for recoverable errors', balance: 'BALANCE', failed: 'FAILED',
     inspectIncident: 'Inspect incident', continueAction: 'Continue', recheck: 'Recheck', lastEvent: 'Last event', watcherHealthy: 'watcher healthy',
     connections: 'CONNECTIONS', localTools: 'Local services', integrationsDescription: 'Provider balance, Bridge, and local service status.', refresh: 'Refresh', providerBalanceMonitor: 'Provider balance monitor',
     providersConnected: 'providers connected', readyToCheck: 'Ready to check', balanceRegistry: 'Balance is checked from the local provider registry', lastChecked: 'Last checked', check: 'Check',
     refreshProviderBalance: 'Refresh provider balance', insufficientBalance: 'Insufficient balance pauses automatic recovery.',
     settings: 'SETTINGS', runtimeTitle: 'Runtime', runtimeDescription: 'Choose how new Codex sessions start.', save: 'Save', sessionDefaults: 'Session defaults',
     appliedNewResumes: 'Applied to new resumes', permissionField: 'PERMISSION', scanOnLaunch: 'Scan on launch', refreshOnLaunch: 'Refresh the local index when Atlas opens',
-    recoveryGuardrails: 'Recovery guardrails', pauseBalance: 'Pause balance failures and stop after 3 retries', on: 'On', off: 'Off', desktopStatusObject: 'Desktop status object', keepObject: 'Keep the small status object above other apps',
+    recoveryGuardrails: 'Recovery guardrails', pauseBalance: 'Pause balance failures; transient errors follow the retry limit', retryLimit: 'Automatic retry limit', retryLimitDescription: 'Stop after this many attempts; leave blank for unlimited retries', retryLimitPlaceholder: 'Blank = unlimited', unlimited: 'Unlimited', on: 'On', off: 'Off', desktopStatusObject: 'Desktop status object', keepObject: 'Keep the small status object above other apps',
     codexVersion: 'Codex version', detectedCli: 'Detected from the installed CLI', installedBadge: 'INSTALLED', detecting: 'Detecting…', readyResume: 'Ready for resume commands', checkUpdates: 'Update with npm', atlasProject: 'Codex Atlas', atlasProjectDescription: 'Project home and GitHub releases', openProject: 'Open project', openRelease: 'Open Release',
     packageManager: 'npm install -g @openai/codex@latest', codexStatusHook: 'Codex status hook', officialEvents: 'Official events first, with process and rollout fallbacks',
     voiceService: 'Atlas voice service', voiceServiceDescription: 'Atlas local STT / TTS', voiceServiceReady: 'Voice service is ready', voiceServiceMissing: 'Local voice is not installed', voiceServiceDaemonStopped: 'Atlas voice service is not running', voiceServiceInstalling: 'Installing…', installVoiceService: 'Install', repairVoiceService: 'Repair', voiceServiceDaemon: 'Atlas voice daemon', voiceServiceModels: 'Voice models', voiceServiceProvider: 'Local models · Parakeet + Kokoro', voiceServiceChecking: 'Checking…', voiceServiceInstallFailed: 'Voice service installation failed',
@@ -385,7 +386,7 @@ type DesktopFailureEvent = {
   kind: 'insufficient-balance' | 'retryable' | 'fatal'
   action: 'pause-balance' | 'continue' | 'stop' | 'watch'
   attempt: number
-  maxAttempts: number
+  maxAttempts: number | null
 }
 
 type DesktopOutputEvent = {
@@ -679,6 +680,10 @@ function App() {
   const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(() => readStored('defaultReasoningEffort', 'medium'))
   const [autoScan, setAutoScan] = useState(() => readStored('autoScan', true))
   const [autoContinue, setAutoContinue] = useState(() => readStored('autoContinue', true))
+  const [retryLimit, setRetryLimit] = useState<string>(() => {
+    const stored = readStored<number | string | null>('retryLimit', 3)
+    return stored === null || stored === '' ? '' : String(stored)
+  })
   const autoContinueRef = useRef(autoContinue)
   const [autoResumeOnBalance, setAutoResumeOnBalance] = useState(() => readStored('autoResumeOnBalance', false))
   const autoResumeOnBalanceRef = useRef(autoResumeOnBalance)
@@ -701,6 +706,8 @@ function App() {
   const [newSessionOpen, setNewSessionOpen] = useState(false)
   const [exitingSessionId, setExitingSessionId] = useState<string | null>(null)
   const t = (key: string) => tr(language, key)
+  const retryLimitValue = normalizeRecoveryAttempts(retryLimit, 3)
+  const retryLimitLabel = retryLimitValue === null ? '∞' : String(retryLimitValue)
   const commandErrorSeenRef = useRef<Map<string, number>>(new Map())
   const runtimeSyncRef = useRef<((records: RunningCodexSession[]) => void) | null>(null)
   const streamedRepliesRef = useRef(new Map<string, string>())
@@ -748,6 +755,9 @@ function App() {
       'send_session_input',
       'send_floating_message',
       'send_terminal_input',
+      'set_recovery_max_attempts',
+      'get_computer_use_status',
+      'repair_computer_use',
       'get_balance',
       'install_codex_hook',
       'install_voice_service',
@@ -802,14 +812,19 @@ function App() {
     writeStored('defaultReasoningEffort', defaultReasoningEffort)
     writeStored('autoScan', autoScan)
     writeStored('autoContinue', autoContinue)
+    writeStored('retryLimit', retryLimit)
     writeStored('autoResumeOnBalance', autoResumeOnBalance)
     writeStored('notifyEnabled', notifyEnabled)
     writeStored('floatingLaunchOnStart', floatingLaunchOnStart)
-  }, [language, defaultModel, defaultPermission, defaultReasoningEffort, autoScan, autoContinue, autoResumeOnBalance, notifyEnabled, floatingLaunchOnStart])
+  }, [language, defaultModel, defaultPermission, defaultReasoningEffort, autoScan, autoContinue, retryLimit, autoResumeOnBalance, notifyEnabled, floatingLaunchOnStart])
 
   useEffect(() => {
     void setDesktopAutoContinue(autoContinue)
   }, [autoContinue])
+
+  useEffect(() => {
+    void setDesktopRecoveryAttempts(retryLimitValue)
+  }, [retryLimitValue])
 
   useEffect(() => {
     if (desktopPlatform === 'browser') return
@@ -912,7 +927,7 @@ function App() {
       if (handledRuntimeFailuresRef.current.has(marker)) continue
       handledRuntimeFailuresRef.current.add(marker)
       const previousFailures = runtimeFailureCountsRef.current.get(record.sessionId) || 0
-      const decision = decideRecovery(errorText, previousFailures, autoContinueRef.current)
+      const decision = decideRecovery(errorText, previousFailures, autoContinueRef.current, retryLimitValue)
       if (decision.action === 'pause-balance') {
         runtimeFailureCountsRef.current.delete(record.sessionId)
         setSessionItems((current) => current.map((item) => item.id === record.sessionId
@@ -931,10 +946,11 @@ function App() {
           }
         })
       } else if (decision.action === 'stop') {
-        runtimeFailureCountsRef.current.set(record.sessionId, decision.maxAttempts)
-        notifyDesktop('Codex Atlas recovery guard', interpolate(t('retriesStopped'), { count: decision.maxAttempts }))
+        const stoppedAt = decision.maxAttempts ?? decision.attempt
+        runtimeFailureCountsRef.current.set(record.sessionId, stoppedAt)
+        notifyDesktop('Codex Atlas recovery guard', interpolate(t('retriesStopped'), { count: decision.maxAttempts ?? decision.attempt }))
         setSessionItems((current) => current.map((item) => item.id === record.sessionId
-          ? { ...item, recovery: 'stopped', retryCount: decision.maxAttempts, lastError: errorText }
+          ? { ...item, recovery: 'stopped', retryCount: stoppedAt, lastError: errorText }
           : item))
       }
     }
@@ -1243,9 +1259,9 @@ function App() {
       const message = event.action === 'pause-balance'
         ? t('providerBalanceLow')
         : event.action === 'stop'
-          ? interpolate(t('retriesStopped'), { count: event.attempt || event.maxAttempts })
+          ? interpolate(t('retriesStopped'), { count: event.attempt || event.maxAttempts || 0 })
           : event.action === 'continue'
-            ? interpolate(t('continueSent'), { attempt: event.attempt, max: event.maxAttempts })
+            ? interpolate(t('continueSent'), { attempt: event.attempt, max: event.maxAttempts === null ? '∞' : event.maxAttempts })
             : t('waitingManual')
       if (event.action === 'stop') notifyDesktop('Codex Atlas recovery guard', message)
       showToast(message)
@@ -1414,7 +1430,7 @@ function App() {
             onCreate={() => setNewSessionOpen(true)}
           />}
           {activeNav === 'sessions' && <SessionsView language={language} sessions={filteredSessions} query={query} setQuery={setQuery} selected={selected} setSelected={setSelected} activateSession={activateSession} inputContinue={inputContinue} openWorkspace={openSessionWorkspace} loadState={sessionLoadState} />}
-          {activeNav === 'monitor' && <MonitorView language={language} sessions={sessionItems} autoContinue={autoContinue} setAutoContinue={updateAutoContinue} autoResumeOnBalance={autoResumeOnBalance} setAutoResumeOnBalance={setAutoResumeOnBalance} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} showToast={showToast} activateSession={activateSession} inputContinue={inputContinue} />}
+          {activeNav === 'monitor' && <MonitorView language={language} sessions={sessionItems} autoContinue={autoContinue} setAutoContinue={updateAutoContinue} retryLimit={retryLimit} setRetryLimit={setRetryLimit} retryLimitLabel={retryLimitLabel} autoResumeOnBalance={autoResumeOnBalance} setAutoResumeOnBalance={setAutoResumeOnBalance} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} showToast={showToast} activateSession={activateSession} inputContinue={inputContinue} />}
           {activeNav === 'integrations' && <IntegrationsView language={language} providerBalances={providerBalances} ccSwitchCheckedAt={ccSwitchCheckedAt} setCcSwitchCheckedAt={setCcSwitchCheckedAt} showToast={showToast} />}
           {activeNav === 'skills' && <SkillsView language={language} skills={installedSkills} setSkills={setInstalledSkills} loadState={skillsLoadState} setLoadState={setSkillsLoadState} showToast={showToast} />}
           {activeNav === 'floating' && <FloatingView language={language} sessions={sessionItems} providerBalances={providerBalances} floatingEnabled={floatingEnabled} onToggleFloating={() => void toggleFloatingWindow()} floatingLaunchOnStart={floatingLaunchOnStart} setFloatingLaunchOnStart={setFloatingLaunchOnStart} notifyEnabled={notifyEnabled} setNotifyEnabled={setNotifyEnabled} activateSession={activateSession} inputContinue={inputContinue} showToast={showToast} />}
@@ -1721,7 +1737,7 @@ function SkillsView({ language, skills, setSkills, loadState, setLoadState, show
   </>
 }
 
-function MonitorView({ language, sessions: items, autoContinue, setAutoContinue, autoResumeOnBalance, setAutoResumeOnBalance, notifyEnabled, setNotifyEnabled, showToast, activateSession, inputContinue }: { language: UiLanguage; sessions: Session[]; autoContinue: boolean; setAutoContinue: (value: boolean) => void; autoResumeOnBalance: boolean; setAutoResumeOnBalance: (value: boolean) => void; notifyEnabled: boolean; setNotifyEnabled: (value: boolean) => void; showToast: (message: string) => void; activateSession: (session: Session) => void; inputContinue: (session: Session) => void }) {
+function MonitorView({ language, sessions: items, autoContinue, setAutoContinue, retryLimit, setRetryLimit, retryLimitLabel, autoResumeOnBalance, setAutoResumeOnBalance, notifyEnabled, setNotifyEnabled, showToast, activateSession, inputContinue }: { language: UiLanguage; sessions: Session[]; autoContinue: boolean; setAutoContinue: (value: boolean) => void; retryLimit: string; setRetryLimit: (value: string) => void; retryLimitLabel: string; autoResumeOnBalance: boolean; setAutoResumeOnBalance: (value: boolean) => void; notifyEnabled: boolean; setNotifyEnabled: (value: boolean) => void; showToast: (message: string) => void; activateSession: (session: Session) => void; inputContinue: (session: Session) => void }) {
   const watched = items.filter((item) => item.recovery !== 'healthy')
   const running = items.filter((item) => (item.processIds?.length || 0) > 0).sort((left, right) => Number(right.foreground) - Number(left.foreground) || (right.lastEventAtMs || 0) - (left.lastEventAtMs || 0))
   const latestEventAt = items.reduce((latest, item) => Math.max(latest, item.lastEventAtMs || 0), 0)
@@ -1730,8 +1746,8 @@ function MonitorView({ language, sessions: items, autoContinue, setAutoContinue,
   const incidentBadge = (item: Session) => item.recovery === 'paused-balance'
     ? tr(language, 'balance')
     : item.recovery === 'stopped'
-      ? `${item.retryCount}/3 ${tr(language, 'failed')}`
-      : `${item.retryCount}/3`
+      ? `${item.retryCount}/${retryLimitLabel} ${tr(language, 'failed')}`
+      : `${item.retryCount}/${retryLimitLabel}`
   return <>
     <section className="page-heading compact"><div><div className="eyebrow accent-text">{tr(language, 'errorRecovery')} <span className="heading-line" /></div><h1>{tr(language, 'recoveryMonitor')}</h1></div><div className="monitor-live"><span className="pulse-dot" /> {tr(language, 'liveWatcher')}</div></section>
     <div className="guardrail-banner"><div className="guardrail-icon"><ShieldCheck size={18} /></div><div><strong>{tr(language, 'guardrailsActive')}</strong><span>{tr(language, 'balanceBlocked')}</span></div><button className={`toggle ${autoContinue ? 'on' : ''}`} onClick={() => setAutoContinue(!autoContinue)} aria-label={language === 'zh' ? '切换自动继续' : 'Toggle automatic continue'}><span /></button></div>
@@ -1743,6 +1759,7 @@ function MonitorView({ language, sessions: items, autoContinue, setAutoContinue,
         <div className="rule-row"><span className="rule-number">03</span><div><strong>{tr(language, 'threeFailuresRule')}</strong><small>{tr(language, 'threeFailuresDetail')}</small></div><span className="rule-result stop">{tr(language, 'stop')}</span></div>
         <div className="switch-row monitor-switch"><span><strong>{tr(language, 'autoResumeBalance')}</strong><small>{tr(language, 'autoResumeBalanceDescription')}</small></span><button className={`toggle ${autoResumeOnBalance ? 'on' : ''}`} onClick={() => setAutoResumeOnBalance(!autoResumeOnBalance)} aria-label={tr(language, 'autoResumeBalance')}><span /></button></div>
         <div className="switch-row monitor-switch"><span><strong>{tr(language, 'desktopNotifications')}</strong><small>{tr(language, 'notifyOnStop')}</small></span><button className={`toggle ${notifyEnabled ? 'on' : ''}`} onClick={() => setNotifyEnabled(!notifyEnabled)} aria-label={language === 'zh' ? '切换桌面通知' : 'Toggle desktop notifications'}><span /></button></div>
+        <label className="field-label retry-limit-field"><span>{tr(language, 'retryLimit')} · {retryLimitLabel === '∞' ? tr(language, 'unlimited') : retryLimitLabel}</span><input className="text-input" type="number" min="1" max="1000" value={retryLimit} onChange={(event) => setRetryLimit(event.target.value)} placeholder={tr(language, 'retryLimitPlaceholder')} /></label>
       </div>
       <div className="settings-panel incidents-panel"><div className="panel-head"><div><div className="eyebrow">{tr(language, 'liveIncidents')}</div><h3>{incidentCount}</h3></div><BellRing size={17} className="orange-icon" /></div><div className="incident-list">{watched.map((item) => <div className="incident-row" key={item.id}><span className={`incident-light ${item.recovery}`} /><div><strong>{item.title}</strong><small>{item.lastError || tr(language, 'watchingRecoverable')}</small></div><span className={`incident-badge ${item.recovery}`}>{incidentBadge(item)}</span><button className="icon-button tiny" aria-label={tr(language, 'inspectIncident')} title={tr(language, 'inspectIncident')} onClick={() => showToast(`${item.title} · ${item.lastError || tr(language, 'watchingRecoverable')}`)}><ArrowUpRight size={14} /></button><div className="compact-session-actions"><button className="text-button incident-action" onClick={() => activateSession(item)}><Play size={12} fill="currentColor" /> {tr(language, 'activateSession')}</button><button className="text-button incident-action" onClick={() => inputContinue(item)}><TerminalSquare size={12} /> {tr(language, 'inputContinue')}</button></div></div>)}{watched.length === 0 && <div className="incident-empty"><span className="health-light green" /><strong>{language === 'zh' ? '暂无异常' : 'No incidents'}</strong><small>{tr(language, 'watcherHealthy')}</small></div>}</div><div className="monitor-foot"><span>{tr(language, 'lastEvent')}</span><strong>{latestEvent}</strong><span className="monitor-foot-status"><span className="pulse-dot" /> {tr(language, 'watcherHealthy')}</span></div></div>
     </div>
@@ -1922,6 +1939,8 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, c
   const [voiceStatus, setVoiceStatus] = useState<VoiceServiceStatus | null>(null)
   const [voiceProgress, setVoiceProgress] = useState<VoiceServiceProgress | null>(null)
   const [voiceBusy, setVoiceBusy] = useState(false)
+  const [computerUseStatus, setComputerUseStatus] = useState<ComputerUseStatus | null>(null)
+  const [computerUseBusy, setComputerUseBusy] = useState(false)
   const defaultsRequestRef = useRef(0)
   // Keep config writes ordered. A fast sequence of picker changes must leave
   // the last selection on disk even when an earlier Rust command finishes
@@ -2027,6 +2046,19 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, c
       window.clearInterval(timer)
     }
   }, [serverBusy])
+  useEffect(() => {
+    let disposed = false
+    const refresh = async () => {
+      const status = await getComputerUseStatus()
+      if (!disposed && status) setComputerUseStatus(status)
+    }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 15_000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [])
   const refreshHookStatus = async () => {
     const status = await getCodexHookStatus()
     if (status) setHookStatus(status)
@@ -2039,6 +2071,19 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, c
       showToast(language === 'zh' ? '状态 hook 已安装；在新 Codex 会话中用 /hooks 确认一次' : 'Status hook installed; approve it once with /hooks in a new Codex session')
     } else {
       showToast(language === 'zh' ? '桌面壳不可用，无法安装 hook' : 'Desktop shell unavailable; hook was not installed')
+    }
+  }
+  const repairComputerUseService = async () => {
+    setComputerUseBusy(true)
+    const status = await repairComputerUse()
+    setComputerUseBusy(false)
+    if (status) {
+      setComputerUseStatus(status)
+      showToast(status.verified
+        ? (language === 'zh' ? 'Computer Use 本机服务已修复并验证' : 'Computer Use local service repaired and verified')
+        : (status.error || status.diagnostic))
+    } else {
+      showToast(language === 'zh' ? '无法运行 Computer Use 本机修复' : 'Could not run the Computer Use local repair')
     }
   }
   const hookReady = hookStatus?.configured && hookStatus.enabled
@@ -2351,6 +2396,15 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, c
         <div className="panel-head"><div><h3>{tr(language, 'codexStatusHook')}</h3><span className="panel-subtitle">{tr(language, 'officialEvents')}</span></div><RadioTower size={17} className="teal-icon" /></div>
         <div className="hook-status-line"><span className={`health-light ${hookReady ? (hookStatus?.connected ? 'green' : 'yellow') : 'yellow'}`} /><div><strong>{hookReady ? (hookStatus?.connected ? tr(language, 'connected') : tr(language, 'configuredWaiting')) : tr(language, 'notConfigured')}</strong><small>{hookStatus?.sessionCount || 0} {tr(language, 'sessionEvents')}{hookStatus?.error ? ` · ${hookStatus.error}` : ''}</small></div><button className="icon-button tiny" aria-label={tr(language, 'refreshHook')} title={tr(language, 'refreshHook')} onClick={() => void refreshHookStatus()}><RefreshCw size={13} /></button></div>
         <button className="secondary-button version-help" onClick={() => void installHook()}>{hookReady ? <RefreshCw size={14} /> : <PlugZap size={14} />}{hookReady ? tr(language, 'repairHook') : tr(language, 'installHook')}</button>
+      </section>
+      <section className={`settings-panel computer-use-panel ${computerUseStatus?.verified ? 'is-ready' : 'has-warning'}`}>
+        <div className="panel-head"><div><h3>Computer Use / Sky</h3><span className="panel-subtitle">{language === 'zh' ? '模型请求继续使用当前中转站；桌面控制只走本机 Trusted RPC' : 'Model requests keep using the active relay; desktop control stays on local Trusted RPC'}</span></div><Monitor size={17} className="teal-icon" /></div>
+        <div className="computer-use-status-line"><span className={`health-light ${computerUseStatus?.verified ? 'green' : 'yellow'}`} /><div><strong>{computerUseStatus?.verified ? (language === 'zh' ? '本机服务已就绪' : 'Local service ready') : (language === 'zh' ? '需要检查本机服务' : 'Local service needs attention')}</strong><small>{computerUseStatus?.diagnostic || (language === 'zh' ? '正在检测 Sky Trusted RPC' : 'Checking Sky Trusted RPC')}</small></div><button className="icon-button tiny" onClick={() => void getComputerUseStatus().then((status) => status && setComputerUseStatus(status))} aria-label={language === 'zh' ? '重新检测 Computer Use' : 'Recheck Computer Use'} title={language === 'zh' ? '重新检测' : 'Recheck'}><RefreshCw size={13} /></button></div>
+        <div className="computer-use-checks"><span className={computerUseStatus?.skyPackagePath ? 'ok' : ''}><i />Sky package</span><span className={computerUseStatus?.trustedSkyConfigured ? 'ok' : ''}><i />Trusted sky</span><span className={computerUseStatus?.helperProtocolVerified ? 'ok' : ''}><i />Helper RPC</span><span className={computerUseStatus?.nativePipeEnabled ? (computerUseStatus.nativePipeAvailable ? 'ok' : '') : 'ok'}><i />{computerUseStatus?.transport === 'native-pipe' ? 'Native pipe' : 'Helper transport'}</span></div>
+        {computerUseStatus?.helperPath && <code className="computer-use-path" title={computerUseStatus.helperPath}>{computerUseStatus.helperPath}</code>}
+        {computerUseStatus?.stalePipeDirectory && <div className="field-hint warning-text">{language === 'zh' ? '已发现旧的动态 pipe 配置，修复时会清除；新 Codex 会话会生成新的 pipe。' : 'A stale dynamic pipe was found. Repair clears it; the next Codex session creates a fresh pipe.'}</div>}
+        {computerUseStatus?.error && <div className="field-hint error-text">{computerUseStatus.error}</div>}
+        <button className="secondary-button version-help" onClick={() => void repairComputerUseService()} disabled={computerUseBusy || !computerUseStatus?.supported}>{computerUseBusy ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />}{computerUseBusy ? (language === 'zh' ? '修复并验证中…' : 'Repairing…') : (language === 'zh' ? '修复并验证' : 'Repair and verify')}</button>
       </section>
       <section className={`settings-panel voice-service-panel ${voiceProgress?.state === 'error' ? 'has-error' : ''}`}>
         <div className="panel-head"><div><h3>{tr(language, 'voiceService')}</h3><span className="panel-subtitle">{tr(language, 'voiceServiceDescription')}</span></div><Activity size={17} className="teal-icon" /></div>

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { floatingMessageCommandArgs } from '../src/lib/atlasBridge.ts'
+import { classifyCodexFailure, decideRecovery, floatingMessageCommandArgs, normalizeRecoveryAttempts } from '../src/lib/atlasBridge.ts'
 import { FloatingSessionTargetLock } from '../src/lib/floatingSessionTarget.ts'
 import { appendFloatingReply, normalizeFloatingReply, splitFloatingReply } from '../src/lib/floatingReply.ts'
 
@@ -66,4 +66,14 @@ test('streaming reply deltas accumulate without duplicating a replayed prefix', 
   reply = appendFloatingReply(reply, 'Hello world')
 
   assert.equal(reply, 'Hello world')
+})
+
+test('overloaded stream disconnects use the configurable recovery policy', () => {
+  const error = 'stream disconnected before completion: Our servers are currently overloaded. Please try again later.'
+
+  assert.equal(classifyCodexFailure(error), 'retryable')
+  assert.equal(normalizeRecoveryAttempts(''), null)
+  assert.equal(decideRecovery(error, 2, true, 3).action, 'continue')
+  assert.equal(decideRecovery(error, 3, true, 3).action, 'stop')
+  assert.equal(decideRecovery(error, 25, true, null).action, 'continue')
 })
