@@ -353,7 +353,8 @@ export function classifyCodexFailure(errorText: string): CodexFailureKind {
 
 /** Normalize the user-facing retry setting. `null` means unlimited retries. */
 export function normalizeRecoveryAttempts(value: unknown, fallback: number | null = 3): number | null {
-  if (value === null || value === '' || value === undefined) return null
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string' && value.trim() === '') return null
   const numeric = typeof value === 'number' ? value : Number(String(value).trim())
   if (!Number.isFinite(numeric)) return fallback
   return Math.max(1, Math.min(1000, Math.floor(numeric)))

@@ -73,6 +73,7 @@ test('overloaded stream disconnects use the configurable recovery policy', () =>
 
   assert.equal(classifyCodexFailure(error), 'retryable')
   assert.equal(normalizeRecoveryAttempts(''), null)
+  assert.equal(normalizeRecoveryAttempts('   '), null)
   assert.equal(decideRecovery(error, 2, true, 3).action, 'continue')
   assert.equal(decideRecovery(error, 3, true, 3).action, 'stop')
   assert.equal(decideRecovery(error, 25, true, null).action, 'continue')

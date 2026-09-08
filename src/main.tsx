@@ -707,6 +707,10 @@ function App() {
   const [exitingSessionId, setExitingSessionId] = useState<string | null>(null)
   const t = (key: string) => tr(language, key)
   const retryLimitValue = normalizeRecoveryAttempts(retryLimit, 3)
+  // Runtime polling callbacks can outlive the render that created them. Keep
+  // the latest recovery policy in a stable ref so clearing the field to
+  // unlimited immediately affects every scan and event path.
+  const retryLimitRef = useRef<number | null>(retryLimitValue)
   const retryLimitLabel = retryLimitValue === null ? '∞' : String(retryLimitValue)
   const commandErrorSeenRef = useRef<Map<string, number>>(new Map())
   const runtimeSyncRef = useRef<((records: RunningCodexSession[]) => void) | null>(null)
@@ -824,6 +828,7 @@ function App() {
 
   useEffect(() => {
     void setDesktopRecoveryAttempts(retryLimitValue)
+    retryLimitRef.current = retryLimitValue
   }, [retryLimitValue])
 
   useEffect(() => {
@@ -927,7 +932,7 @@ function App() {
       if (handledRuntimeFailuresRef.current.has(marker)) continue
       handledRuntimeFailuresRef.current.add(marker)
       const previousFailures = runtimeFailureCountsRef.current.get(record.sessionId) || 0
-      const decision = decideRecovery(errorText, previousFailures, autoContinueRef.current, retryLimitValue)
+      const decision = decideRecovery(errorText, previousFailures, autoContinueRef.current, retryLimitRef.current)
       if (decision.action === 'pause-balance') {
         runtimeFailureCountsRef.current.delete(record.sessionId)
         setSessionItems((current) => current.map((item) => item.id === record.sessionId
