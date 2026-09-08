@@ -25,5 +25,24 @@ fn main() {
         }
         return;
     }
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--repair-computer-use")
+    {
+        match codex_atlas_lib::repair_computer_use_cli() {
+            Ok(status) => match serde_json::to_string_pretty(&status) {
+                Ok(json) => println!("{json}"),
+                Err(error) => {
+                    eprintln!("Computer Use status serialization failed: {error}");
+                    std::process::exit(1);
+                }
+            },
+            Err(error) => {
+                eprintln!("Computer Use repair failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     codex_atlas_lib::run()
 }

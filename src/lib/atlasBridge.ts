@@ -152,6 +152,11 @@ export type ComputerUseStatus = {
   nativePipeAvailable: boolean
   stalePipeDirectory: boolean
   helperProtocolVerified: boolean
+  pluginConfigPath?: string | null
+  cuaReplConfigured: boolean
+  computerSurfaceEnabled: boolean
+  computerUseFeatureEnabled: boolean
+  toolExposureVerified: boolean
   transport: string
   verified: boolean
   checkedAtMs: number

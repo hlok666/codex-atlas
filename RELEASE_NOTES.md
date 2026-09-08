@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.46 发布说明
+
+- 修复中转站场景下 Computer Use 未暴露给 Codex 会话的问题。
+- 自动开启 `computer_use` feature 与 `browser,computer` CUA surface。
+- 修复并清理过期的动态 Native Pipe 配置，保留模型中转地址不变。
+- Runtime 页面新增 Computer Use 工具暴露状态，并在启动时自动修复一次。
+
 # Codex Atlas 0.1.45 发布说明
 
 - 修复自动恢复设置留空后仍按 3 次停止的问题：所有后台扫描、实时事件和会话轮询现在都读取当前重试策略。

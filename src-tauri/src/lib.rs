@@ -554,6 +554,11 @@ pub struct ComputerUseStatus {
     pub native_pipe_available: bool,
     pub stale_pipe_directory: bool,
     pub helper_protocol_verified: bool,
+    pub plugin_config_path: Option<String>,
+    pub cua_repl_configured: bool,
+    pub computer_surface_enabled: bool,
+    pub computer_use_feature_enabled: bool,
+    pub tool_exposure_verified: bool,
     pub transport: String,
     pub verified: bool,
     pub checked_at_ms: i64,
@@ -6579,6 +6584,187 @@ fn trusted_services_json(config: &str) -> Option<Value> {
     .and_then(|value| serde_json::from_str::<Value>(&value).ok())
 }
 
+fn find_cua_plugin_config() -> Option<PathBuf> {
+    let root = codex_home().join("plugins/cache");
+    if !root.exists() {
+        return None;
+    }
+    let mut candidates = Vec::<(PathBuf, SystemTime)>::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(8)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || entry.file_name() != ".mcp.json" {
+            continue;
+        }
+        let path = entry.path();
+        let is_unified_cua = path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("unified-computer-use")
+        });
+        if !is_unified_cua {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_str::<Value>(&contents) else {
+            continue;
+        };
+        if document
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .and_then(|servers| servers.get("cua_repl"))
+            .is_none()
+        {
+            continue;
+        }
+        let modified = fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        candidates.push((path.to_path_buf(), modified));
+    }
+    candidates.sort_by(|left, right| right.1.cmp(&left.1));
+    candidates.into_iter().next().map(|(path, _)| path)
+}
+
+fn cua_plugin_surface_state(path: Option<&Path>) -> (bool, bool, Option<String>) {
+    let Some(path) = path else {
+        return (
+            false,
+            false,
+            Some("unified-computer-use plugin configuration was not found".to_string()),
+        );
+    };
+    let Ok(contents) = fs::read_to_string(path) else {
+        return (
+            false,
+            false,
+            Some("unified-computer-use plugin configuration is unreadable".to_string()),
+        );
+    };
+    let Ok(document) = serde_json::from_str::<Value>(&contents) else {
+        return (
+            false,
+            false,
+            Some("unified-computer-use plugin configuration is invalid JSON".to_string()),
+        );
+    };
+    let server = document
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .and_then(|servers| servers.get("cua_repl"));
+    let Some(server) = server else {
+        return (
+            false,
+            false,
+            Some("cua_repl MCP server is missing from the Computer Use plugin".to_string()),
+        );
+    };
+    let surfaces = server
+        .get("env")
+        .and_then(Value::as_object)
+        .and_then(|env| env.get("CUA_REPL_ENABLED_SURFACES"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let computer_enabled = surfaces
+        .split(',')
+        .map(str::trim)
+        .any(|surface| surface.eq_ignore_ascii_case("computer"));
+    if !computer_enabled {
+        return (
+            true,
+            false,
+            Some(
+                "Computer Use surface is disabled in the cua_repl plugin configuration".to_string(),
+            ),
+        );
+    }
+    (true, true, None)
+}
+
+fn update_cua_plugin_config_json(
+    contents: &str,
+    node_repl: &Path,
+    node: &Path,
+    codex: &Path,
+) -> Result<String, String> {
+    let mut document = serde_json::from_str::<Value>(contents)
+        .map_err(|error| format!("parse unified-computer-use plugin configuration: {error}"))?;
+    let servers = document
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Computer Use plugin configuration has no mcpServers object".to_string())?;
+    let server = servers
+        .get_mut("cua_repl")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Computer Use plugin configuration has no cua_repl server".to_string())?;
+    let env = server
+        .entry("env")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| "cua_repl env is not an object".to_string())?;
+
+    // launch.mjs uses this value to decide whether the model receives the
+    // local Sky APIs. A browser-only surface silently removes Computer Use.
+    env.insert(
+        "CUA_REPL_ENABLED_SURFACES".to_string(),
+        Value::String("browser,computer".to_string()),
+    );
+    env.insert(
+        "CUA_REPL_NODE_REPL_PATH".to_string(),
+        Value::String(node_repl.to_string_lossy().to_string()),
+    );
+    env.insert(
+        "NODE_REPL_NODE_MODULE_DIRS".to_string(),
+        Value::String(
+            node_repl
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("node_modules")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    );
+    env.insert(
+        "NODE_REPL_NODE_PATH".to_string(),
+        Value::String(node.to_string_lossy().to_string()),
+    );
+    env.insert(
+        "CODEX_CLI_PATH".to_string(),
+        Value::String(codex.to_string_lossy().to_string()),
+    );
+    env.insert(
+        "CODEX_HOME".to_string(),
+        Value::String(codex_home().to_string_lossy().to_string()),
+    );
+    env.insert(
+        "NODE_REPL_TRUSTED_CODE_PATHS".to_string(),
+        Value::String(format!(
+            "{};{}",
+            codex_home().display(),
+            node_repl
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("node_modules")
+                .display()
+        )),
+    );
+    // The native pipe name is generated per Codex process. Persisting a pipe
+    // from an old session makes every newly spawned cua_repl server fail to
+    // connect; the official helper transport creates a fresh one on demand.
+    env.remove("SKY_CUA_NATIVE_PIPE");
+    env.remove("SKY_CUA_NATIVE_PIPE_DIRECTORY");
+
+    serde_json::to_string_pretty(&document)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| format!("serialize unified-computer-use plugin configuration: {error}"))
+}
+
 #[cfg(target_os = "windows")]
 fn windows_named_pipe_exists(value: Option<&str>) -> bool {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -6625,8 +6811,11 @@ fn verify_computer_use_helper(helper: &Path, codex: &Path) -> Result<(), String>
         .stdin
         .take()
         .ok_or_else(|| "Computer Use helper stdin is unavailable".to_string())?;
+    // list_apps is a read-only operation that exercises the real desktop
+    // transport and the helper's Windows UI Automation bridge. A `close`
+    // handshake alone only proves that the executable starts.
     stdin
-        .write_all(b"{\"id\":1,\"method\":\"close\",\"params\":{},\"meta\":{\"x-oai-cua-request-budget-ms\":3000}}\n")
+        .write_all(b"{\"id\":1,\"method\":\"list_apps\",\"params\":{},\"meta\":{\"x-oai-cua-request-budget-ms\":8000}}\n")
         .map_err(|error| format!("send Computer Use helper probe: {error}"))?;
     stdin
         .flush()
@@ -6652,7 +6841,8 @@ fn verify_computer_use_helper(helper: &Path, codex: &Path) -> Result<(), String>
     let value = serde_json::from_str::<Value>(response.trim())
         .map_err(|error| format!("Computer Use helper returned invalid JSON: {error}"))?;
     let ok = value.get("id").and_then(Value::as_u64) == Some(1)
-        && value.get("ok").and_then(Value::as_bool) == Some(true);
+        && value.get("ok").and_then(Value::as_bool) == Some(true)
+        && value.get("result").and_then(Value::as_array).is_some();
     if !ok {
         return Err(value
             .get("error")
@@ -6723,6 +6913,9 @@ fn computer_use_status_from_config() -> ComputerUseStatus {
     let config_path = codex_config_path();
     let config = fs::read_to_string(&config_path).unwrap_or_default();
     let runtime = find_sky_runtime();
+    let plugin_config_path = find_cua_plugin_config();
+    let (cua_repl_configured, computer_surface_enabled, plugin_error) =
+        cua_plugin_surface_state(plugin_config_path.as_deref());
     let sky_package_path = runtime.as_ref().map(|(sky, _, _)| sky.clone());
     let helper_path = runtime.as_ref().map(|(_, helper, _)| helper.clone());
     let runtime_root = runtime.as_ref().map(|(_, _, bin)| bin.clone());
@@ -6763,6 +6956,13 @@ fn computer_use_status_from_config() -> ComputerUseStatus {
     let codex_path = PathBuf::from(codex_executable());
     let (helper_protocol_verified, helper_error, helper_checked_at_ms) =
         cached_computer_use_helper_verification(helper_path.as_deref(), &codex_path);
+    let computer_use_feature_enabled =
+        parse_toml_section_bool(&config, "features", "computer_use").unwrap_or(true);
+    // This is intentionally separate from the helper probe: a healthy helper
+    // is not enough when the plugin has disabled the computer surface. The
+    // session would otherwise start successfully but expose only browser JS.
+    let tool_exposure_verified =
+        cua_repl_configured && computer_surface_enabled && computer_use_feature_enabled;
     let transport = if native_pipe_enabled && native_pipe_available {
         "native-pipe"
     } else if !native_pipe_enabled {
@@ -6775,6 +6975,7 @@ fn computer_use_status_from_config() -> ComputerUseStatus {
         && helper_protocol_verified
         && node_repl_configured
         && trusted_sky_configured
+        && tool_exposure_verified
         && ((!native_pipe_enabled) || native_pipe_available);
     let diagnostic = if !supported {
         "Computer Use native helper is currently implemented for Windows".to_string()
@@ -6784,6 +6985,12 @@ fn computer_use_status_from_config() -> ComputerUseStatus {
         "node_repl is missing or points to a non-existent executable".to_string()
     } else if !trusted_sky_configured {
         "NODE_REPL_TRUSTED_SERVICES does not include sky".to_string()
+    } else if !computer_use_feature_enabled {
+        "Codex computer_use feature is disabled".to_string()
+    } else if !cua_repl_configured || !computer_surface_enabled {
+        plugin_error.unwrap_or_else(|| {
+            "Computer Use surface is not enabled for the Codex session".to_string()
+        })
     } else if !helper_protocol_verified {
         helper_error
             .clone()
@@ -6811,6 +7018,11 @@ fn computer_use_status_from_config() -> ComputerUseStatus {
         native_pipe_available,
         stale_pipe_directory,
         helper_protocol_verified,
+        plugin_config_path: plugin_config_path.map(|path| path.to_string_lossy().to_string()),
+        cua_repl_configured,
+        computer_surface_enabled,
+        computer_use_feature_enabled,
+        tool_exposure_verified,
         transport: transport.to_string(),
         verified,
         checked_at_ms: helper_checked_at_ms.max(now_ms()),
@@ -6836,6 +7048,7 @@ fn repair_computer_use_now() -> Result<ComputerUseStatus, String> {
     let config_path = codex_config_path();
     let original = fs::read_to_string(&config_path).unwrap_or_default();
     let mut updated = original.clone();
+    updated = upsert_toml_section_bool(&updated, "features", "computer_use", true);
     updated = upsert_toml_section_string(
         &updated,
         "mcp_servers.node_repl",
@@ -6878,39 +7091,48 @@ fn repair_computer_use_now() -> Result<ComputerUseStatus, String> {
         "CODEX_CLI_PATH",
         &codex_executable(),
     );
-    let existing_pipe = parse_toml_section_string(
-        &original,
+    // Never persist the UUID of a previous helper process. The native pipe is
+    // owned by one node_repl session; reusing it makes a new Codex session
+    // report that the local Computer Use bridge is unavailable. Sky's helper
+    // transport creates a fresh local process/pipe for each trusted session.
+    let (without_pipe, _) = remove_toml_section_key(
+        &updated,
         "mcp_servers.node_repl.env",
         "SKY_CUA_NATIVE_PIPE_DIRECTORY",
     );
-    let native_pipe_active = windows_named_pipe_exists(existing_pipe.as_deref());
-    if native_pipe_active {
-        updated = upsert_toml_section_string(
-            &updated,
-            "mcp_servers.node_repl.env",
-            "SKY_CUA_NATIVE_PIPE",
-            "1",
-        );
-    } else {
-        // Never persist the UUID of a previous helper process. With no active
-        // session pipe Sky falls back to its official local helper transport.
-        let (without_pipe, _) = remove_toml_section_key(
-            &updated,
-            "mcp_servers.node_repl.env",
-            "SKY_CUA_NATIVE_PIPE_DIRECTORY",
-        );
-        let (without_toggle, _) = remove_toml_section_key(
-            &without_pipe,
-            "mcp_servers.node_repl.env",
-            "SKY_CUA_NATIVE_PIPE",
-        );
-        updated = without_toggle;
-    }
+    let (without_toggle, _) = remove_toml_section_key(
+        &without_pipe,
+        "mcp_servers.node_repl.env",
+        "SKY_CUA_NATIVE_PIPE",
+    );
+    updated = without_toggle;
     if updated != original {
         if config_path.exists() {
             let _ = backup_file(&config_path)?;
         }
         write_text_atomically(&config_path, &updated)?;
+    }
+
+    // The bundled unified-computer-use plugin owns a second MCP manifest. It
+    // is the manifest Codex actually loads for the `cua_repl` tool, so fixing
+    // only config.toml leaves the desktop surface hidden from the model.
+    if let Some(plugin_config_path) = find_cua_plugin_config() {
+        let plugin_original = fs::read_to_string(&plugin_config_path).map_err(|error| {
+            format!(
+                "read Computer Use plugin configuration {}: {error}",
+                plugin_config_path.display()
+            )
+        })?;
+        let plugin_updated = update_cua_plugin_config_json(
+            &plugin_original,
+            &node_repl,
+            &node,
+            &PathBuf::from(codex_executable()),
+        )?;
+        if plugin_updated != plugin_original {
+            let _ = backup_file(&plugin_config_path)?;
+            write_text_atomically(&plugin_config_path, &plugin_updated)?;
+        }
     }
     let mut status = computer_use_status_from_config();
     if !status.verified {
@@ -6929,7 +7151,21 @@ fn get_computer_use_status() -> ComputerUseStatus {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn repair_computer_use() -> Result<ComputerUseStatus, String> {
+fn repair_computer_use(state: State<AppState>) -> Result<ComputerUseStatus, String> {
+    let status = repair_computer_use_now()?;
+    if status.verified {
+        // Existing Atlas app-server sessions cache MCP server definitions. Ask
+        // the daemon to reload them so the repair is effective immediately,
+        // without requiring the user to close the desktop app.
+        let _ = app_server_request(&state, "config/mcpServer/reload", Value::Null);
+    }
+    Ok(status)
+}
+
+/// Command-line diagnostic entry point used by installers and support tools.
+/// The desktop UI calls the Tauri command above; keeping this wrapper public
+/// lets a broken UI be repaired without manually editing Codex configuration.
+pub fn repair_computer_use_cli() -> Result<ComputerUseStatus, String> {
     repair_computer_use_now()
 }
 
@@ -11435,6 +11671,10 @@ fn parse_toml_section_string(config: &str, section: &str, key: &str) -> Option<S
     parse_toml_section_parts_string(config, &expected, key)
 }
 
+fn parse_toml_section_bool(config: &str, section: &str, key: &str) -> Option<bool> {
+    parse_toml_section_string(config, section, key).and_then(|value| parse_toml_bool(&value))
+}
+
 fn parse_toml_provider_section_string(config: &str, provider: &str, key: &str) -> Option<String> {
     let provider = provider.trim();
     if provider.is_empty() {
@@ -11479,6 +11719,47 @@ fn upsert_root_toml_string(config: &str, key: &str, value: &str) -> String {
 fn upsert_toml_section_string(config: &str, section: &str, key: &str, value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     let replacement = format!("{key} = \"{escaped}\"");
+    let expected = toml_section_parts(section).unwrap_or_default();
+    let mut lines = config.lines().map(ToString::to_string).collect::<Vec<_>>();
+    let section_start = lines.iter().position(|line| {
+        toml_section_parts(toml_line_without_comment(line).trim())
+            .map(|parts| parts == expected)
+            .unwrap_or(false)
+    });
+    if let Some(start) = section_start {
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| toml_line_without_comment(line).trim().starts_with('['))
+            .map(|(index, _)| index)
+            .unwrap_or(lines.len());
+        if let Some(index) = (start + 1..end).find(|index| {
+            lines[*index]
+                .split_once('=')
+                .map(|(candidate, _)| candidate.trim() == key)
+                .unwrap_or(false)
+        }) {
+            lines[index] = replacement;
+        } else {
+            lines.insert(end, replacement);
+        }
+    } else {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("[{section}]"));
+        lines.push(replacement);
+    }
+    let mut updated = lines.join("\n");
+    if config.ends_with('\n') || !updated.is_empty() {
+        updated.push('\n');
+    }
+    updated
+}
+
+fn upsert_toml_section_bool(config: &str, section: &str, key: &str, value: bool) -> String {
+    let replacement = format!("{key} = {value}");
     let expected = toml_section_parts(section).unwrap_or_default();
     let mut lines = config.lines().map(ToString::to_string).collect::<Vec<_>>();
     let section_start = lines.iter().position(|line| {
@@ -14626,6 +14907,64 @@ mod runtime_probe_tests {
         assert!(updated.contains("SKY_CUA_NATIVE_PIPE = \"1\""));
         assert!(updated.contains("@oai/sky/service"));
         assert!(!updated.contains("SKY_CUA_NATIVE_PIPE_DIRECTORY"));
+    }
+
+    #[test]
+    fn computer_use_plugin_repair_exposes_the_desktop_surface_and_clears_stale_pipe() {
+        let config = r#"{
+          "mcpServers": {
+            "cua_repl": {
+              "command": "node.exe",
+              "env": {
+                "CUA_REPL_ENABLED_SURFACES": "browser",
+                "SKY_CUA_NATIVE_PIPE": "1",
+                "SKY_CUA_NATIVE_PIPE_DIRECTORY": "\\\\.\\\\pipe\\\\old"
+              }
+            }
+          }
+        }"#;
+        let updated = update_cua_plugin_config_json(
+            config,
+            Path::new("C:/Codex/node_repl.exe"),
+            Path::new("C:/Codex/node.exe"),
+            Path::new("C:/Codex/codex.exe"),
+        )
+        .expect("plugin config should be repaired");
+        let value = serde_json::from_str::<Value>(&updated).expect("repaired JSON");
+        let env = value["mcpServers"]["cua_repl"]["env"]
+            .as_object()
+            .expect("cua env object");
+        assert_eq!(
+            env.get("CUA_REPL_ENABLED_SURFACES").and_then(Value::as_str),
+            Some("browser,computer")
+        );
+        assert!(!env.contains_key("SKY_CUA_NATIVE_PIPE"));
+        assert!(!env.contains_key("SKY_CUA_NATIVE_PIPE_DIRECTORY"));
+        assert_eq!(
+            env.get("CUA_REPL_NODE_REPL_PATH").and_then(Value::as_str),
+            Some("C:/Codex/node_repl.exe")
+        );
+    }
+
+    #[test]
+    fn computer_use_status_requires_the_plugin_computer_surface() {
+        let browser_only =
+            r#"{"mcpServers":{"cua_repl":{"env":{"CUA_REPL_ENABLED_SURFACES":"browser"}}}}"#;
+        let computer_enabled = r#"{"mcpServers":{"cua_repl":{"env":{"CUA_REPL_ENABLED_SURFACES":"browser,computer"}}}}"#;
+        let browser_path =
+            std::env::temp_dir().join(format!("atlas-cua-browser-{}.json", now_ms()));
+        let computer_path =
+            std::env::temp_dir().join(format!("atlas-cua-computer-{}.json", now_ms() + 1));
+        fs::write(&browser_path, browser_only).expect("write browser-only manifest");
+        fs::write(&computer_path, computer_enabled).expect("write computer manifest");
+        let browser_state = cua_plugin_surface_state(Some(&browser_path));
+        let computer_state = cua_plugin_surface_state(Some(&computer_path));
+        let _ = fs::remove_file(browser_path);
+        let _ = fs::remove_file(computer_path);
+        assert!(browser_state.0);
+        assert!(!browser_state.1);
+        assert!(computer_state.0);
+        assert!(computer_state.1);
     }
 
     #[test]

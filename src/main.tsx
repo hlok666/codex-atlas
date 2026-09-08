@@ -1946,6 +1946,7 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, c
   const [voiceBusy, setVoiceBusy] = useState(false)
   const [computerUseStatus, setComputerUseStatus] = useState<ComputerUseStatus | null>(null)
   const [computerUseBusy, setComputerUseBusy] = useState(false)
+  const computerRepairAttemptedRef = useRef(false)
   const defaultsRequestRef = useRef(0)
   // Keep config writes ordered. A fast sequence of picker changes must leave
   // the last selection on disk even when an earlier Rust command finishes
@@ -2055,7 +2056,21 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, c
     let disposed = false
     const refresh = async () => {
       const status = await getComputerUseStatus()
-      if (!disposed && status) setComputerUseStatus(status)
+      if (!disposed && status) {
+        setComputerUseStatus(status)
+        // The bundled plugin manifest is generated outside Atlas. Repair it
+        // once at startup so new Codex sessions receive the desktop surface
+        // without requiring the user to discover a hidden diagnostic button.
+        if (
+          !computerRepairAttemptedRef.current &&
+          status.supported &&
+          (!status.toolExposureVerified || status.stalePipeDirectory)
+        ) {
+          computerRepairAttemptedRef.current = true
+          const repaired = await repairComputerUse()
+          if (!disposed && repaired) setComputerUseStatus(repaired)
+        }
+      }
     }
     void refresh()
     const timer = window.setInterval(() => void refresh(), 15_000)
@@ -2405,8 +2420,9 @@ function RuntimeView({ language, codexVersion, setCodexVersion, codexProvider, c
       <section className={`settings-panel computer-use-panel ${computerUseStatus?.verified ? 'is-ready' : 'has-warning'}`}>
         <div className="panel-head"><div><h3>Computer Use / Sky</h3><span className="panel-subtitle">{language === 'zh' ? '模型请求继续使用当前中转站；桌面控制只走本机 Trusted RPC' : 'Model requests keep using the active relay; desktop control stays on local Trusted RPC'}</span></div><Monitor size={17} className="teal-icon" /></div>
         <div className="computer-use-status-line"><span className={`health-light ${computerUseStatus?.verified ? 'green' : 'yellow'}`} /><div><strong>{computerUseStatus?.verified ? (language === 'zh' ? '本机服务已就绪' : 'Local service ready') : (language === 'zh' ? '需要检查本机服务' : 'Local service needs attention')}</strong><small>{computerUseStatus?.diagnostic || (language === 'zh' ? '正在检测 Sky Trusted RPC' : 'Checking Sky Trusted RPC')}</small></div><button className="icon-button tiny" onClick={() => void getComputerUseStatus().then((status) => status && setComputerUseStatus(status))} aria-label={language === 'zh' ? '重新检测 Computer Use' : 'Recheck Computer Use'} title={language === 'zh' ? '重新检测' : 'Recheck'}><RefreshCw size={13} /></button></div>
-        <div className="computer-use-checks"><span className={computerUseStatus?.skyPackagePath ? 'ok' : ''}><i />Sky package</span><span className={computerUseStatus?.trustedSkyConfigured ? 'ok' : ''}><i />Trusted sky</span><span className={computerUseStatus?.helperProtocolVerified ? 'ok' : ''}><i />Helper RPC</span><span className={computerUseStatus?.nativePipeEnabled ? (computerUseStatus.nativePipeAvailable ? 'ok' : '') : 'ok'}><i />{computerUseStatus?.transport === 'native-pipe' ? 'Native pipe' : 'Helper transport'}</span></div>
+        <div className="computer-use-checks"><span className={computerUseStatus?.skyPackagePath ? 'ok' : ''}><i />Sky package</span><span className={computerUseStatus?.trustedSkyConfigured ? 'ok' : ''}><i />Trusted sky</span><span className={computerUseStatus?.helperProtocolVerified ? 'ok' : ''}><i />Helper RPC</span><span className={computerUseStatus?.toolExposureVerified ? 'ok' : ''}><i />Computer tool</span><span className={computerUseStatus?.nativePipeEnabled ? (computerUseStatus.nativePipeAvailable ? 'ok' : '') : 'ok'}><i />{computerUseStatus?.transport === 'native-pipe' ? 'Native pipe' : 'Helper transport'}</span></div>
         {computerUseStatus?.helperPath && <code className="computer-use-path" title={computerUseStatus.helperPath}>{computerUseStatus.helperPath}</code>}
+        {computerUseStatus?.pluginConfigPath && <code className="computer-use-path" title={computerUseStatus.pluginConfigPath}>{computerUseStatus.pluginConfigPath}</code>}
         {computerUseStatus?.stalePipeDirectory && <div className="field-hint warning-text">{language === 'zh' ? '已发现旧的动态 pipe 配置，修复时会清除；新 Codex 会话会生成新的 pipe。' : 'A stale dynamic pipe was found. Repair clears it; the next Codex session creates a fresh pipe.'}</div>}
         {computerUseStatus?.error && <div className="field-hint error-text">{computerUseStatus.error}</div>}
         <button className="secondary-button version-help" onClick={() => void repairComputerUseService()} disabled={computerUseBusy || !computerUseStatus?.supported}>{computerUseBusy ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />}{computerUseBusy ? (language === 'zh' ? '修复并验证中…' : 'Repairing…') : (language === 'zh' ? '修复并验证' : 'Repair and verify')}</button>
