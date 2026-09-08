@@ -1,3 +1,9 @@
+# Codex Atlas 0.1.44 发布说明
+
+- 修正 `v0.1.43` 发布中 Android APK 仍携带旧版本号的问题。
+- 桌面端与 Android App 统一更新至 `0.1.44`，Android `versionCode` 更新为 `39`，可覆盖安装之前使用相同发布签名的版本。
+- 保留 `0.1.43` 的 Computer Use / Sky Trusted RPC 本机修复、动态管道校验和可配置自动恢复能力。
+
 # Codex Atlas 0.1.42 发布说明
 
 - 桌面连接页移除 Paseo 外部集成入口，改为聚焦 Atlas 自有的 CC Switch、Bridge、服务器通道和语音服务。
