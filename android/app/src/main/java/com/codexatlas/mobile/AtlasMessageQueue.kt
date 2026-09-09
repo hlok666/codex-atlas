@@ -86,7 +86,8 @@ object AtlasMessageQueue {
         val now = System.currentTimeMillis()
         read(context).firstOrNull { item ->
             val state = AtlasQueueItemState.fromKey(item.state)
-            (state == AtlasQueueItemState.Pending || state == AtlasQueueItemState.Failed) &&
+            (state == AtlasQueueItemState.Pending ||
+                (state == AtlasQueueItemState.Failed && retryAllowed(item.attempts, BridgePreferences.recoveryMaxAttempts(context)))) &&
                 item.nextAttemptAtMs <= now
         }
     }
@@ -118,6 +119,8 @@ object AtlasMessageQueue {
         val candidateState = AtlasQueueItemState.fromKey(candidate.state)
         if (
             candidateState !in setOf(AtlasQueueItemState.Pending, AtlasQueueItemState.Failed) ||
+            (candidateState == AtlasQueueItemState.Failed &&
+                !retryAllowed(candidate.attempts, BridgePreferences.recoveryMaxAttempts(context))) ||
             candidate.nextAttemptAtMs > now
         ) return@synchronized null
         val claimed = items[index].copy(
@@ -208,3 +211,10 @@ object AtlasMessageQueue {
             .commit()
     }
 }
+
+/**
+ * `attempts` is the number of failures already recorded. A limit of 3 therefore
+ * permits attempts 1, 2 and 3, then leaves the item failed for manual retry.
+ */
+internal fun retryAllowed(attempts: Int, maxAttempts: Int?): Boolean =
+    maxAttempts == null || attempts < maxAttempts

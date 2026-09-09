@@ -15,6 +15,8 @@ object BridgePreferences {
     private const val DEVICES = "devices"
     private const val SELECTED_DEVICE = "selectedDevice"
     private const val SEND_MODE = "sendMode"
+    private const val RECOVERY_MAX_ATTEMPTS = "recoveryMaxAttempts"
+    private const val DEFAULT_RECOVERY_MAX_ATTEMPTS = 3
     private val json = Json { ignoreUnknownKeys = true }
     fun url(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("url", "http://127.0.0.1:15730") ?: ""
     fun token(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("token", "") ?: ""
@@ -26,6 +28,19 @@ object BridgePreferences {
     fun readRepliesAloud(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("readRepliesAloud", false)
     fun sendMode(context: Context): String = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         .getString(SEND_MODE, AtlasMessageMode.Queue.key) ?: AtlasMessageMode.Queue.key
+
+    /** Maximum automatic queue recovery attempts. Null means unlimited. */
+    fun recoveryMaxAttempts(context: Context): Int? {
+        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(RECOVERY_MAX_ATTEMPTS, DEFAULT_RECOVERY_MAX_ATTEMPTS)
+        return stored.takeIf { it > 0 }
+    }
+
+    fun saveRecoveryMaxAttempts(context: Context, value: Int?) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(RECOVERY_MAX_ATTEMPTS, value?.takeIf { it > 0 } ?: -1)
+            .apply()
+    }
     fun save(context: Context, url: String, token: String, sessionId: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("url", url.trim())

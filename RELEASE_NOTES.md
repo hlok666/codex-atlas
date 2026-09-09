@@ -1,5 +1,8 @@
 # Codex Atlas 0.1.46 发布说明
 
+- Android 设置新增“继续重试次数”：输入正整数限制自动恢复次数，留空表示无限重试；达到上限后保留消息并停止自动发送，可手动重试。
+- Android 队列后台服务和前台发送流程统一读取该限制，避免配置只停留在界面。
+- Android `versionName` 更新至 `0.1.46`，`versionCode` 更新为 `41`。
 - 修复中转站场景下 Computer Use 未暴露给 Codex 会话的问题。
 - 自动开启 `computer_use` feature 与 `browser,computer` CUA surface。
 - 修复并清理过期的动态 Native Pipe 配置，保留模型中转地址不变。

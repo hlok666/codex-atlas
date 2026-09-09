@@ -715,6 +715,9 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var sendMode by remember {
         mutableStateOf(AtlasMessageMode.fromKey(BridgePreferences.sendMode(context)))
     }
+    var recoveryMaxAttempts by remember {
+        mutableStateOf(BridgePreferences.recoveryMaxAttempts(context))
+    }
     var queuedMessageCount by remember { mutableStateOf(AtlasMessageQueue.count(context)) }
     var queuedMessages by remember { mutableStateOf(AtlasMessageQueue.items(context)) }
     var queueControl by remember { mutableStateOf(AtlasMessageQueue.control(context)) }
@@ -1545,6 +1548,11 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 readRepliesAloud = enabled
                 BridgePreferences.saveReadRepliesAloud(context, enabled)
                 if (!enabled) speechOutput.stop()
+            },
+            recoveryMaxAttempts = recoveryMaxAttempts,
+            onRecoveryMaxAttemptsChange = { value ->
+                recoveryMaxAttempts = value
+                BridgePreferences.saveRecoveryMaxAttempts(context, value)
             },
             balance = snapshot,
             balanceBusy = balanceBusy,
@@ -2861,6 +2869,8 @@ private fun MobileSettingsPage(
     onRouteChange: (ConnectionRoute) -> Unit,
     readRepliesAloud: Boolean,
     onReadRepliesChange: (Boolean) -> Unit,
+    recoveryMaxAttempts: Int?,
+    onRecoveryMaxAttemptsChange: (Int?) -> Unit,
     balance: AtlasSnapshot?,
     balanceBusy: Boolean,
     balanceRefreshError: String?,
@@ -2943,6 +2953,44 @@ private fun MobileSettingsPage(
                         uncheckedTrackColor = Color(0xFFEDF2ED),
                         uncheckedBorderColor = Color(0xFFCDD5CD),
                     ),
+                )
+            }
+            androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+            var recoveryAttemptsText by remember(recoveryMaxAttempts) {
+                mutableStateOf(recoveryMaxAttempts?.toString().orEmpty())
+            }
+            var recoveryAttemptsInvalid by remember { mutableStateOf(false) }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    if (chinese) "继续重试次数" else "Recovery retry attempts",
+                    color = Color(0xFF26332A),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                )
+                OutlinedTextField(
+                    value = recoveryAttemptsText,
+                    onValueChange = { next ->
+                        if (next.all(Char::isDigit)) {
+                            recoveryAttemptsText = next
+                            val parsed = next.toIntOrNull()
+                            val valid = next.isBlank() || (parsed != null && parsed > 0)
+                            recoveryAttemptsInvalid = !valid
+                            if (valid) onRecoveryMaxAttemptsChange(parsed)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    isError = recoveryAttemptsInvalid,
+                    label = { Text(if (chinese) "次数" else "Attempts") },
+                    supportingText = {
+                        Text(
+                            when {
+                                recoveryAttemptsInvalid -> if (chinese) "请输入大于 0 的整数" else "Enter a positive number"
+                                recoveryMaxAttempts == null -> if (chinese) "留空表示无限重试" else "Blank means unlimited retries"
+                                else -> if (chinese) "达到次数后停止自动恢复，可手动重试" else "Stops automatic recovery at the limit; manual retry remains available"
+                            },
+                        )
+                    },
                 )
             }
             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))

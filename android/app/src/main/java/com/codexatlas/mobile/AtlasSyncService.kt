@@ -210,8 +210,17 @@ class AtlasSyncService : Service() {
                 }
                 AtlasMessageQueue.markFailure(this, queued.id, error.message)
                 sendBroadcast(Intent(ACTION_UPDATED).setPackage(packageName))
-                updateNotification("Codex Atlas", "队列发送失败，正在重试")
-                delay((1_500L * (queued.attempts + 1).coerceAtMost(4)).coerceAtMost(30_000L))
+                val failed = AtlasMessageQueue.items(this).firstOrNull { it.id == queued.id }
+                val canRetry = failed?.let {
+                    retryAllowed(it.attempts, BridgePreferences.recoveryMaxAttempts(this))
+                } == true
+                if (canRetry) {
+                    updateNotification("Codex Atlas", "队列发送失败，正在重试")
+                    delay((1_500L * (failed?.attempts ?: queued.attempts + 1).coerceAtMost(4)).coerceAtMost(30_000L))
+                } else {
+                    updateNotification("Codex Atlas", "自动恢复已停止，请手动重试")
+                    delay(750)
+                }
             }
         }
     }
