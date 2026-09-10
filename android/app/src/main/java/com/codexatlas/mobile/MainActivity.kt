@@ -727,6 +727,8 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
     var messageBusy by remember { mutableStateOf(false) }
     var messageError by remember { mutableStateOf<String?>(null) }
     var exitingSessionId by remember { mutableStateOf<String?>(null) }
+    var sessionModelBusyId by remember { mutableStateOf<String?>(null) }
+    var sessionModelError by remember { mutableStateOf<String?>(null) }
     var createVisible by remember { mutableStateOf(false) }
     var conversationMenuExpanded by remember { mutableStateOf(false) }
     var createCwd by remember { mutableStateOf("") }
@@ -1164,6 +1166,45 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 ).show()
             }
             exitingSessionId = null
+        }
+    }
+
+    fun setSessionModel(sessionId: String, model: String) {
+        val target = sessions.firstOrNull { it.id == sessionId }
+        val details = MainActivity.parsePairing(pairing)
+        if (target == null || details == null || model.isBlank() || sessionModelBusyId != null) return
+        sessionModelBusyId = sessionId
+        sessionModelError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val primary = primaryBridgeUrl(details, connectionRoute)
+                    val fallback = fallbackBridgeUrl(details, connectionRoute)
+                    AtlasBridgeClient(primary, details.token).setSessionModelAny(sessionId, model, fallback)
+                }
+            }
+            result.onSuccess { selectedModel ->
+                sessions = sessions.map { session ->
+                    if (session.id == sessionId) session.copy(model = selectedModel) else session
+                }
+                if (snapshot?.sessionId == sessionId) {
+                    snapshot = snapshot?.copy(model = selectedModel)
+                    snapshot?.let { BridgePreferences.saveCachedSnapshot(context, it) }
+                }
+                Toast.makeText(
+                    context,
+                    if (zh) "已切换模型：$selectedModel，下一轮生效" else "Model changed to $selectedModel for the next turn",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }.onFailure { error ->
+                sessionModelError = connectionFailureMessage(error, zh)
+                Toast.makeText(
+                    context,
+                    if (zh) "切换模型失败：${sessionModelError}" else "Could not change model: ${sessionModelError}",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            sessionModelBusyId = null
         }
     }
 
@@ -1918,6 +1959,16 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     }
                 }
                 if (mobilePage == MobilePage.Conversation) {
+                    val sessionModelOptions = buildList {
+                        runtimeDefaults.models.forEach { option ->
+                            if (option.slug.isNotBlank() && !any { pair: Pair<String, String> -> pair.first == option.slug }) {
+                                add(option.slug to option.displayName.ifBlank { option.slug })
+                            }
+                        }
+                        if (conversationModel.isNotBlank() && !any { pair: Pair<String, String> -> pair.first == conversationModel }) {
+                            add(conversationModel to conversationModel)
+                        }
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1983,6 +2034,40 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                             openWorkspace(conversationId)
                                         },
                                     )
+                                    if (sessionModelOptions.isNotEmpty()) {
+                                        androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    if (zh) "当前会话模型" else "Model for this session",
+                                                    color = Color(0xFF7A867B),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                )
+                                            },
+                                            onClick = {},
+                                            enabled = false,
+                                        )
+                                        sessionModelOptions.forEach { (slug, label) ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = if (slug == conversationModel) {
+                                                            "✓ ${label.ifBlank { slug }}"
+                                                        } else {
+                                                            label.ifBlank { slug }
+                                                        },
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                },
+                                                onClick = {
+                                                    conversationMenuExpanded = false
+                                                    if (slug != conversationModel) setSessionModel(conversationId, slug)
+                                                },
+                                                enabled = sessionModelBusyId == null,
+                                            )
+                                        }
+                                    }
                                     DropdownMenuItem(
                                         text = {
                                             Text(

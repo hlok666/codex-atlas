@@ -568,6 +568,35 @@ class AtlasBridgeClient(
     fun inputAny(sessionId: String, text: String, fallbackUrl: String = "") =
         postAny(sessionIdPath(sessionId, "/input"), json.encodeToString(mapOf("text" to text)), fallbackUrl)
 
+    fun setSessionModelAny(sessionId: String, model: String, fallbackUrl: String = ""): String {
+        val body = json.encodeToString(mapOf("model" to model.trim()))
+        val candidates = bridgeCandidates(baseUrl, fallbackUrl)
+        var failure: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(sessionIdPathForBase(candidate, sessionId, "/model"))
+                    .header("Authorization", "Bearer $token")
+                    .post(body.toRequestBody())
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) error(bridgeError(response.code, responseBody))
+                    val selected = runCatching {
+                        json.parseToJsonElement(responseBody).jsonObject["model"]?.jsonPrimitive?.contentOrNull
+                    }.getOrNull().orEmpty()
+                    if (selected.isBlank()) error("Atlas Bridge returned no selected model")
+                    BridgeTransport.succeeded(candidate)
+                    return selected
+                }
+            } catch (error: Throwable) {
+                BridgeTransport.failed(candidate)
+                failure = IllegalStateException("$candidate: ${error.message}", error)
+            }
+        }
+        throw failure ?: IllegalStateException("No Atlas Bridge URL configured")
+    }
+
     fun sendMessageAny(
         sessionId: String,
         text: String,
@@ -674,4 +703,7 @@ class AtlasBridgeClient(
 
     private fun sessionIdPath(sessionId: String, suffix: String): String =
         "/v1/sessions/" + java.net.URLEncoder.encode(sessionId, Charsets.UTF_8.name()) + suffix
+
+    private fun sessionIdPathForBase(base: String, sessionId: String, suffix: String): String =
+        base.trimEnd('/') + sessionIdPath(sessionId, suffix)
 }

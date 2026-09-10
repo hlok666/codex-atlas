@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.47 发布说明
+
+- Android 会话菜单新增按会话切换模型，模型来自当前启用上游的 `/models` 列表。
+- 切换只调用当前 Codex 线程的 `/model` 对应设置协议（`thread/settings/update`），不修改全局默认模型或其他会话。
+- 模型切换即时写入当前会话，Codex 下一轮思考自动使用新模型；兼容未连接 app-server 的运行中终端兜底交互。
+- Android `versionName` 更新至 `0.1.47`，`versionCode` 更新为 `42`。
+
 # Codex Atlas 0.1.46 发布说明
 
 - Android 设置新增“继续重试次数”：输入正整数限制自动恢复次数，留空表示无限重试；达到上限后保留消息并停止自动发送，可手动重试。

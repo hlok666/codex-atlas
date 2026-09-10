@@ -344,6 +344,44 @@ struct ProcessSnapshotCache {
 
 static PROCESS_SNAPSHOT_CACHE: OnceLock<Mutex<ProcessSnapshotCache>> = OnceLock::new();
 static MOBILE_SESSION_CACHE: OnceLock<Mutex<RuntimeSessionCache>> = OnceLock::new();
+static SESSION_MODEL_OVERRIDES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn remember_session_model_override(session_id: &str, model: &str) {
+    let session_id = session_id.trim();
+    let model = model.trim();
+    if session_id.is_empty() || model.is_empty() {
+        return;
+    }
+    if let Ok(mut overrides) = SESSION_MODEL_OVERRIDES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        overrides.insert(session_id.to_string(), model.to_string());
+    }
+    // Publish the result to the mobile cache immediately. The SQLite index
+    // and rollout scanner may take a moment to persist the settings event.
+    if let Ok(mut cache) = MOBILE_SESSION_CACHE
+        .get_or_init(|| Mutex::new(RuntimeSessionCache::default()))
+        .lock()
+    {
+        for session in &mut cache.sessions {
+            if session.id == session_id {
+                session.model = model.to_string();
+            }
+        }
+    }
+}
+
+fn apply_session_model_override(session: &mut SessionRecord) {
+    let Some(model) = SESSION_MODEL_OVERRIDES
+        .get()
+        .and_then(|store| store.lock().ok())
+        .and_then(|overrides| overrides.get(&session.id).cloned())
+    else {
+        return;
+    };
+    session.model = model;
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1132,6 +1170,13 @@ struct MobileSessionInputRequest {
     client_message_id: String,
     #[serde(default)]
     mode: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileSessionModelRequest {
+    #[serde(default)]
+    model: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3940,6 +3985,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
             .or_else(|| value.strip_suffix("/input"))
             .or_else(|| value.strip_suffix("/message"))
             .or_else(|| value.strip_suffix("/dictation"))
+            .or_else(|| value.strip_suffix("/model"))
             .or_else(|| value.strip_suffix("/exit"))
     }) else {
         let _ = request.respond(bridge_json_response(
@@ -3955,6 +4001,39 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         ));
         return;
     };
+    if path.ends_with("/model") {
+        let input = match serde_json::from_str::<MobileSessionModelRequest>(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"ok": false, "error": format!("invalid model request: {error}")}),
+                    400,
+                ));
+                return;
+            }
+        };
+        let model = match validate_model_slug(&input.model) {
+            Ok(model) => model,
+            Err(error) => {
+                let _ = request.respond(bridge_json_response(
+                    &serde_json::json!({"ok": false, "error": error}),
+                    422,
+                ));
+                return;
+            }
+        };
+        let response = match set_session_model(&app_state, &session, model) {
+            Ok(()) => bridge_json_response(
+                &serde_json::json!({"ok": true, "model": model, "sessionId": session.id}),
+                200,
+            ),
+            Err(error) => {
+                bridge_json_response(&serde_json::json!({"ok": false, "error": error}), 409)
+            }
+        };
+        let _ = request.respond(response);
+        return;
+    }
     if path.ends_with("/exit") {
         let response = match exit_codex_session_sync(session_id) {
             Ok(true) => bridge_json_response(&serde_json::json!({"ok": true}), 200),
@@ -8159,6 +8238,9 @@ fn enrich_sessions_with_mode(
     mut sessions: Vec<SessionRecord>,
     runtime_only: bool,
 ) -> (Vec<SessionRecord>, Vec<RunningCodexSession>) {
+    for session in &mut sessions {
+        apply_session_model_override(session);
+    }
     let candidates = codex_process_candidates();
     let hook_observations = load_hook_observations();
     let mut assignments = vec![Vec::<ProcessCandidate>::new(); sessions.len()];
@@ -9269,6 +9351,69 @@ fn runtime_thread_resume_params(
         params["cwd"] = Value::String(cwd.trim().to_string());
     }
     params
+}
+
+fn validate_model_slug(model: &str) -> Result<&str, String> {
+    let model = model.trim();
+    if model.is_empty() || model.len() > 160 || model.contains(['\r', '\n']) {
+        return Err("model name is invalid".to_string());
+    }
+    Ok(model)
+}
+
+/// Update only one Codex thread's model. This is the protocol equivalent of
+/// the CLI's `/model` picker: it changes the settings used by subsequent
+/// turns without touching the global Codex config or any other session.
+fn set_session_model(state: &AppState, session: &SessionRecord, model: &str) -> Result<(), String> {
+    let model = validate_model_slug(model)?;
+    let settings = serde_json::json!({
+        "threadId": session.id,
+        "model": model,
+    });
+    match app_server_request(state, "thread/settings/update", settings) {
+        Ok(_) => {
+            remember_session_model_override(&session.id, model);
+            return Ok(());
+        }
+        Err(first_error) => {
+            // A thread discovered from the process/index may not be attached
+            // to Atlas's long-lived app-server connection yet. Resume it with
+            // the target model, then apply the settings update once attached.
+            let resume =
+                runtime_thread_resume_params(&session.id, &session.cwd, model, &session.permission);
+            if app_server_request(state, "thread/resume", resume).is_ok()
+                && app_server_request(
+                    state,
+                    "thread/settings/update",
+                    serde_json::json!({"threadId": session.id, "model": model}),
+                )
+                .is_ok()
+            {
+                remember_session_model_override(&session.id, model);
+                return Ok(());
+            }
+
+            // Older/standalone Codex terminals may not expose app-server. In
+            // that case use the same interactive `/model` command the CLI
+            // exposes. The second submission selects the requested model in
+            // the picker and applies it to the next turn.
+            if session.running {
+                send_text_to_terminal(session, "/model", true)
+                    .and_then(|_| {
+                        thread::sleep(Duration::from_millis(250));
+                        send_text_to_terminal(session, model, true)
+                    })
+                    .map_err(|fallback_error| {
+                        format!(
+                            "thread model update failed: {first_error}; terminal fallback failed: {fallback_error}"
+                        )
+                    })?;
+                remember_session_model_override(&session.id, model);
+                return Ok(());
+            }
+            return Err(format!("thread model update failed: {first_error}"));
+        }
+    }
 }
 
 /// Apply defaults to every thread Atlas knows about and to the current turn
@@ -14643,6 +14788,28 @@ mod runtime_probe_tests {
             MobileMessageMode::Interrupt
         );
         assert_eq!(mobile_message_mode("unexpected"), MobileMessageMode::Queue);
+    }
+
+    #[test]
+    fn mobile_session_model_request_requires_a_safe_non_empty_model() {
+        let request: MobileSessionModelRequest = serde_json::from_str(r#"{"model":"gpt-5.6-sol"}"#)
+            .expect("model request should decode");
+        assert_eq!(validate_model_slug(&request.model), Ok("gpt-5.6-sol"));
+        assert!(validate_model_slug(" ").is_err());
+        assert!(validate_model_slug("model\nwith-newline").is_err());
+        assert!(validate_model_slug(&"x".repeat(161)).is_err());
+    }
+
+    #[test]
+    fn mobile_session_model_request_keeps_model_only_protocol_scope() {
+        let params = serde_json::json!({
+            "threadId": "thread-1",
+            "model": "relay-fast",
+        });
+        assert_eq!(params.as_object().map(|value| value.len()), Some(2));
+        assert!(params.get("approvalPolicy").is_none());
+        assert!(params.get("sandboxPolicy").is_none());
+        assert!(params.get("effort").is_none());
     }
 
     #[test]
