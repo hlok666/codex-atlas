@@ -681,6 +681,60 @@ private fun MessageModeSelector(
 }
 
 @Composable
+private fun SessionChoiceMenu(
+    label: String,
+    value: String,
+    options: List<Pair<String, String>>,
+    enabled: Boolean,
+    onSelected: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember(label, value) { mutableStateOf(false) }
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(label, color = Color(0xFF6E796F), style = MaterialTheme.typography.labelSmall)
+        Box {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(38.dp)
+                    .clickable(enabled = enabled) { expanded = true },
+                shape = RoundedCornerShape(8.dp),
+                color = if (enabled) Color(0xFFF3F6F3) else Color(0xFFF7F8F7),
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        options.firstOrNull { it.first == value }?.second ?: value,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (enabled) Color(0xFF26332A) else Color(0xFF9AA39B),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Icon(Icons.Filled.ExpandMore, contentDescription = null, tint = Color(0xFF667466), modifier = Modifier.size(18.dp))
+                }
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { (key, title) ->
+                    DropdownMenuItem(
+                        text = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = {
+                            expanded = false
+                            onSelected(key)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = "") {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1169,7 +1223,7 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
         }
     }
 
-    fun setSessionModel(sessionId: String, model: String) {
+    fun setSessionRuntime(sessionId: String, model: String, reasoningEffort: String) {
         val target = sessions.firstOrNull { it.id == sessionId }
         val details = MainActivity.parsePairing(pairing)
         if (target == null || details == null || model.isBlank() || sessionModelBusyId != null) return
@@ -1180,20 +1234,20 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                 runCatching {
                     val primary = primaryBridgeUrl(details, connectionRoute)
                     val fallback = fallbackBridgeUrl(details, connectionRoute)
-                    AtlasBridgeClient(primary, details.token).setSessionModelAny(sessionId, model, fallback)
+                    AtlasBridgeClient(primary, details.token).setSessionSettingsAny(sessionId, model, reasoningEffort, fallback)
                 }
             }
-            result.onSuccess { selectedModel ->
+            result.onSuccess { selected ->
                 sessions = sessions.map { session ->
-                    if (session.id == sessionId) session.copy(model = selectedModel) else session
+                    if (session.id == sessionId) session.copy(model = selected.model, reasoningEffort = selected.reasoningEffort) else session
                 }
                 if (snapshot?.sessionId == sessionId) {
-                    snapshot = snapshot?.copy(model = selectedModel)
+                    snapshot = snapshot?.copy(model = selected.model)
                     snapshot?.let { BridgePreferences.saveCachedSnapshot(context, it) }
                 }
                 Toast.makeText(
                     context,
-                    if (zh) "已切换模型：$selectedModel，下一轮生效" else "Model changed to $selectedModel for the next turn",
+                    if (zh) "已更新会话设置，下一轮生效" else "Session settings updated for the next turn",
                     Toast.LENGTH_SHORT,
                 ).show()
             }.onFailure { error ->
@@ -1839,6 +1893,17 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     ?: if (zh) "未命名会话" else "Untitled session"
                 val conversationFolder = selectedSession?.cwd.orEmpty()
                 val conversationModel = selectedSession?.model.orEmpty()
+                val conversationReasoning = selectedSession?.reasoningEffort?.ifBlank { "medium" } ?: "medium"
+                val sessionModelOptions = buildList<Pair<String, String>> {
+                    runtimeDefaults.models.forEach { option ->
+                        if (option.slug.isNotBlank() && !any { pair -> pair.first == option.slug }) {
+                            add(option.slug to option.displayName.ifBlank { option.slug })
+                        }
+                    }
+                    if (conversationModel.isNotBlank() && !any { pair -> pair.first == conversationModel }) {
+                        add(conversationModel to conversationModel)
+                    }
+                }
                 val messages = messagesBySession[conversationId].orEmpty()
                 LaunchedEffect(conversationId, selectedDeviceId, connectionRoute, pairing) {
                     if (conversationId.isBlank()) return@LaunchedEffect
@@ -1959,16 +2024,6 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                     }
                 }
                 if (mobilePage == MobilePage.Conversation) {
-                    val sessionModelOptions = buildList {
-                        runtimeDefaults.models.forEach { option ->
-                            if (option.slug.isNotBlank() && !any { pair: Pair<String, String> -> pair.first == option.slug }) {
-                                add(option.slug to option.displayName.ifBlank { option.slug })
-                            }
-                        }
-                        if (conversationModel.isNotBlank() && !any { pair: Pair<String, String> -> pair.first == conversationModel }) {
-                            add(conversationModel to conversationModel)
-                        }
-                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2034,40 +2089,6 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                                             openWorkspace(conversationId)
                                         },
                                     )
-                                    if (sessionModelOptions.isNotEmpty()) {
-                                        androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    if (zh) "当前会话模型" else "Model for this session",
-                                                    color = Color(0xFF7A867B),
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                )
-                                            },
-                                            onClick = {},
-                                            enabled = false,
-                                        )
-                                        sessionModelOptions.forEach { (slug, label) ->
-                                            DropdownMenuItem(
-                                                text = {
-                                                    Text(
-                                                        text = if (slug == conversationModel) {
-                                                            "✓ ${label.ifBlank { slug }}"
-                                                        } else {
-                                                            label.ifBlank { slug }
-                                                        },
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                    )
-                                                },
-                                                onClick = {
-                                                    conversationMenuExpanded = false
-                                                    if (slug != conversationModel) setSessionModel(conversationId, slug)
-                                                },
-                                                enabled = sessionModelBusyId == null,
-                                            )
-                                        }
-                                    }
                                     DropdownMenuItem(
                                         text = {
                                             Text(
@@ -2258,6 +2279,42 @@ private fun AtlasMobileApp(initialPairing: String, initialSessionId: String = ""
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             androidx.compose.material3.HorizontalDivider(color = Color(0xFFE6EAE6))
+                            if (sessionModelOptions.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    SessionChoiceMenu(
+                                        label = if (zh) "模型" else "Model",
+                                        value = conversationModel,
+                                        options = sessionModelOptions,
+                                        enabled = sessionModelBusyId == null && !messageBusy,
+                                        onSelected = { next ->
+                                            if (next != conversationModel) {
+                                                setSessionRuntime(conversationId, next, conversationReasoning)
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1.45f),
+                                    )
+                                    SessionChoiceMenu(
+                                        label = if (zh) "思考" else "Reasoning",
+                                        value = conversationReasoning,
+                                        options = listOf(
+                                            "low" to if (zh) "低" else "Low",
+                                            "medium" to if (zh) "中" else "Medium",
+                                            "high" to if (zh) "高" else "High",
+                                            "xhigh" to if (zh) "极高" else "Extra high",
+                                        ),
+                                        enabled = sessionModelBusyId == null && !messageBusy,
+                                        onSelected = { next ->
+                                            if (next != conversationReasoning) {
+                                                setSessionRuntime(conversationId, conversationModel, next)
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
                             MessageModeSelector(
                                 mode = sendMode,
                                 chinese = zh,

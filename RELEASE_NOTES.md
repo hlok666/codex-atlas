@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.48 发布说明
+
+- Android 会话输入区新增紧凑的会话级模型选择和思考深度选择。
+- 模型与思考深度通过 Codex 当前线程的 `thread/settings/update` 即时更新，对应 CLI `/model` 的线程设置行为。
+- 每个会话独立保存模型和思考深度，切换不会修改全局默认配置或其他会话；下一轮思考使用新设置。
+- Android `versionName` 更新至 `0.1.48`，`versionCode` 更新为 `43`。
+
 # Codex Atlas 0.1.47 发布说明
 
 - Android 会话菜单新增按会话切换模型，模型来自当前启用上游的 `/models` 列表。

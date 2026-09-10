@@ -104,6 +104,7 @@ data class AtlasSession(
     val preview: String = "",
     val cwd: String = "",
     val model: String = "",
+    val reasoningEffort: String = "medium",
     val permission: String = "",
     val running: Boolean = false,
     val liveState: String = "",
@@ -172,6 +173,12 @@ data class AtlasRuntimeDefaults(
     val source: String = "",
     val fetchedAtMs: Long = 0,
     val error: String? = null,
+)
+
+@Serializable
+data class AtlasSessionSettings(
+    val model: String = "",
+    val reasoningEffort: String = "medium",
 )
 
 @Serializable

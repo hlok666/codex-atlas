@@ -344,19 +344,24 @@ struct ProcessSnapshotCache {
 
 static PROCESS_SNAPSHOT_CACHE: OnceLock<Mutex<ProcessSnapshotCache>> = OnceLock::new();
 static MOBILE_SESSION_CACHE: OnceLock<Mutex<RuntimeSessionCache>> = OnceLock::new();
-static SESSION_MODEL_OVERRIDES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static SESSION_RUNTIME_OVERRIDES: OnceLock<Mutex<HashMap<String, (String, String)>>> =
+    OnceLock::new();
 
-fn remember_session_model_override(session_id: &str, model: &str) {
+fn remember_session_runtime_override(session_id: &str, model: &str, reasoning_effort: &str) {
     let session_id = session_id.trim();
     let model = model.trim();
     if session_id.is_empty() || model.is_empty() {
         return;
     }
-    if let Ok(mut overrides) = SESSION_MODEL_OVERRIDES
+    let reasoning_effort = normalize_reasoning_effort(reasoning_effort).to_string();
+    if let Ok(mut overrides) = SESSION_RUNTIME_OVERRIDES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        overrides.insert(session_id.to_string(), model.to_string());
+        overrides.insert(
+            session_id.to_string(),
+            (model.to_string(), reasoning_effort.clone()),
+        );
     }
     // Publish the result to the mobile cache immediately. The SQLite index
     // and rollout scanner may take a moment to persist the settings event.
@@ -367,13 +372,14 @@ fn remember_session_model_override(session_id: &str, model: &str) {
         for session in &mut cache.sessions {
             if session.id == session_id {
                 session.model = model.to_string();
+                session.reasoning_effort = reasoning_effort.clone();
             }
         }
     }
 }
 
-fn apply_session_model_override(session: &mut SessionRecord) {
-    let Some(model) = SESSION_MODEL_OVERRIDES
+fn apply_session_runtime_override(session: &mut SessionRecord) {
+    let Some((model, reasoning_effort)) = SESSION_RUNTIME_OVERRIDES
         .get()
         .and_then(|store| store.lock().ok())
         .and_then(|overrides| overrides.get(&session.id).cloned())
@@ -381,6 +387,7 @@ fn apply_session_model_override(session: &mut SessionRecord) {
         return;
     };
     session.model = model;
+    session.reasoning_effort = reasoning_effort;
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -392,6 +399,7 @@ pub struct SessionRecord {
     pub cwd: String,
     pub branch: String,
     pub model: String,
+    pub reasoning_effort: String,
     pub model_provider: String,
     pub permission: String,
     pub updated_at_ms: i64,
@@ -934,6 +942,7 @@ struct MobileSessionSummary {
     preview: String,
     cwd: String,
     model: String,
+    reasoning_effort: String,
     permission: String,
     running: bool,
     live_state: String,
@@ -967,6 +976,7 @@ impl From<&SessionRecord> for MobileSessionSummary {
             preview: session.preview.chars().take(600).collect(),
             cwd: session.cwd.clone(),
             model: session.model.clone(),
+            reasoning_effort: session.reasoning_effort.clone(),
             permission: session.permission.clone(),
             running: session.running,
             live_state: session.live_state.clone(),
@@ -1177,6 +1187,8 @@ struct MobileSessionInputRequest {
 struct MobileSessionModelRequest {
     #[serde(default)]
     model: String,
+    #[serde(default)]
+    reasoning_effort: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4022,9 +4034,23 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
                 return;
             }
         };
-        let response = match set_session_model(&app_state, &session, model) {
-            Ok(()) => bridge_json_response(
-                &serde_json::json!({"ok": true, "model": model, "sessionId": session.id}),
+        let requested_effort = if input.reasoning_effort.trim().is_empty() {
+            None
+        } else {
+            match requested_reasoning_effort(&input.reasoning_effort) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    let _ = request.respond(bridge_json_response(
+                        &serde_json::json!({"ok": false, "error": error}),
+                        422,
+                    ));
+                    return;
+                }
+            }
+        };
+        let response = match set_session_model(&app_state, &session, model, requested_effort) {
+            Ok(selected_effort) => bridge_json_response(
+                &serde_json::json!({"ok": true, "model": model, "reasoningEffort": selected_effort, "sessionId": session.id}),
                 200,
             ),
             Err(error) => {
@@ -4395,6 +4421,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> 
         cwd,
         branch: branch.unwrap_or_default(),
         model: model.unwrap_or_default(),
+        reasoning_effort: "medium".to_string(),
         model_provider: provider,
         permission: permission_label(approval_mode, sandbox_policy),
         updated_at_ms: timestamp,
@@ -4645,6 +4672,7 @@ fn scan_jsonl_sessions_with_limits(
             cwd: cwd.clone(),
             branch: String::new(),
             model,
+            reasoning_effort: "medium".to_string(),
             model_provider: provider,
             permission: "Workspace write".to_string(),
             updated_at_ms: modified,
@@ -8239,7 +8267,7 @@ fn enrich_sessions_with_mode(
     runtime_only: bool,
 ) -> (Vec<SessionRecord>, Vec<RunningCodexSession>) {
     for session in &mut sessions {
-        apply_session_model_override(session);
+        apply_session_runtime_override(session);
     }
     let candidates = codex_process_candidates();
     let hook_observations = load_hook_observations();
@@ -9364,16 +9392,37 @@ fn validate_model_slug(model: &str) -> Result<&str, String> {
 /// Update only one Codex thread's model. This is the protocol equivalent of
 /// the CLI's `/model` picker: it changes the settings used by subsequent
 /// turns without touching the global Codex config or any other session.
-fn set_session_model(state: &AppState, session: &SessionRecord, model: &str) -> Result<(), String> {
+fn requested_reasoning_effort(value: &str) -> Result<&'static str, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" => Ok("low"),
+        "medium" => Ok("medium"),
+        "high" => Ok("high"),
+        "xhigh" | "extra-high" | "extra_high" => Ok("xhigh"),
+        _ => Err("reasoning effort is invalid".to_string()),
+    }
+}
+
+fn set_session_model(
+    state: &AppState,
+    session: &SessionRecord,
+    model: &str,
+    reasoning_effort: Option<&str>,
+) -> Result<String, String> {
     let model = validate_model_slug(model)?;
-    let settings = serde_json::json!({
-        "threadId": session.id,
-        "model": model,
+    let effort = reasoning_effort
+        .map(requested_reasoning_effort)
+        .transpose()?;
+    let mut settings = serde_json::json!({"threadId": session.id, "model": model});
+    if let Some(effort) = effort {
+        settings["effort"] = Value::String(effort.to_string());
+    }
+    let selected_effort = effort.unwrap_or_else(|| {
+        requested_reasoning_effort(&session.reasoning_effort).unwrap_or("medium")
     });
     match app_server_request(state, "thread/settings/update", settings) {
         Ok(_) => {
-            remember_session_model_override(&session.id, model);
-            return Ok(());
+            remember_session_runtime_override(&session.id, model, selected_effort);
+            return Ok(selected_effort.to_string());
         }
         Err(first_error) => {
             // A thread discovered from the process/index may not be attached
@@ -9381,16 +9430,15 @@ fn set_session_model(state: &AppState, session: &SessionRecord, model: &str) -> 
             // the target model, then apply the settings update once attached.
             let resume =
                 runtime_thread_resume_params(&session.id, &session.cwd, model, &session.permission);
+            let mut retry_settings = serde_json::json!({"threadId": session.id, "model": model});
+            if let Some(effort) = effort {
+                retry_settings["effort"] = Value::String(effort.to_string());
+            }
             if app_server_request(state, "thread/resume", resume).is_ok()
-                && app_server_request(
-                    state,
-                    "thread/settings/update",
-                    serde_json::json!({"threadId": session.id, "model": model}),
-                )
-                .is_ok()
+                && app_server_request(state, "thread/settings/update", retry_settings).is_ok()
             {
-                remember_session_model_override(&session.id, model);
-                return Ok(());
+                remember_session_runtime_override(&session.id, model, selected_effort);
+                return Ok(selected_effort.to_string());
             }
 
             // Older/standalone Codex terminals may not expose app-server. In
@@ -9401,15 +9449,22 @@ fn set_session_model(state: &AppState, session: &SessionRecord, model: &str) -> 
                 send_text_to_terminal(session, "/model", true)
                     .and_then(|_| {
                         thread::sleep(Duration::from_millis(250));
-                        send_text_to_terminal(session, model, true)
+                        send_text_to_terminal(session, model, true).and_then(|_| {
+                            if reasoning_effort.is_some() {
+                                thread::sleep(Duration::from_millis(250));
+                                send_text_to_terminal(session, selected_effort, true)
+                            } else {
+                                Ok(())
+                            }
+                        })
                     })
                     .map_err(|fallback_error| {
                         format!(
                             "thread model update failed: {first_error}; terminal fallback failed: {fallback_error}"
                         )
                     })?;
-                remember_session_model_override(&session.id, model);
-                return Ok(());
+                remember_session_runtime_override(&session.id, model, selected_effort);
+                return Ok(selected_effort.to_string());
             }
             return Err(format!("thread model update failed: {first_error}"));
         }
@@ -15249,6 +15304,7 @@ mod runtime_probe_tests {
             cwd: "C:\\work folder\\project's files".to_string(),
             branch: String::new(),
             model: String::new(),
+            reasoning_effort: "medium".to_string(),
             model_provider: String::new(),
             permission: String::new(),
             updated_at_ms: 0,

@@ -568,8 +568,16 @@ class AtlasBridgeClient(
     fun inputAny(sessionId: String, text: String, fallbackUrl: String = "") =
         postAny(sessionIdPath(sessionId, "/input"), json.encodeToString(mapOf("text" to text)), fallbackUrl)
 
-    fun setSessionModelAny(sessionId: String, model: String, fallbackUrl: String = ""): String {
-        val body = json.encodeToString(mapOf("model" to model.trim()))
+    fun setSessionSettingsAny(
+        sessionId: String,
+        model: String,
+        reasoningEffort: String,
+        fallbackUrl: String = "",
+    ): AtlasSessionSettings {
+        val body = buildMap<String, String> {
+            put("model", model.trim())
+            if (reasoningEffort.isNotBlank()) put("reasoningEffort", reasoningEffort.trim())
+        }.let(json::encodeToString)
         val candidates = bridgeCandidates(baseUrl, fallbackUrl)
         var failure: Throwable? = null
         for (candidate in candidates) {
@@ -583,9 +591,9 @@ class AtlasBridgeClient(
                     val responseBody = response.body?.string().orEmpty()
                     if (!response.isSuccessful) error(bridgeError(response.code, responseBody))
                     val selected = runCatching {
-                        json.parseToJsonElement(responseBody).jsonObject["model"]?.jsonPrimitive?.contentOrNull
-                    }.getOrNull().orEmpty()
-                    if (selected.isBlank()) error("Atlas Bridge returned no selected model")
+                        json.decodeFromString<AtlasSessionSettings>(responseBody)
+                    }.getOrElse { error("Atlas Bridge returned an invalid session settings response") }
+                    if (selected.model.isBlank()) error("Atlas Bridge returned no selected model")
                     BridgeTransport.succeeded(candidate)
                     return selected
                 }
