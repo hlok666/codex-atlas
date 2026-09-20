@@ -40,9 +40,15 @@ const TERMINAL_INPUT_SETTLE_MS: u64 = CODEX_TUI_ENTER_SUPPRESS_MS + 60;
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM},
+    Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, HWND, LPARAM},
     Graphics::Gdi::{CombineRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_AND},
-    System::Threading::{AttachThreadInput, GetCurrentThreadId},
+    System::{
+        RestartManager::{
+            RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
+            RM_PROCESS_INFO,
+        },
+        Threading::{AttachThreadInput, GetCurrentThreadId},
+    },
     UI::{
         Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -78,10 +84,6 @@ impl Default for AppState {
 
 #[derive(Clone)]
 struct AppServerHandle {
-    endpoint: String,
-    auth_token: String,
-    #[cfg(target_os = "macos")]
-    token_path: PathBuf,
     tx: std::sync::mpsc::Sender<AppServerCommand>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
     /// Threads observed on the long-lived app-server connection. A thread can
@@ -3991,8 +3993,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
                 return;
             }
         };
-        let remote = app_server_remote(&app_state);
-        let response = match create_codex_session_sync(request_body, remote.as_ref()) {
+        let response = match create_codex_session_sync(request_body, None) {
             Ok(true) => bridge_json_response(&serde_json::json!({"ok": true}), 201),
             Ok(false) => bridge_json_response(&serde_json::json!({"ok": false}), 409),
             Err(error) => {
@@ -4154,7 +4155,10 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         } else if session.running {
             send_text_to_terminal(&session, &chunk.text, true)
         } else {
-            match launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref()) {
+            match launch_codex_resume_terminal(
+                &session,
+                app_server_remote_for_thread_lock(&session.id).as_ref(),
+            ) {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -4240,13 +4244,12 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         _ => {}
     }
     let result = if url.ends_with("/activate") {
-        if session.running {
-            focus_session_terminal(&session).or_else(|_| {
-                launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref())
-            })
-        } else {
-            launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref())
-        }
+        let remote = app_server_remote_for_thread_lock(&session.id);
+        ensure_session_terminal_visible(
+            session.running,
+            || focus_session_terminal(&session),
+            || launch_codex_resume_terminal(&session, remote.as_ref()),
+        )
     } else {
         let input = request_body
             .as_ref()
@@ -4268,7 +4271,10 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
             // terminal is closed; the next resume consumes it.
             Ok(())
         } else if url.ends_with("/message") {
-            match launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref()) {
+            match launch_codex_resume_terminal(
+                &session,
+                app_server_remote_for_thread_lock(&session.id).as_ref(),
+            ) {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -8898,15 +8904,143 @@ fn codex_executable() -> String {
         .unwrap_or_else(|| "codex".to_string())
 }
 
-fn app_server_remote(handle: &AppState) -> Option<AppServerRemote> {
-    handle.app_server.lock().ok().and_then(|server| {
-        server.as_ref().map(|server| AppServerRemote {
-            endpoint: server.endpoint.clone(),
-            auth_token: server.auth_token.clone(),
-            #[cfg(target_os = "macos")]
-            token_path: server.token_path.clone(),
-        })
+fn command_argument_after(command_line: &str, flag: &str) -> Option<String> {
+    let start = command_line.find(flag)? + flag.len();
+    let remainder = command_line.get(start..)?.trim_start();
+    if let Some(quoted) = remainder.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        return Some(quoted[..end].to_string());
+    }
+    remainder
+        .split_whitespace()
+        .next()
+        .map(|value| value.trim_matches('"').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn atlas_app_server_remote_from_process(process: &ProcessSnapshot) -> Option<AppServerRemote> {
+    if !process.name.eq_ignore_ascii_case("codex.exe")
+        || !process.command_line.contains("app-server")
+    {
+        return None;
+    }
+    let endpoint = command_argument_after(&process.command_line, "--listen")?;
+    let token_path = PathBuf::from(command_argument_after(
+        &process.command_line,
+        "--ws-token-file",
+    )?);
+    if !endpoint.starts_with("ws://127.0.0.1:")
+        || !token_path.starts_with(codex_home())
+        || !token_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.starts_with("atlas-app-server-token-"))
+    {
+        return None;
+    }
+    let auth_token = fs::read_to_string(&token_path).ok()?.trim().to_string();
+    if auth_token.is_empty() {
+        return None;
+    }
+    Some(AppServerRemote {
+        endpoint,
+        auth_token,
+        #[cfg(target_os = "macos")]
+        token_path,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn processes_locking_file(path: &Path) -> Vec<u32> {
+    use std::{os::windows::ffi::OsStrExt, ptr};
+
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let mut session_handle = 0u32;
+    let mut session_key = vec![0u16; CCH_RM_SESSION_KEY as usize + 1];
+    if unsafe { RmStartSession(&mut session_handle, 0, session_key.as_mut_ptr()) } != ERROR_SUCCESS
+    {
+        return Vec::new();
+    }
+    let result = (|| {
+        let mut wide_path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        wide_path.push(0);
+        let resources = [wide_path.as_ptr()];
+        if unsafe {
+            RmRegisterResources(
+                session_handle,
+                resources.len() as u32,
+                resources.as_ptr(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+            )
+        } != ERROR_SUCCESS
+        {
+            return Vec::new();
+        }
+        let mut needed = 0u32;
+        let mut count = 0u32;
+        let mut reboot_reasons = 0u32;
+        let status = unsafe {
+            RmGetList(
+                session_handle,
+                &mut needed,
+                &mut count,
+                ptr::null_mut(),
+                &mut reboot_reasons,
+            )
+        };
+        if status == ERROR_SUCCESS || needed == 0 {
+            return Vec::new();
+        }
+        if status != ERROR_MORE_DATA {
+            return Vec::new();
+        }
+        let mut processes = vec![RM_PROCESS_INFO::default(); needed as usize];
+        count = needed;
+        if unsafe {
+            RmGetList(
+                session_handle,
+                &mut needed,
+                &mut count,
+                processes.as_mut_ptr(),
+                &mut reboot_reasons,
+            )
+        } != ERROR_SUCCESS
+        {
+            return Vec::new();
+        }
+        processes
+            .into_iter()
+            .take(count as usize)
+            .map(|process| process.Process.dwProcessId)
+            .filter(|pid| *pid > 0)
+            .collect()
+    })();
+    unsafe { RmEndSession(session_handle) };
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn processes_locking_file(_path: &Path) -> Vec<u32> {
+    Vec::new()
+}
+
+fn app_server_remote_for_thread_lock(session_id: &str) -> Option<AppServerRemote> {
+    let lock_path = codex_home()
+        .join("thread-writer-locks")
+        .join(format!("{}.lock", session_id.trim()));
+    let locking_processes = processes_locking_file(&lock_path);
+    if locking_processes.is_empty() {
+        return None;
+    }
+    collect_process_snapshots()
+        .into_iter()
+        .filter(|process| locking_processes.contains(&process.pid))
+        .find_map(|process| atlas_app_server_remote_from_process(&process))
 }
 
 fn emit_app_server_notification(
@@ -9223,10 +9357,6 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
         // running independently of the desktop controller.
     });
     Some(AppServerHandle {
-        endpoint,
-        auth_token,
-        #[cfg(target_os = "macos")]
-        token_path,
         tx,
         active_turns,
         known_threads,
@@ -9813,7 +9943,7 @@ fn powershell_resume_command(session: &SessionRecord, remote: Option<&AppServerR
             )
         })
         .unwrap_or_default();
-    format!("$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} resume '{session_id}' -C '{cwd}'")
+    format!("$ErrorActionPreference = 'Continue'; $Host.UI.RawUI.WindowTitle = 'Codex Atlas | {session_id}'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} resume '{session_id}' -C '{cwd}'")
 }
 
 #[cfg(target_os = "windows")]
@@ -10013,7 +10143,7 @@ fn launch_codex_new_terminal(
         })
         .unwrap_or_default();
     let mut script = format!(
-        "$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} -c 'approval_policy=\"{approval}\"' -c 'sandbox_mode=\"{sandbox}\"' -c 'model_reasoning_effort=\"{reasoning_effort}\"'",
+        "$ErrorActionPreference = 'Continue'; $Host.UI.RawUI.WindowTitle = 'Codex Atlas | {cwd}'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} -c 'approval_policy=\"{approval}\"' -c 'sandbox_mode=\"{sandbox}\"' -c 'model_reasoning_effort=\"{reasoning_effort}\"'",
     );
     if !request.model.trim().is_empty() {
         script.push_str(&format!(
@@ -10195,16 +10325,10 @@ fn create_codex_session_sync(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn create_codex_session(
-    state: State<'_, AppState>,
-    request: NewCodexSessionRequest,
-) -> Result<bool, String> {
-    let remote = app_server_remote(&state);
-    tauri::async_runtime::spawn_blocking(move || {
-        create_codex_session_sync(request, remote.as_ref())
-    })
-    .await
-    .map_err(|error| format!("create Codex session task failed: {error}"))?
+async fn create_codex_session(request: NewCodexSessionRequest) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || create_codex_session_sync(request, None))
+        .await
+        .map_err(|error| format!("create Codex session task failed: {error}"))?
 }
 
 fn ensure_session_terminal_visible<Focus, Launch>(
@@ -10216,8 +10340,8 @@ where
     Focus: FnOnce() -> Result<(), String>,
     Launch: FnOnce() -> Result<(), String>,
 {
-    if session_running && focus().is_ok() {
-        return Ok(());
+    if session_running {
+        return focus();
     }
     launch()
 }
@@ -10225,7 +10349,7 @@ where
 #[tauri::command(rename_all = "camelCase")]
 fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Result<bool, String> {
     let session = find_session_for_command(&session_id)?;
-    let remote = app_server_remote(&state);
+    let remote = app_server_remote_for_thread_lock(&session.id);
     if !session.running {
         state
             .failure_counts
@@ -15396,6 +15520,9 @@ mod runtime_probe_tests {
             approval: None,
         };
         let command = powershell_resume_command(&session, None);
+        assert!(
+            command.contains("WindowTitle = 'Codex Atlas | 01a04645-5ce2-7e92-a076-cf4302ed2492'")
+        );
         assert!(command.contains("Set-Location -LiteralPath 'C:\\work folder\\project''s files'"));
         assert!(command.contains("resume '01a04645-5ce2-7e92-a076-cf4302ed2492'"));
         assert!(command.contains("-C 'C:\\work folder\\project''s files'"));
@@ -15460,7 +15587,7 @@ mod runtime_probe_tests {
         assert_eq!(focus_calls.get(), 1);
         assert_eq!(launch_calls.get(), 0);
 
-        ensure_session_terminal_visible(
+        let focus_error = ensure_session_terminal_visible(
             true,
             || Err("terminal window not found".to_string()),
             || {
@@ -15468,8 +15595,9 @@ mod runtime_probe_tests {
                 Ok(())
             },
         )
-        .expect("a missing running terminal is relaunched");
-        assert_eq!(launch_calls.get(), 1);
+        .expect_err("a running session must never be resumed twice");
+        assert_eq!(focus_error, "terminal window not found");
+        assert_eq!(launch_calls.get(), 0);
 
         let error = ensure_session_terminal_visible(
             false,
@@ -15478,6 +15606,68 @@ mod runtime_probe_tests {
         )
         .expect_err("activation must report a failed terminal launch");
         assert_eq!(error, "terminal launch failed");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn restart_manager_reports_the_thread_lock_owner() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "codex-atlas-writer-lock-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::write(&path, b"lock").expect("write lock fixture");
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("hold exclusive lock fixture");
+        let owners = processes_locking_file(&path);
+        assert!(owners.contains(&std::process::id()));
+        drop(locked);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_atlas_app_server_command_arguments() {
+        let command = "codex.exe app-server --listen ws://127.0.0.1:64346 --ws-auth capability-token --ws-token-file \"C:\\Users\\H\\.codex\\atlas-app-server-token-1-abcd\"";
+        assert_eq!(
+            command_argument_after(command, "--listen").as_deref(),
+            Some("ws://127.0.0.1:64346")
+        );
+        assert_eq!(
+            command_argument_after(command, "--ws-token-file").as_deref(),
+            Some("C:\\Users\\H\\.codex\\atlas-app-server-token-1-abcd")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual diagnostic: prints current Codex writer-lock ownership"]
+    fn diagnose_current_thread_writer_locks() {
+        let snapshots = collect_process_snapshots();
+        let lock_root = codex_home().join("thread-writer-locks");
+        for entry in fs::read_dir(lock_root)
+            .expect("read thread writer locks")
+            .flatten()
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("lock")
+            })
+        {
+            let owners = processes_locking_file(&entry.path());
+            let remotes = snapshots
+                .iter()
+                .filter(|process| owners.contains(&process.pid))
+                .filter_map(atlas_app_server_remote_from_process)
+                .map(|remote| remote.endpoint)
+                .collect::<Vec<_>>();
+            println!(
+                "{} owners={owners:?} atlas_remotes={remotes:?}",
+                entry.file_name().to_string_lossy()
+            );
+        }
     }
 
     #[test]

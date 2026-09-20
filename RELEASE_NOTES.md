@@ -1,3 +1,11 @@
+# Codex Atlas 0.1.51 发布说明
+
+- 修复激活会话后再次打开时出现 `This conversation is open in another app` 的重复会话占用问题。
+- Atlas 现在通过 Windows Restart Manager 查询目标会话 writer lock 的真实持有进程：无锁时启动独立 `codex resume`，已有 Atlas app-server 锁时复用实际持锁端点。
+- 运行中的会话只允许聚焦原终端，聚焦失败会返回真实错误，不再启动第二个 `resume` 与原会话争锁。
+- 新建会话和无锁激活不再连接 Atlas 私有 app-server；PowerShell 标题写入会话 ID，提升后续精确置前能力。
+- 桌面端与 Android App 统一更新至 `0.1.51`，Android `versionCode` 更新为 `46`。
+
 # Codex Atlas 0.1.50 发布说明
 
 - 修复桌面端点击“激活会话”显示成功但实际没有打开或置前终端窗口的问题。
