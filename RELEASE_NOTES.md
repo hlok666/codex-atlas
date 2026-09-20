@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.50 发布说明
+
+- 修复桌面端点击“激活会话”显示成功但实际没有打开或置前终端窗口的问题。
+- app-server 的 `thread/resume` 只表示后台线程已加载，不再被误判为终端窗口已经打开。
+- 只有成功聚焦已有终端或成功启动新的 `codex resume` 终端后才返回激活成功；启动失败会向界面返回真实错误。
+- 桌面端与 Android App 统一更新至 `0.1.50`，Android `versionCode` 更新为 `45`。
+
 # Codex Atlas 0.1.49 发布说明
 
 - 修复桌面端点击“激活对话”时连接本机 Codex app-server 返回 `401 Unauthorized` 的问题。

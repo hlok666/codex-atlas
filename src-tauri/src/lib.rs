@@ -10207,35 +10207,37 @@ async fn create_codex_session(
     .map_err(|error| format!("create Codex session task failed: {error}"))?
 }
 
+fn ensure_session_terminal_visible<Focus, Launch>(
+    session_running: bool,
+    focus: Focus,
+    launch: Launch,
+) -> Result<(), String>
+where
+    Focus: FnOnce() -> Result<(), String>,
+    Launch: FnOnce() -> Result<(), String>,
+{
+    if session_running && focus().is_ok() {
+        return Ok(());
+    }
+    launch()
+}
+
 #[tauri::command(rename_all = "camelCase")]
 fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Result<bool, String> {
     let session = find_session_for_command(&session_id)?;
     let remote = app_server_remote(&state);
-    if remote.is_some()
-        && app_server_request(
-            &state,
-            "thread/resume",
-            serde_json::json!({"threadId": session.id, "cwd": session.cwd, "excludeTurns": false}),
-        )
-        .is_ok()
-    {
-        return Ok(true);
+    if !session.running {
+        state
+            .failure_counts
+            .lock()
+            .map_err(|_| "process state unavailable".to_string())?
+            .remove(&session_id);
     }
-    if session.running {
-        // Prefer the already-running terminal. If it is hosted by a terminal
-        // tab that Windows no longer exposes, start an exact resume in the
-        // recorded workspace so activation remains a useful user action.
-        if focus_session_terminal(&session).is_err() {
-            launch_codex_resume_terminal(&session, remote.as_ref())?;
-        }
-        return Ok(true);
-    }
-    state
-        .failure_counts
-        .lock()
-        .map_err(|_| "process state unavailable".to_string())?
-        .remove(&session_id);
-    launch_codex_resume_terminal(&session, remote.as_ref())?;
+    ensure_session_terminal_visible(
+        session.running,
+        || focus_session_terminal(&session),
+        || launch_codex_resume_terminal(&session, remote.as_ref()),
+    )?;
     Ok(true)
 }
 
@@ -15437,6 +15439,45 @@ mod runtime_probe_tests {
         assert!(command.contains("--remote 'ws://127.0.0.1:64346'"));
         assert!(command.contains("--remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN"));
         assert!(!command.contains(&remote.auth_token));
+    }
+
+    #[test]
+    fn activation_only_succeeds_after_a_terminal_is_visible() {
+        let focus_calls = std::cell::Cell::new(0);
+        let launch_calls = std::cell::Cell::new(0);
+        ensure_session_terminal_visible(
+            true,
+            || {
+                focus_calls.set(focus_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                launch_calls.set(launch_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("an existing terminal can be focused");
+        assert_eq!(focus_calls.get(), 1);
+        assert_eq!(launch_calls.get(), 0);
+
+        ensure_session_terminal_visible(
+            true,
+            || Err("terminal window not found".to_string()),
+            || {
+                launch_calls.set(launch_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("a missing running terminal is relaunched");
+        assert_eq!(launch_calls.get(), 1);
+
+        let error = ensure_session_terminal_visible(
+            false,
+            || panic!("an exited session must not attempt focus"),
+            || Err("terminal launch failed".to_string()),
+        )
+        .expect_err("activation must report a failed terminal launch");
+        assert_eq!(error, "terminal launch failed");
     }
 
     #[test]
