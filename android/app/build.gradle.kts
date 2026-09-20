@@ -20,8 +20,8 @@ android {
         applicationId = "com.codexatlas.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 43
-        versionName = "0.1.48"
+        versionCode = 44
+        versionName = "0.1.49"
     }
 
     buildFeatures {

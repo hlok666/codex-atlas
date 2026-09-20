@@ -1,3 +1,10 @@
+# Codex Atlas 0.1.49 发布说明
+
+- 修复桌面端点击“激活对话”时连接本机 Codex app-server 返回 `401 Unauthorized` 的问题。
+- 激活、恢复和新建会话现在通过 `--remote-auth-token-env` 安全传递当前 Atlas 实例的 WebSocket capability token，不在命令行中暴露令牌内容。
+- 已对同一本机 app-server 验证：无令牌连接返回 `401`，携带实例令牌可成功建立 WebSocket；新增终端命令回归测试。
+- 桌面端与 Android App 统一更新至 `0.1.49`，Android `versionCode` 更新为 `44`。
+
 # Codex Atlas 0.1.48 发布说明
 
 - Android 会话输入区新增紧凑的会话级模型选择和思考深度选择。

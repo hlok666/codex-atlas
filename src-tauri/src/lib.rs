@@ -79,12 +79,23 @@ impl Default for AppState {
 #[derive(Clone)]
 struct AppServerHandle {
     endpoint: String,
+    auth_token: String,
+    #[cfg(target_os = "macos")]
+    token_path: PathBuf,
     tx: std::sync::mpsc::Sender<AppServerCommand>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
     /// Threads observed on the long-lived app-server connection. A thread can
     /// be idle while its next-turn settings are still mutable, so tracking
     /// only active turns is not enough for an immediate defaults update.
     known_threads: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Clone)]
+struct AppServerRemote {
+    endpoint: String,
+    auth_token: String,
+    #[cfg(target_os = "macos")]
+    token_path: PathBuf,
 }
 
 enum AppServerCommand {
@@ -3980,8 +3991,8 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
                 return;
             }
         };
-        let remote = app_server_endpoint(&app_state);
-        let response = match create_codex_session_sync(request_body, remote.as_deref()) {
+        let remote = app_server_remote(&app_state);
+        let response = match create_codex_session_sync(request_body, remote.as_ref()) {
             Ok(true) => bridge_json_response(&serde_json::json!({"ok": true}), 201),
             Ok(false) => bridge_json_response(&serde_json::json!({"ok": false}), 409),
             Err(error) => {
@@ -4143,8 +4154,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
         } else if session.running {
             send_text_to_terminal(&session, &chunk.text, true)
         } else {
-            match launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
-            {
+            match launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref()) {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -4232,10 +4242,10 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
     let result = if url.ends_with("/activate") {
         if session.running {
             focus_session_terminal(&session).or_else(|_| {
-                launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
+                launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref())
             })
         } else {
-            launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
+            launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref())
         }
     } else {
         let input = request_body
@@ -4258,8 +4268,7 @@ fn handle_mobile_bridge_request(mut request: tiny_http::Request, app_state: AppS
             // terminal is closed; the next resume consumes it.
             Ok(())
         } else if url.ends_with("/message") {
-            match launch_codex_resume_terminal(&session, app_server_endpoint(&app_state).as_deref())
-            {
+            match launch_codex_resume_terminal(&session, app_server_remote(&app_state).as_ref()) {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut queued = false;
@@ -8889,12 +8898,15 @@ fn codex_executable() -> String {
         .unwrap_or_else(|| "codex".to_string())
 }
 
-fn app_server_endpoint(handle: &AppState) -> Option<String> {
-    handle
-        .app_server
-        .lock()
-        .ok()
-        .and_then(|server| server.as_ref().map(|server| server.endpoint.clone()))
+fn app_server_remote(handle: &AppState) -> Option<AppServerRemote> {
+    handle.app_server.lock().ok().and_then(|server| {
+        server.as_ref().map(|server| AppServerRemote {
+            endpoint: server.endpoint.clone(),
+            auth_token: server.auth_token.clone(),
+            #[cfg(target_os = "macos")]
+            token_path: server.token_path.clone(),
+        })
+    })
 }
 
 fn emit_app_server_notification(
@@ -9212,6 +9224,9 @@ fn spawn_app_server_bridge(app: AppHandle) -> Option<AppServerHandle> {
     });
     Some(AppServerHandle {
         endpoint,
+        auth_token,
+        #[cfg(target_os = "macos")]
+        token_path,
         tx,
         active_turns,
         known_threads,
@@ -9786,12 +9801,17 @@ fn codex_queue_receipt(output: &str, thread_id: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn powershell_resume_command(session: &SessionRecord, remote: Option<&str>) -> String {
+fn powershell_resume_command(session: &SessionRecord, remote: Option<&AppServerRemote>) -> String {
     let codex = powershell_single_quote(&codex_executable());
     let session_id = powershell_single_quote(&session.id);
     let cwd = powershell_single_quote(&session.cwd);
     let remote_arg = remote
-        .map(|value| format!(" --remote '{}'", powershell_single_quote(value)))
+        .map(|remote| {
+            format!(
+                " --remote '{}' --remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN",
+                powershell_single_quote(&remote.endpoint)
+            )
+        })
         .unwrap_or_default();
     format!("$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} resume '{session_id}' -C '{cwd}'")
 }
@@ -9799,7 +9819,7 @@ fn powershell_resume_command(session: &SessionRecord, remote: Option<&str>) -> S
 #[cfg(target_os = "windows")]
 fn launch_codex_resume_terminal(
     session: &SessionRecord,
-    remote: Option<&str>,
+    remote: Option<&AppServerRemote>,
 ) -> Result<(), String> {
     if session.cwd.trim().is_empty() || !Path::new(&session.cwd).is_dir() {
         return Err(format!(
@@ -9820,6 +9840,9 @@ fn launch_codex_resume_terminal(
             &script,
         ]);
         command.current_dir(&session.cwd);
+        if let Some(remote) = remote {
+            command.env("CODEX_ATLAS_REMOTE_TOKEN", &remote.auth_token);
+        }
         // Codex refuses to start its interactive TUI when inherited TERM is
         // `dumb` (common when Atlas itself was launched from a CI-like shell).
         // Give the new console a real terminal capability explicitly.
@@ -9850,7 +9873,7 @@ fn launch_codex_resume_terminal(
 #[cfg(target_os = "macos")]
 fn launch_codex_resume_terminal(
     session: &SessionRecord,
-    remote: Option<&str>,
+    remote: Option<&AppServerRemote>,
 ) -> Result<(), String> {
     if session.cwd.trim().is_empty() || !Path::new(&session.cwd).is_dir() {
         return Err(format!(
@@ -9859,10 +9882,23 @@ fn launch_codex_resume_terminal(
         ));
     }
     let remote_arg = remote
-        .map(|value| format!(" --remote '{}'", shell_single_quote(value)))
+        .map(|remote| {
+            format!(
+                " --remote '{}' --remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN",
+                shell_single_quote(&remote.endpoint)
+            )
+        })
+        .unwrap_or_default();
+    let remote_env = remote
+        .map(|remote| {
+            format!(
+                "export CODEX_ATLAS_REMOTE_TOKEN=\"$(cat -- '{}')\" && ",
+                shell_single_quote(&remote.token_path.to_string_lossy())
+            )
+        })
         .unwrap_or_default();
     let command = format!(
-        "cd -- '{}' && export TERM=xterm-256color && '{}'{} resume '{}' -C '{}'",
+        "cd -- '{}' && {remote_env}export TERM=xterm-256color && '{}'{} resume '{}' -C '{}'",
         shell_single_quote(&session.cwd),
         shell_single_quote(&codex_executable()),
         remote_arg,
@@ -9883,7 +9919,7 @@ fn launch_codex_resume_terminal(
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn launch_codex_resume_terminal(
     session: &SessionRecord,
-    remote: Option<&str>,
+    remote: Option<&AppServerRemote>,
 ) -> Result<(), String> {
     if session.cwd.trim().is_empty() || !Path::new(&session.cwd).is_dir() {
         return Err(format!(
@@ -9892,7 +9928,12 @@ fn launch_codex_resume_terminal(
         ));
     }
     let remote_arg = remote
-        .map(|value| format!(" --remote '{}'", shell_single_quote(value)))
+        .map(|remote| {
+            format!(
+                " --remote '{}' --remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN",
+                shell_single_quote(&remote.endpoint)
+            )
+        })
         .unwrap_or_default();
     let command = format!(
         "cd -- '{}' && exec '{}'{} resume '{}' -C '{}'",
@@ -9903,15 +9944,16 @@ fn launch_codex_resume_terminal(
         shell_single_quote(&session.cwd)
     );
     for terminal in ["x-terminal-emulator", "gnome-terminal", "konsole"] {
-        let result = if terminal == "gnome-terminal" {
-            Command::new(terminal)
-                .args(["--", "sh", "-lc", &command])
-                .spawn()
+        let mut terminal_command = Command::new(terminal);
+        if terminal == "gnome-terminal" {
+            terminal_command.args(["--", "sh", "-lc", &command]);
         } else {
-            Command::new(terminal)
-                .args(["-e", "sh", "-lc", &command])
-                .spawn()
-        };
+            terminal_command.args(["-e", "sh", "-lc", &command]);
+        }
+        if let Some(remote) = remote {
+            terminal_command.env("CODEX_ATLAS_REMOTE_TOKEN", &remote.auth_token);
+        }
+        let result = terminal_command.spawn();
         if result.is_ok() {
             return Ok(());
         }
@@ -9950,7 +9992,7 @@ fn normalize_reasoning_effort(value: &str) -> &'static str {
 #[cfg(target_os = "windows")]
 fn launch_codex_new_terminal(
     request: &NewCodexSessionRequest,
-    remote: Option<&str>,
+    remote: Option<&AppServerRemote>,
 ) -> Result<(), String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
@@ -9963,7 +10005,12 @@ fn launch_codex_new_terminal(
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
     let reasoning_effort = normalize_reasoning_effort(&request.reasoning_effort);
     let remote_arg = remote
-        .map(|value| format!(" --remote '{}'", powershell_single_quote(value)))
+        .map(|remote| {
+            format!(
+                " --remote '{}' --remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN",
+                powershell_single_quote(&remote.endpoint)
+            )
+        })
         .unwrap_or_default();
     let mut script = format!(
         "$ErrorActionPreference = 'Continue'; Set-Location -LiteralPath '{cwd}'; & '{codex}'{remote_arg} -c 'approval_policy=\"{approval}\"' -c 'sandbox_mode=\"{sandbox}\"' -c 'model_reasoning_effort=\"{reasoning_effort}\"'",
@@ -9992,6 +10039,9 @@ fn launch_codex_new_terminal(
             &script,
         ]);
         command.current_dir(&request.cwd);
+        if let Some(remote) = remote {
+            command.env("CODEX_ATLAS_REMOTE_TOKEN", &remote.auth_token);
+        }
         command.env_remove("TERM").env("TERM", "xterm-256color");
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x00000010);
@@ -10016,7 +10066,7 @@ fn launch_codex_new_terminal(
 #[cfg(target_os = "macos")]
 fn launch_codex_new_terminal(
     request: &NewCodexSessionRequest,
-    remote: Option<&str>,
+    remote: Option<&AppServerRemote>,
 ) -> Result<(), String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
@@ -10027,10 +10077,23 @@ fn launch_codex_new_terminal(
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
     let reasoning_effort = normalize_reasoning_effort(&request.reasoning_effort);
     let remote_arg = remote
-        .map(|value| format!(" --remote '{}'", shell_single_quote(value)))
+        .map(|remote| {
+            format!(
+                " --remote '{}' --remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN",
+                shell_single_quote(&remote.endpoint)
+            )
+        })
+        .unwrap_or_default();
+    let remote_env = remote
+        .map(|remote| {
+            format!(
+                "export CODEX_ATLAS_REMOTE_TOKEN=\"$(cat -- '{}')\" && ",
+                shell_single_quote(&remote.token_path.to_string_lossy())
+            )
+        })
         .unwrap_or_default();
     let mut command = format!(
-        "cd -- '{}' && export TERM=xterm-256color && '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"' -c 'model_reasoning_effort=\"{}\"'",
+        "cd -- '{}' && {remote_env}export TERM=xterm-256color && '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"' -c 'model_reasoning_effort=\"{}\"'",
         shell_single_quote(&request.cwd),
         shell_single_quote(&codex_executable()),
         remote_arg,
@@ -10061,7 +10124,7 @@ fn launch_codex_new_terminal(
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn launch_codex_new_terminal(
     request: &NewCodexSessionRequest,
-    remote: Option<&str>,
+    remote: Option<&AppServerRemote>,
 ) -> Result<(), String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
@@ -10072,7 +10135,12 @@ fn launch_codex_new_terminal(
     let (approval, sandbox) = codex_permission_overrides(&request.permission);
     let reasoning_effort = normalize_reasoning_effort(&request.reasoning_effort);
     let remote_arg = remote
-        .map(|value| format!(" --remote '{}'", shell_single_quote(value)))
+        .map(|remote| {
+            format!(
+                " --remote '{}' --remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN",
+                shell_single_quote(&remote.endpoint)
+            )
+        })
         .unwrap_or_default();
     let mut command = format!(
         "cd -- '{}' && exec '{}'{} -c 'approval_policy=\"{}\"' -c 'sandbox_mode=\"{}\"' -c 'model_reasoning_effort=\"{}\"'",
@@ -10093,15 +10161,16 @@ fn launch_codex_new_terminal(
         command.push_str(&format!(" '{}'", shell_single_quote(request.prompt.trim())));
     }
     for terminal in ["x-terminal-emulator", "gnome-terminal", "konsole"] {
-        let result = if terminal == "gnome-terminal" {
-            Command::new(terminal)
-                .args(["--", "sh", "-lc", &command])
-                .spawn()
+        let mut terminal_command = Command::new(terminal);
+        if terminal == "gnome-terminal" {
+            terminal_command.args(["--", "sh", "-lc", &command]);
         } else {
-            Command::new(terminal)
-                .args(["-e", "sh", "-lc", &command])
-                .spawn()
-        };
+            terminal_command.args(["-e", "sh", "-lc", &command]);
+        }
+        if let Some(remote) = remote {
+            terminal_command.env("CODEX_ATLAS_REMOTE_TOKEN", &remote.auth_token);
+        }
+        let result = terminal_command.spawn();
         if result.is_ok() {
             return Ok(());
         }
@@ -10111,7 +10180,7 @@ fn launch_codex_new_terminal(
 
 fn create_codex_session_sync(
     request: NewCodexSessionRequest,
-    remote: Option<&str>,
+    remote: Option<&AppServerRemote>,
 ) -> Result<bool, String> {
     if request.cwd.trim().is_empty() || !Path::new(&request.cwd).is_dir() {
         return Err(format!(
@@ -10130,9 +10199,9 @@ async fn create_codex_session(
     state: State<'_, AppState>,
     request: NewCodexSessionRequest,
 ) -> Result<bool, String> {
-    let remote = app_server_endpoint(&state);
+    let remote = app_server_remote(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        create_codex_session_sync(request, remote.as_deref())
+        create_codex_session_sync(request, remote.as_ref())
     })
     .await
     .map_err(|error| format!("create Codex session task failed: {error}"))?
@@ -10141,7 +10210,7 @@ async fn create_codex_session(
 #[tauri::command(rename_all = "camelCase")]
 fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Result<bool, String> {
     let session = find_session_for_command(&session_id)?;
-    let remote = app_server_endpoint(&state);
+    let remote = app_server_remote(&state);
     if remote.is_some()
         && app_server_request(
             &state,
@@ -10157,7 +10226,7 @@ fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Resul
         // tab that Windows no longer exposes, start an exact resume in the
         // recorded workspace so activation remains a useful user action.
         if focus_session_terminal(&session).is_err() {
-            launch_codex_resume_terminal(&session, remote.as_deref())?;
+            launch_codex_resume_terminal(&session, remote.as_ref())?;
         }
         return Ok(true);
     }
@@ -10166,7 +10235,7 @@ fn resume_codex_session(state: State<'_, AppState>, session_id: String) -> Resul
         .lock()
         .map_err(|_| "process state unavailable".to_string())?
         .remove(&session_id);
-    launch_codex_resume_terminal(&session, remote.as_deref())?;
+    launch_codex_resume_terminal(&session, remote.as_ref())?;
     Ok(true)
 }
 
@@ -15328,6 +15397,46 @@ mod runtime_probe_tests {
         assert!(command.contains("Set-Location -LiteralPath 'C:\\work folder\\project''s files'"));
         assert!(command.contains("resume '01a04645-5ce2-7e92-a076-cf4302ed2492'"));
         assert!(command.contains("-C 'C:\\work folder\\project''s files'"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_resume_authenticates_the_remote_app_server() {
+        let session = SessionRecord {
+            id: "01a04645-5ce2-7e92-a076-cf4302ed2492".to_string(),
+            title: "Resume fixture".to_string(),
+            preview: String::new(),
+            cwd: "C:\\work".to_string(),
+            branch: String::new(),
+            model: String::new(),
+            reasoning_effort: "medium".to_string(),
+            model_provider: String::new(),
+            permission: String::new(),
+            updated_at_ms: 0,
+            created_at_ms: 0,
+            rollout_path: String::new(),
+            archived: false,
+            search_text: String::new(),
+            running: false,
+            live_state: String::new(),
+            process_ids: Vec::new(),
+            requires_attention: false,
+            status_source: String::new(),
+            last_event_at_ms: 0,
+            last_error: None,
+            failure_key: None,
+            last_output: None,
+            foreground: false,
+            approval: None,
+        };
+        let remote = AppServerRemote {
+            endpoint: "ws://127.0.0.1:64346".to_string(),
+            auth_token: "must-not-appear-in-command".to_string(),
+        };
+        let command = powershell_resume_command(&session, Some(&remote));
+        assert!(command.contains("--remote 'ws://127.0.0.1:64346'"));
+        assert!(command.contains("--remote-auth-token-env CODEX_ATLAS_REMOTE_TOKEN"));
+        assert!(!command.contains(&remote.auth_token));
     }
 
     #[test]
